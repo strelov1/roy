@@ -6,9 +6,10 @@ use tokio_stream::Stream;
 use crate::error::Result;
 use crate::event::TurnEvent;
 
-pub mod print;
 pub mod acp;
+pub mod print;
 
+pub use acp::{AcpConfig, AcpTransport};
 pub use print::PrintTransport;
 
 /// How bytes move between us and the agent process.
