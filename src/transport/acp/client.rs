@@ -82,7 +82,9 @@ impl JsonRpcClient {
                     .get("result")
                     .map(prompt_result_to_event)
                     .unwrap_or(TurnEvent::Result { cost_usd: None, is_error: true });
-                if let Some(tx) = s.turn_tx.take() {
+                let tx = s.turn_tx.take();
+                drop(s);
+                if let Some(tx) = tx {
                     let _ = tx.send(ev).await;
                 }
             } else if let Some(send) = s.pending.remove(&id) {
@@ -112,8 +114,8 @@ impl JsonRpcClient {
         if method.as_deref() == Some("session/update") {
             if let Some(params) = msg.get("params") {
                 if let Some(ev) = update_to_event(params) {
-                    let s = shared.lock().await;
-                    if let Some(tx) = &s.turn_tx {
+                    let tx = { shared.lock().await.turn_tx.clone() };
+                    if let Some(tx) = tx {
                         let _ = tx.send(ev).await;
                     }
                 }
