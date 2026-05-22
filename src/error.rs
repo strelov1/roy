@@ -13,6 +13,9 @@ pub enum RoyError {
 
     #[error("turn timed out after {0:?}")]
     Timeout(std::time::Duration),
+
+    #[error("protocol error: {0}")]
+    Protocol(String),
 }
 
 pub type Result<T> = std::result::Result<T, RoyError>;
