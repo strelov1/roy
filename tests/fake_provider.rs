@@ -70,3 +70,53 @@ async fn send_streams_until_turn_end() {
 
     handle.close().await.unwrap();
 }
+
+use roy::session::Session;
+
+#[tokio::test]
+async fn session_send_sets_resume_cursor() {
+    let provider: Arc<dyn Provider> = Arc::new(FakeProvider);
+    let transport: Arc<dyn roy::transport::Transport> = Arc::new(PrintTransport::new());
+    let mut session = Session::new(provider, transport, std::env::current_dir().unwrap());
+
+    assert!(session.resume_cursor().is_none());
+
+    let mut events = Vec::new();
+    {
+        let mut stream = session.send("hi").await.unwrap();
+        while let Some(ev) = stream.next().await {
+            events.push(ev);
+        }
+    }
+    assert!(matches!(events.last(), Some(TurnEvent::Result { .. })));
+    // After the first turn the session can be resumed by its own id.
+    assert_eq!(session.resume_cursor(), Some(session.id().to_string()).as_deref());
+
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_existing_session_keeps_id_and_cursor() {
+    let provider: Arc<dyn Provider> = Arc::new(FakeProvider);
+    let transport: Arc<dyn roy::transport::Transport> = Arc::new(PrintTransport::new());
+    // Re-open a session that already exists on disk (e.g. after the host
+    // app restarted). The id is the previously-issued one.
+    let mut session = Session::resume(
+        provider,
+        transport,
+        std::env::current_dir().unwrap(),
+        "prior-session-id".to_string(),
+    );
+    assert_eq!(session.id(), "prior-session-id");
+    assert_eq!(session.resume_cursor(), Some("prior-session-id"));
+
+    let mut events = Vec::new();
+    {
+        let mut stream = session.send("continue").await.unwrap();
+        while let Some(ev) = stream.next().await {
+            events.push(ev);
+        }
+    }
+    assert!(matches!(events.last(), Some(TurnEvent::Result { .. })));
+    session.close().await.unwrap();
+}
