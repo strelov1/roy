@@ -83,3 +83,40 @@ async fn session_via_transport_records_acp_cursor() {
     assert_eq!(session.resume_cursor(), Some("fake-acp-sid"));
     session.close().await.unwrap();
 }
+
+// Real gemini. Ignored by default: needs the `gemini` binary, logged in.
+// Run with: cargo test --test acp_transport -- --ignored real_gemini
+#[tokio::test]
+#[ignore]
+async fn real_gemini_spawn_and_turn() {
+    if which_gemini().is_none() {
+        eprintln!("skipping: gemini not on PATH");
+        return;
+    }
+    let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(AcpConfig::gemini()));
+    let mut session = Session::new(transport, std::env::current_dir().unwrap());
+
+    let mut answer = String::new();
+    {
+        let mut stream = session.send("reply with exactly the word: hello").await.unwrap();
+        while let Some(ev) = stream.next().await {
+            if let TurnEvent::AssistantText { text } = ev {
+                answer.push_str(&text);
+            }
+        }
+    }
+    assert!(answer.to_lowercase().contains("hello"), "got: {answer:?}");
+    assert!(session.resume_cursor().is_some());
+    session.close().await.unwrap();
+}
+
+fn which_gemini() -> Option<()> {
+    std::process::Command::new("gemini")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()
+        .filter(|s| s.success())
+        .map(|_| ())
+}

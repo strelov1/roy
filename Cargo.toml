@@ -21,3 +21,7 @@ futures = "0.3"
 [[example]]
 name = "demo"
 path = "examples/demo.rs"
+
+[[example]]
+name = "demo_gemini"
+path = "examples/demo_gemini.rs"
