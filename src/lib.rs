@@ -5,3 +5,4 @@ pub mod session;
 pub mod transport;
 
 pub use error::{Result, RoyError};
+pub use event::TurnEvent;
