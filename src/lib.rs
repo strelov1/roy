@@ -6,3 +6,4 @@ pub mod transport;
 
 pub use error::{Result, RoyError};
 pub use event::TurnEvent;
+pub use provider::{ClaudeProvider, Provider};
