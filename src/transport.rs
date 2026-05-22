@@ -34,6 +34,9 @@ pub trait Handle: Send {
         &mut self,
         prompt: &str,
     ) -> Result<std::pin::Pin<Box<dyn Stream<Item = TurnEvent> + Send + '_>>>;
+    /// Opaque token to resume THIS session on the next `open`. claude: the
+    /// session id; gemini: the ACP sessionId from session/new.
+    fn resume_cursor(&self) -> Option<String>;
     async fn close(&mut self) -> Result<()>;
 }
 
@@ -95,6 +98,7 @@ impl Transport for PrintTransport {
             stdin,
             rx,
             provider,
+            session_id: session_id.to_string(),
         }))
     }
 }
@@ -104,6 +108,7 @@ pub struct PrintHandle {
     stdin: ChildStdin,
     rx: mpsc::Receiver<TurnEvent>,
     provider: Arc<dyn Provider>,
+    session_id: String,
 }
 
 #[async_trait]
@@ -128,6 +133,10 @@ impl Handle for PrintHandle {
             }
         };
         Ok(Box::pin(stream))
+    }
+
+    fn resume_cursor(&self) -> Option<String> {
+        Some(self.session_id.clone())
     }
 
     async fn close(&mut self) -> Result<()> {

@@ -81,9 +81,8 @@ impl Session {
                     self.cwd.clone(),
                 )
                 .await?;
+            self.resume_cursor = handle.resume_cursor();
             self.handle = Some(handle);
-            // Once a session exists on disk it is resumable by its own id.
-            self.resume_cursor = Some(self.id.clone());
         }
         self.handle.as_mut().unwrap().send(prompt).await
     }
