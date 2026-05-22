@@ -120,3 +120,29 @@ async fn resume_existing_session_keeps_id_and_cursor() {
     assert!(matches!(events.last(), Some(TurnEvent::Result { .. })));
     session.close().await.unwrap();
 }
+
+// Real claude. Ignored by default: needs the `claude` binary and
+// CLAUDE_CODE_OAUTH_TOKEN. Run with: cargo test -- --ignored real_claude
+#[tokio::test]
+#[ignore]
+async fn real_claude_spawn_and_turn() {
+    if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_err() {
+        eprintln!("skipping: CLAUDE_CODE_OAUTH_TOKEN not set");
+        return;
+    }
+    let provider: Arc<dyn Provider> =
+        Arc::new(roy::provider::ClaudeProvider::new(Some("claude-haiku-4-5-20251001".into())));
+    let transport: Arc<dyn roy::transport::Transport> = Arc::new(PrintTransport::new());
+    let mut session = Session::new(provider, transport, std::env::current_dir().unwrap());
+
+    let mut answer = String::new();
+    let mut stream = session.send("reply with exactly: hello").await.unwrap();
+    while let Some(ev) = stream.next().await {
+        if let TurnEvent::AssistantText { text } = ev {
+            answer = text;
+        }
+    }
+    drop(stream);
+    assert_eq!(answer.trim(), "hello");
+    session.close().await.unwrap();
+}
