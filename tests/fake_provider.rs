@@ -27,10 +27,9 @@ impl Provider for FakeProvider {
 
 #[tokio::test]
 async fn open_spawns_process() {
-    let transport = PrintTransport::new();
-    let provider: Arc<dyn Provider> = Arc::new(FakeProvider);
+    let transport = PrintTransport::new(Arc::new(FakeProvider));
     let handle = transport
-        .open(provider, "fake-session", None, std::env::current_dir().unwrap())
+        .open("fake-session", None, std::env::current_dir().unwrap())
         .await
         .expect("open should spawn the fake agent");
     drop(handle);
@@ -40,10 +39,9 @@ use futures::StreamExt;
 
 #[tokio::test]
 async fn send_streams_until_turn_end() {
-    let transport = PrintTransport::new();
-    let provider: Arc<dyn Provider> = Arc::new(FakeProvider);
+    let transport = PrintTransport::new(Arc::new(FakeProvider));
     let mut handle = transport
-        .open(provider, "fake-session", None, std::env::current_dir().unwrap())
+        .open("fake-session", None, std::env::current_dir().unwrap())
         .await
         .unwrap();
 
@@ -75,9 +73,9 @@ use roy::session::Session;
 
 #[tokio::test]
 async fn session_send_sets_resume_cursor() {
-    let provider: Arc<dyn Provider> = Arc::new(FakeProvider);
-    let transport: Arc<dyn roy::transport::Transport> = Arc::new(PrintTransport::new());
-    let mut session = Session::new(provider, transport, std::env::current_dir().unwrap());
+    let transport: Arc<dyn roy::transport::Transport> =
+        Arc::new(PrintTransport::new(Arc::new(FakeProvider)));
+    let mut session = Session::new(transport, std::env::current_dir().unwrap());
 
     assert!(session.resume_cursor().is_none());
 
@@ -97,12 +95,11 @@ async fn session_send_sets_resume_cursor() {
 
 #[tokio::test]
 async fn resume_existing_session_keeps_id_and_cursor() {
-    let provider: Arc<dyn Provider> = Arc::new(FakeProvider);
-    let transport: Arc<dyn roy::transport::Transport> = Arc::new(PrintTransport::new());
+    let transport: Arc<dyn roy::transport::Transport> =
+        Arc::new(PrintTransport::new(Arc::new(FakeProvider)));
     // Re-open a session that already exists on disk (e.g. after the host
     // app restarted). The id is the previously-issued one.
     let mut session = Session::resume(
-        provider,
         transport,
         std::env::current_dir().unwrap(),
         "prior-session-id".to_string(),
@@ -132,8 +129,8 @@ async fn real_claude_spawn_and_turn() {
     }
     let provider: Arc<dyn Provider> =
         Arc::new(roy::provider::ClaudeProvider::new(Some("claude-haiku-4-5-20251001".into())));
-    let transport: Arc<dyn roy::transport::Transport> = Arc::new(PrintTransport::new());
-    let mut session = Session::new(provider, transport, std::env::current_dir().unwrap());
+    let transport: Arc<dyn roy::transport::Transport> = Arc::new(PrintTransport::new(provider));
+    let mut session = Session::new(transport, std::env::current_dir().unwrap());
 
     let mut answer = String::new();
     let mut stream = session.send("reply with exactly: hello").await.unwrap();

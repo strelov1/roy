@@ -7,7 +7,6 @@ use uuid::Uuid;
 
 use crate::error::Result;
 use crate::event::TurnEvent;
-use crate::provider::Provider;
 use crate::transport::{Handle, Transport};
 
 /// A conversation with one agent. Holds identity and the opaque
@@ -17,22 +16,16 @@ pub struct Session {
     id: String,
     cwd: PathBuf,
     resume_cursor: Option<String>,
-    provider: Arc<dyn Provider>,
     transport: Arc<dyn Transport>,
     handle: Option<Box<dyn Handle>>,
 }
 
 impl Session {
-    pub fn new(
-        provider: Arc<dyn Provider>,
-        transport: Arc<dyn Transport>,
-        cwd: PathBuf,
-    ) -> Self {
+    pub fn new(transport: Arc<dyn Transport>, cwd: PathBuf) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             cwd,
             resume_cursor: None,
-            provider,
             transport,
             handle: None,
         }
@@ -41,17 +34,11 @@ impl Session {
     /// Re-open an EXISTING session by its id (e.g. after the host app
     /// restarted). The first `send` will spawn with `--resume <id>` because
     /// `resume_cursor` is pre-seeded.
-    pub fn resume(
-        provider: Arc<dyn Provider>,
-        transport: Arc<dyn Transport>,
-        cwd: PathBuf,
-        session_id: String,
-    ) -> Self {
+    pub fn resume(transport: Arc<dyn Transport>, cwd: PathBuf, session_id: String) -> Self {
         Self {
             id: session_id.clone(),
             cwd,
             resume_cursor: Some(session_id),
-            provider,
             transport,
             handle: None,
         }
@@ -74,12 +61,7 @@ impl Session {
         if self.handle.is_none() {
             let handle = self
                 .transport
-                .open(
-                    Arc::clone(&self.provider),
-                    &self.id,
-                    self.resume_cursor.as_deref(),
-                    self.cwd.clone(),
-                )
+                .open(&self.id, self.resume_cursor.as_deref(), self.cwd.clone())
                 .await?;
             self.resume_cursor = handle.resume_cursor();
             self.handle = Some(handle);

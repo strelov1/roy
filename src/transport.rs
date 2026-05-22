@@ -19,7 +19,6 @@ use crate::provider::Provider;
 pub trait Transport: Send + Sync {
     async fn open(
         &self,
-        provider: Arc<dyn Provider>,
         session_id: &str,
         resume_cursor: Option<&str>,
         cwd: PathBuf,
@@ -40,17 +39,13 @@ pub trait Handle: Send {
     async fn close(&mut self) -> Result<()>;
 }
 
-pub struct PrintTransport;
-
-impl PrintTransport {
-    pub fn new() -> Self {
-        Self
-    }
+pub struct PrintTransport {
+    provider: Arc<dyn Provider>,
 }
 
-impl Default for PrintTransport {
-    fn default() -> Self {
-        Self::new()
+impl PrintTransport {
+    pub fn new(provider: Arc<dyn Provider>) -> Self {
+        Self { provider }
     }
 }
 
@@ -58,11 +53,11 @@ impl Default for PrintTransport {
 impl Transport for PrintTransport {
     async fn open(
         &self,
-        provider: Arc<dyn Provider>,
         session_id: &str,
         resume_cursor: Option<&str>,
         cwd: PathBuf,
     ) -> Result<Box<dyn Handle>> {
+        let provider = Arc::clone(&self.provider);
         let cmd_name = provider.command().to_string();
         let args = provider.spawn_args(session_id, resume_cursor);
 
