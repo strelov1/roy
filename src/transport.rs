@@ -110,10 +110,26 @@ pub struct PrintHandle {
 impl Handle for PrintHandle {
     async fn send(
         &mut self,
-        _prompt: &str,
+        prompt: &str,
     ) -> Result<std::pin::Pin<Box<dyn Stream<Item = TurnEvent> + Send + '_>>> {
-        unimplemented!("Task 6")
+        let line = self.provider.encode_user_message(prompt);
+        self.stdin.write_all(line.as_bytes()).await?;
+        self.stdin.flush().await?;
+
+        let provider = Arc::clone(&self.provider);
+        let rx = &mut self.rx;
+        let stream = async_stream::stream! {
+            while let Some(ev) = rx.recv().await {
+                let end = provider.is_turn_end(&ev);
+                yield ev;
+                if end {
+                    break;
+                }
+            }
+        };
+        Ok(Box::pin(stream))
     }
+
     async fn close(&mut self) -> Result<()> {
         let _ = self.child.start_kill();
         Ok(())
