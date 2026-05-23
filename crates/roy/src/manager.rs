@@ -147,6 +147,58 @@ impl SessionManager {
         crate::journal::ArchivedJournal::open(&self.journal_dir, session_id).await
     }
 
+    /// Resurrect every archived session in this manager's journal_dir at
+    /// once. Returns a vector of `(session_id, error)` for entries that
+    /// failed to resume (e.g. agent binary missing); the rest are now live.
+    /// Used by `Daemon::run_with_opts` when `--resume-all` is set.
+    pub async fn resume_all(
+        &self,
+        broadcast_capacity: usize,
+        mem_capacity: usize,
+    ) -> Vec<(String, Option<RoyError>)> {
+        let ids = match self.list_archived().await {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            match self
+                .resume(&id, broadcast_capacity, mem_capacity)
+                .await
+            {
+                Ok(_) => out.push((id, None)),
+                Err(e) => out.push((id, Some(e))),
+            }
+        }
+        out
+    }
+
+    /// Close every session whose `last_activity` is older than `threshold`.
+    /// Returns the closed session ids.
+    pub async fn sweep_idle(&self, threshold: std::time::Duration) -> Vec<String> {
+        let now = std::time::Instant::now();
+        let to_close: Vec<String> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .iter()
+                .filter_map(|(id, engine)| {
+                    if now.duration_since(engine.last_activity()) >= threshold {
+                        Some(id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let mut closed = Vec::with_capacity(to_close.len());
+        for id in to_close {
+            if self.close(&id).await.is_ok() {
+                closed.push(id);
+            }
+        }
+        closed
+    }
+
     /// Wind down a session: ask it to close and remove it from the registry.
     /// The journal file (and metadata) stay on disk for inspection / resume.
     pub async fn close(&self, id: &str) -> Result<()> {
@@ -199,6 +251,85 @@ mod tests {
     fn tmp_dir() -> PathBuf {
         let n = TMPDIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         std::env::temp_dir().join(format!("roy-manager-test-{}-{n}", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn resume_all_brings_back_closed_sessions() {
+        let dir = tmp_dir();
+        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory));
+
+        // Spawn → close two sessions to populate journals + metadata.
+        let cfg = |suffix: &str| SessionSpawnConfig {
+            agent: format!("agent-{suffix}"),
+            cwd: std::env::current_dir().unwrap(),
+            model: None,
+            permission: None,
+            resume_cursor: None,
+        };
+        let e1 = mgr.spawn(cfg("a"), 256, 1024).await.unwrap();
+        let e2 = mgr.spawn(cfg("b"), 256, 1024).await.unwrap();
+        let id1 = e1.id().to_string();
+        let id2 = e2.id().to_string();
+        mgr.close(&id1).await.unwrap();
+        mgr.close(&id2).await.unwrap();
+        // Brief settle: close is fire-and-forget; the engine actor drops the
+        // input lease and shuts the handle down. We're not racing on that.
+        assert!(mgr.list().await.is_empty());
+
+        // Both ids should now be archived. resume_all brings them back.
+        let mut archived = mgr.list_archived().await.unwrap();
+        archived.sort();
+        let mut expected = vec![id1.clone(), id2.clone()];
+        expected.sort();
+        assert_eq!(archived, expected);
+
+        let results = mgr.resume_all(256, 1024).await;
+        assert_eq!(results.len(), 2);
+        for (_, err) in &results {
+            assert!(err.is_none(), "resume_all failure: {err:?}");
+        }
+        let mut live = mgr.list().await;
+        live.sort();
+        assert_eq!(live, expected);
+
+        for id in &expected {
+            mgr.close(id).await.unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sweep_idle_closes_quiet_sessions() {
+        let dir = tmp_dir();
+        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory));
+
+        let cfg = SessionSpawnConfig {
+            agent: "opencode".into(),
+            cwd: std::env::current_dir().unwrap(),
+            model: None,
+            permission: None,
+            resume_cursor: None,
+        };
+        let engine = mgr.spawn(cfg, 256, 1024).await.unwrap();
+        let id = engine.id().to_string();
+        assert_eq!(mgr.list().await, vec![id.clone()]);
+
+        // Below threshold → nothing closed.
+        let closed = mgr
+            .sweep_idle(std::time::Duration::from_secs(60))
+            .await;
+        assert!(closed.is_empty());
+        assert_eq!(mgr.list().await, vec![id.clone()]);
+
+        // Wait past a small threshold → session is swept.
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let closed = mgr
+            .sweep_idle(std::time::Duration::from_millis(100))
+            .await;
+        assert_eq!(closed, vec![id.clone()]);
+        assert!(mgr.list().await.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

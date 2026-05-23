@@ -73,10 +73,24 @@ impl TransportFactory for DefaultTransportFactory {
     }
 }
 
+/// Options bundle for `Daemon::run_with_opts` — knobs the CLI exposes via
+/// `roy serve` flags. Construct via `Default::default()` and override only
+/// what you need.
+#[derive(Debug, Clone)]
+pub struct ServeOpts {
+    pub socket_path: PathBuf,
+    pub ws_port: Option<u16>,
+    /// Auto-close any session quiet past this threshold. `None` disables GC.
+    pub idle_timeout: Option<std::time::Duration>,
+    /// Resurrect every archived session in `journal_dir` at startup.
+    pub resume_all: bool,
+}
+
 /// The daemon. Holds the shared manager and the transport factory; you can
 /// drive it over a Unix listener (`run_unix`), a TCP-WebSocket listener
 /// (`run_ws`), or pump a single connection by hand (`serve_connection` /
-/// `serve_ws_connection`, useful in tests).
+/// `serve_ws_connection`, useful in tests). High-level entry point is
+/// `run_with_opts`.
 pub struct Daemon {
     pub manager: Arc<SessionManager>,
 }
@@ -85,6 +99,63 @@ impl Daemon {
     pub fn new(journal_dir: PathBuf, factory: Arc<dyn TransportFactory>) -> Self {
         Self {
             manager: Arc::new(SessionManager::new(journal_dir, factory)),
+        }
+    }
+
+    /// High-level entry: resume-all (if requested), spawn the idle-GC task
+    /// (if configured), then run the Unix listener and optionally the WS
+    /// listener concurrently. Returns whichever side errors first; on
+    /// graceful shutdown the calling process exits.
+    pub async fn run_with_opts(self: Arc<Self>, opts: ServeOpts) -> Result<()> {
+        if opts.resume_all {
+            let results = self.manager.resume_all(256, 1024).await;
+            for (id, err) in &results {
+                match err {
+                    None => eprintln!("roy: resumed {id}"),
+                    Some(e) => eprintln!("roy: failed to resume {id}: {e}"),
+                }
+            }
+        }
+        if let Some(threshold) = opts.idle_timeout {
+            let mgr = Arc::clone(&self.manager);
+            let tick = std::cmp::max(threshold / 4, std::time::Duration::from_millis(50));
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tick);
+                interval.set_missed_tick_behavior(
+                    tokio::time::MissedTickBehavior::Delay,
+                );
+                loop {
+                    interval.tick().await;
+                    let closed = mgr.sweep_idle(threshold).await;
+                    for id in closed {
+                        eprintln!("roy: closed idle session {id}");
+                    }
+                }
+            });
+        }
+
+        let unix = {
+            let me = Arc::clone(&self);
+            let path = opts.socket_path.clone();
+            tokio::spawn(async move { me.run_unix(&path).await })
+        };
+        let ws = opts.ws_port.map(|port| {
+            let me = Arc::clone(&self);
+            let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("valid addr");
+            tokio::spawn(async move { me.run_ws(addr).await })
+        });
+
+        match ws {
+            Some(ws_handle) => {
+                let (u, w) = tokio::join!(unix, ws_handle);
+                u.map_err(|e| RoyError::Protocol(e.to_string()))??;
+                w.map_err(|e| RoyError::Protocol(e.to_string()))??;
+                Ok(())
+            }
+            None => unix
+                .await
+                .map_err(|e| RoyError::Protocol(e.to_string()))?
+                .map(|_| ()),
         }
     }
 

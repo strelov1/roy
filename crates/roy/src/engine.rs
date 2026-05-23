@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_stream::{Stream, StreamExt};
@@ -67,6 +68,10 @@ pub struct SessionEngine {
     broadcast_tx: broadcast::Sender<JournalEntry>,
     input_tx: mpsc::UnboundedSender<Cmd>,
     input_lease_held: StdMutex<bool>,
+    /// Wall-clock of the most recent "activity" — either a journal append
+    /// (`publish`) or an incoming prompt (`Cmd::Prompt` arriving at the
+    /// actor). Used by `SessionManager::sweep_idle` to GC quiet sessions.
+    last_activity: StdMutex<Instant>,
 }
 
 enum Cmd {
@@ -132,6 +137,7 @@ impl SessionEngine {
             broadcast_tx,
             input_tx,
             input_lease_held: StdMutex::new(false),
+            last_activity: StdMutex::new(Instant::now()),
         });
 
         // Persist initial metadata so a daemon restart can find this session.
@@ -160,6 +166,15 @@ impl SessionEngine {
 
     pub fn agent(&self) -> &str {
         &self.agent
+    }
+
+    /// Most recent activity timestamp. Used by `SessionManager::sweep_idle`.
+    pub fn last_activity(&self) -> Instant {
+        *self.last_activity.lock().unwrap()
+    }
+
+    fn touch_activity(&self) {
+        *self.last_activity.lock().unwrap() = Instant::now();
     }
 
     pub async fn resume_cursor(&self) -> Option<String> {
@@ -262,6 +277,7 @@ async fn run_actor(
     while let Some(cmd) = input_rx.recv().await {
         match cmd {
             Cmd::Prompt(text) => {
+                engine.touch_activity();
                 drive_turn(&engine, handle.as_mut(), &text).await;
                 if let Some(cursor) = handle.resume_cursor() {
                     *engine.resume_cursor.write().await = Some(cursor);
@@ -299,6 +315,7 @@ async fn drive_turn(engine: &SessionEngine, handle: &mut dyn Handle, text: &str)
 async fn publish(engine: &SessionEngine, event: TurnEvent) -> Result<JournalEntry> {
     let seq = engine.journal.append(event.clone()).await?;
     let entry = JournalEntry { seq, event };
+    engine.touch_activity();
     // No receivers is not an error.
     let _ = engine.broadcast_tx.send(entry.clone());
     Ok(entry)

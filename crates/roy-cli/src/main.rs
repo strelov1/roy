@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context};
 use clap::{Parser, Subcommand};
 use roy::{
     daemon::{Daemon, DefaultTransportFactory},
-    ClientCommand, JournalEntry, ServerEvent, TurnEvent,
+    ClientCommand, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -57,6 +57,12 @@ struct ServeArgs {
     /// Enable WebSocket listener on this port (in addition to the Unix socket).
     #[arg(long)]
     port: Option<u16>,
+    /// On startup, resume every archived session found in journal_dir.
+    #[arg(long)]
+    resume_all: bool,
+    /// Auto-close sessions quiet for more than this many seconds. 0 disables.
+    #[arg(long)]
+    idle_timeout: Option<u64>,
 }
 
 #[derive(clap::Args)]
@@ -167,35 +173,22 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     let journal_dir = args.journal_dir.unwrap_or_else(default_journal_dir);
     let daemon = Arc::new(Daemon::new(journal_dir, Arc::new(DefaultTransportFactory)));
     eprintln!("roy serve: listening on {}", socket.display());
-
-    let unix = {
-        let d = Arc::clone(&daemon);
-        let socket = socket.clone();
-        tokio::spawn(async move { d.run_unix(&socket).await })
-    };
-
-    let ws = args.port.map(|port| {
-        let d = Arc::clone(&daemon);
-        let addr: std::net::SocketAddr =
-            format!("127.0.0.1:{port}").parse().expect("valid socket addr");
-        eprintln!("roy serve: WebSocket on {addr}");
-        tokio::spawn(async move { d.run_ws(addr).await })
-    });
-
-    // If either listener errors out, surface its error and stop.
-    if let Some(ws_handle) = ws {
-        let (unix_res, ws_res) = tokio::join!(unix, ws_handle);
-        unix_res
-            .map_err(|e| anyhow!("unix listener join error: {e}"))?
-            .with_context(|| format!("listening on {}", socket.display()))?;
-        ws_res
-            .map_err(|e| anyhow!("ws listener join error: {e}"))?
-            .context("WebSocket listener")?;
-    } else {
-        unix.await
-            .map_err(|e| anyhow!("unix listener join error: {e}"))?
-            .with_context(|| format!("listening on {}", socket.display()))?;
+    if let Some(port) = args.port {
+        eprintln!("roy serve: WebSocket on 127.0.0.1:{port}");
     }
+    let idle_timeout = args
+        .idle_timeout
+        .filter(|n| *n > 0)
+        .map(std::time::Duration::from_secs);
+    daemon
+        .run_with_opts(ServeOpts {
+            socket_path: socket.clone(),
+            ws_port: args.port,
+            idle_timeout,
+            resume_all: args.resume_all,
+        })
+        .await
+        .with_context(|| format!("listening on {}", socket.display()))?;
     Ok(())
 }
 

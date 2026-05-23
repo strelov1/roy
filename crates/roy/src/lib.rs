@@ -11,7 +11,7 @@ pub mod session_meta;
 pub mod transport;
 
 pub use control::{ClientCommand, ServerEvent};
-pub use daemon::{Daemon, DefaultTransportFactory, TransportFactory};
+pub use daemon::{Daemon, DefaultTransportFactory, ServeOpts, TransportFactory};
 pub use engine::{Attach, EngineOpts, InputLease, SessionEngine, SessionSpawnConfig};
 pub use error::{Result, RoyError};
 pub use event::{event_from_json, event_to_json, StopReason, TurnEvent};
