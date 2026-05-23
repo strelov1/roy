@@ -15,6 +15,8 @@ async-trait = "0.1"
 anyhow = "1"
 thiserror = "2"
 agent-client-protocol = "0.12.1"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 
 [dev-dependencies]
 futures = "0.3"

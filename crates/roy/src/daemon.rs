@@ -1,24 +1,32 @@
 //! `roy serve` daemon: owns one `SessionManager` and serves connections from
-//! triggers (Unix socket today, WebSocket next) speaking the control protocol
-//! defined in `crate::control`.
+//! triggers (Unix socket and WebSocket today, more later) speaking the control
+//! protocol defined in `crate::control`.
 //!
-//! Wire format on Unix socket: one JSON object per line (`\n`-delimited).
-//! Same payload is used over WebSocket frames — only the framing differs.
+//! Wire format is the same JSON payload on both transports. Each transport
+//! gets its own writer task that drains a per-connection `mpsc<ServerEvent>`
+//! and serializes events to its native framing — `\n`-delimited bytes on Unix
+//! socket, `Message::Text` on WebSocket. The command-dispatch loop is shared.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
-use tokio::sync::Mutex;
-use tokio_stream::StreamExt;
+use tokio::net::{TcpListener, UnixListener};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
 use crate::control::{ClientCommand, ServerEvent};
 use crate::engine::InputLease;
 use crate::error::{Result, RoyError};
 use crate::manager::SessionManager;
 use crate::transport::{AcpConfig, AcpTransport, PermissionPolicy, Transport};
+
+/// One queued event for the writer task.
+type EventTx = mpsc::UnboundedSender<ServerEvent>;
 
 /// How the daemon builds a `Transport` from an agent name. Pluggable so the
 /// daemon can be tested against fake agents without touching global state.
@@ -66,8 +74,9 @@ impl TransportFactory for DefaultTransportFactory {
 }
 
 /// The daemon. Holds the shared manager and the transport factory; you can
-/// either drive it over a Unix listener (`run_unix`) or pump a single
-/// connection by hand (`serve_connection`, useful in tests).
+/// drive it over a Unix listener (`run_unix`), a TCP-WebSocket listener
+/// (`run_ws`), or pump a single connection by hand (`serve_connection` /
+/// `serve_ws_connection`, useful in tests).
 pub struct Daemon {
     pub manager: Arc<SessionManager>,
     pub factory: Arc<dyn TransportFactory>,
@@ -81,15 +90,13 @@ impl Daemon {
         }
     }
 
-    /// Listen on a Unix socket, accept connections forever. Single-instance
-    /// guard: if `socket_path` already exists and someone is listening, the
-    /// bind fails — callers should treat that as `already running`.
+    /// Listen on a Unix socket, accept connections forever.
     pub async fn run_unix(self: Arc<Self>, socket_path: &Path) -> Result<()> {
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent).map_err(RoyError::Io)?;
         }
-        // Best-effort cleanup of a stale socket file from a previous run.
-        // The bind itself is the actual single-instance gate.
+        // Best-effort cleanup of a stale socket file from a crashed previous
+        // run. The bind itself is the actual single-instance gate.
         let _ = std::fs::remove_file(socket_path);
         let listener = UnixListener::bind(socket_path).map_err(RoyError::Io)?;
 
@@ -103,14 +110,56 @@ impl Daemon {
         }
     }
 
-    /// Drive one client connection to completion. Used by `run_unix` for each
-    /// accept; also called directly from tests over `tokio::io::duplex`.
+    /// Listen for incoming WebSocket connections on `addr` (e.g. "127.0.0.1:7777").
+    pub async fn run_ws(self: Arc<Self>, addr: SocketAddr) -> Result<()> {
+        let listener = TcpListener::bind(addr).await.map_err(RoyError::Io)?;
+        loop {
+            let (stream, _) = listener.accept().await.map_err(RoyError::Io)?;
+            let me = Arc::clone(&self);
+            tokio::spawn(async move {
+                let ws = match tokio_tungstenite::accept_async(stream).await {
+                    Ok(ws) => ws,
+                    Err(_) => return,
+                };
+                let _ = me.serve_ws_connection(ws).await;
+            });
+        }
+    }
+
+    /// Drive one byte-stream client connection (Unix socket or duplex test).
     pub async fn serve_connection<R, W>(self: &Arc<Self>, reader: R, writer: W) -> Result<()>
     where
         R: AsyncRead + Unpin + Send,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let writer = Arc::new(Mutex::new(writer));
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let writer_handle = tokio::spawn(line_writer_loop(writer, event_rx));
+        let result = self.dispatch_lines(reader, event_tx).await;
+        // event_tx dropped → writer_loop sees None → exits cleanly.
+        let _ = writer_handle.await;
+        result
+    }
+
+    /// Drive one WebSocket client connection.
+    pub async fn serve_ws_connection<S>(
+        self: &Arc<Self>,
+        ws: WebSocketStream<S>,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (ws_sink, ws_stream) = ws.split();
+        let writer_handle = tokio::spawn(ws_writer_loop(ws_sink, event_rx));
+        let result = self.dispatch_ws(ws_stream, event_tx).await;
+        let _ = writer_handle.await;
+        result
+    }
+
+    async fn dispatch_lines<R>(self: &Arc<Self>, reader: R, event_tx: EventTx) -> Result<()>
+    where
+        R: AsyncRead + Unpin + Send,
+    {
         let mut lines = BufReader::new(reader).lines();
         let mut subs: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
         let mut leases: HashMap<String, InputLease> = HashMap::new();
@@ -120,40 +169,81 @@ impl Daemon {
             if line.is_empty() {
                 continue;
             }
-            let cmd: ClientCommand = match serde_json::from_str(line) {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = send(
-                        &writer,
-                        &ServerEvent::Error {
-                            session: None,
-                            code: "bad_request".into(),
-                            message: e.to_string(),
-                        },
-                    )
-                    .await;
-                    continue;
-                }
-            };
-            self.handle(cmd, &writer, &mut subs, &mut leases).await;
+            self.dispatch_one_command(line, &event_tx, &mut subs, &mut leases)
+                .await;
         }
 
         for handle in subs.into_values() {
             handle.abort();
         }
-        // Leases drop automatically here, releasing engine writers.
         Ok(())
     }
 
-    async fn handle<W>(
+    async fn dispatch_ws<S>(
         self: &Arc<Self>,
-        cmd: ClientCommand,
-        writer: &Arc<Mutex<W>>,
+        mut stream: futures_util::stream::SplitStream<WebSocketStream<S>>,
+        event_tx: EventTx,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let mut subs: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+        let mut leases: HashMap<String, InputLease> = HashMap::new();
+
+        while let Some(msg) = stream.next().await {
+            let msg = match msg {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            let text = match msg {
+                Message::Text(t) => t,
+                Message::Close(_) => break,
+                // Ignore binary / ping / pong frames; tungstenite handles
+                // ping/pong itself.
+                _ => continue,
+            };
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            self.dispatch_one_command(text, &event_tx, &mut subs, &mut leases)
+                .await;
+        }
+
+        for handle in subs.into_values() {
+            handle.abort();
+        }
+        Ok(())
+    }
+
+    async fn dispatch_one_command(
+        self: &Arc<Self>,
+        text: &str,
+        event_tx: &EventTx,
         subs: &mut HashMap<String, tokio::task::JoinHandle<()>>,
         leases: &mut HashMap<String, InputLease>,
-    ) where
-        W: AsyncWrite + Unpin + Send + 'static,
-    {
+    ) {
+        let cmd: ClientCommand = match serde_json::from_str(text) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = event_tx.send(ServerEvent::Error {
+                    session: None,
+                    code: "bad_request".into(),
+                    message: e.to_string(),
+                });
+                return;
+            }
+        };
+        self.handle(cmd, event_tx, subs, leases).await;
+    }
+
+    async fn handle(
+        self: &Arc<Self>,
+        cmd: ClientCommand,
+        event_tx: &EventTx,
+        subs: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+        leases: &mut HashMap<String, InputLease>,
+    ) {
         match cmd {
             ClientCommand::Spawn {
                 agent,
@@ -162,7 +252,7 @@ impl Daemon {
                 permission,
                 resume: _,
             } => {
-                // resume not yet wired — we'd need a SessionManager API that
+                // resume not yet wired — needs a SessionManager API that
                 // accepts a resume cursor. Out of scope this iteration.
                 let transport =
                     match self
@@ -171,15 +261,11 @@ impl Daemon {
                     {
                         Ok(t) => t,
                         Err(e) => {
-                            let _ = send(
-                                writer,
-                                &ServerEvent::Error {
-                                    session: None,
-                                    code: "spawn_failed".into(),
-                                    message: e.to_string(),
-                                },
-                            )
-                            .await;
+                            let _ = event_tx.send(ServerEvent::Error {
+                                session: None,
+                                code: "spawn_failed".into(),
+                                message: e.to_string(),
+                            });
                             return;
                         }
                     };
@@ -189,86 +275,63 @@ impl Daemon {
                 let engine = match self.manager.spawn(transport, cwd, 256, 1024).await {
                     Ok(e) => e,
                     Err(e) => {
-                        let _ = send(
-                            writer,
-                            &ServerEvent::Error {
-                                session: None,
-                                code: "spawn_failed".into(),
-                                message: e.to_string(),
-                            },
-                        )
-                        .await;
+                        let _ = event_tx.send(ServerEvent::Error {
+                            session: None,
+                            code: "spawn_failed".into(),
+                            message: e.to_string(),
+                        });
                         return;
                     }
                 };
                 let session = engine.id().to_string();
                 let resume_cursor = engine.resume_cursor().await;
-                let _ = send(
-                    writer,
-                    &ServerEvent::Spawned {
-                        session,
-                        resume_cursor,
-                    },
-                )
-                .await;
+                let _ = event_tx.send(ServerEvent::Spawned {
+                    session,
+                    resume_cursor,
+                });
             }
 
             ClientCommand::Attach { session, from_seq } => {
                 let engine = match self.manager.get(&session).await {
                     Some(e) => e,
                     None => {
-                        let _ = send(
-                            writer,
-                            &ServerEvent::Error {
-                                session: Some(session),
-                                code: "no_session".into(),
-                                message: "no such session".into(),
-                            },
-                        )
-                        .await;
+                        let _ = event_tx.send(ServerEvent::Error {
+                            session: Some(session),
+                            code: "no_session".into(),
+                            message: "no such session".into(),
+                        });
                         return;
                     }
                 };
                 let attach = match engine.attach(from_seq).await {
                     Ok(a) => a,
                     Err(e) => {
-                        let _ = send(
-                            writer,
-                            &ServerEvent::Error {
-                                session: Some(session),
-                                code: "attach_failed".into(),
-                                message: e.to_string(),
-                            },
-                        )
-                        .await;
+                        let _ = event_tx.send(ServerEvent::Error {
+                            session: Some(session),
+                            code: "attach_failed".into(),
+                            message: e.to_string(),
+                        });
                         return;
                     }
                 };
-                let _ = send(
-                    writer,
-                    &ServerEvent::Attached {
-                        session: session.clone(),
-                        seq_at_attach: attach.seq_at_attach,
-                    },
-                )
-                .await;
+                let _ = event_tx.send(ServerEvent::Attached {
+                    session: session.clone(),
+                    seq_at_attach: attach.seq_at_attach,
+                });
                 if let Some(prev) = subs.remove(&session) {
                     prev.abort();
                 }
-                let writer_for_pump = Arc::clone(writer);
+                let event_tx_for_pump = event_tx.clone();
                 let session_for_pump = session.clone();
                 let mut stream = attach.stream;
                 let handle = tokio::spawn(async move {
                     while let Some(entry) = stream.next().await {
-                        if send(
-                            &writer_for_pump,
-                            &ServerEvent::Frame {
+                        if event_tx_for_pump
+                            .send(ServerEvent::Frame {
                                 session: session_for_pump.clone(),
                                 entry,
-                            },
-                        )
-                        .await
-                        .is_err()
+                            })
+                            .is_err()
                         {
                             break;
                         }
@@ -281,15 +344,11 @@ impl Daemon {
                 let engine = match self.manager.get(&session).await {
                     Some(e) => e,
                     None => {
-                        let _ = send(
-                            writer,
-                            &ServerEvent::Error {
-                                session: Some(session),
-                                code: "no_session".into(),
-                                message: "no such session".into(),
-                            },
-                        )
-                        .await;
+                        let _ = event_tx.send(ServerEvent::Error {
+                            session: Some(session),
+                            code: "no_session".into(),
+                            message: "no such session".into(),
+                        });
                         return;
                     }
                 };
@@ -300,45 +359,37 @@ impl Daemon {
                     }
                     None => false,
                 };
-                let _ = send(writer, &ServerEvent::InputAcquired { session, acquired }).await;
+                let _ = event_tx.send(ServerEvent::InputAcquired { session, acquired });
             }
 
             ClientCommand::Send { session, text } => {
                 let Some(lease) = leases.get(&session) else {
-                    let _ = send(
-                        writer,
-                        &ServerEvent::Error {
-                            session: Some(session),
-                            code: "no_lease".into(),
-                            message: "input lease not held by this connection".into(),
-                        },
-                    )
-                    .await;
+                    let _ = event_tx.send(ServerEvent::Error {
+                        session: Some(session),
+                        code: "no_lease".into(),
+                        message: "input lease not held by this connection".into(),
+                    });
                     return;
                 };
                 if let Err(e) = lease.send(text) {
-                    let _ = send(
-                        writer,
-                        &ServerEvent::Error {
-                            session: Some(session),
-                            code: "send_failed".into(),
-                            message: e.to_string(),
-                        },
-                    )
-                    .await;
+                    let _ = event_tx.send(ServerEvent::Error {
+                        session: Some(session),
+                        code: "send_failed".into(),
+                        message: e.to_string(),
+                    });
                 }
             }
 
             ClientCommand::ReleaseInput { session } => {
                 leases.remove(&session);
-                let _ = send(writer, &ServerEvent::InputReleased { session }).await;
+                let _ = event_tx.send(ServerEvent::InputReleased { session });
             }
 
             ClientCommand::Detach { session } => {
                 if let Some(h) = subs.remove(&session) {
                     h.abort();
                 }
-                let _ = send(writer, &ServerEvent::Detached { session }).await;
+                let _ = event_tx.send(ServerEvent::Detached { session });
             }
 
             ClientCommand::Close { session } => {
@@ -347,38 +398,61 @@ impl Daemon {
                     h.abort();
                 }
                 if let Err(e) = self.manager.close(&session).await {
-                    let _ = send(
-                        writer,
-                        &ServerEvent::Error {
-                            session: Some(session),
-                            code: "close_failed".into(),
-                            message: e.to_string(),
-                        },
-                    )
-                    .await;
+                    let _ = event_tx.send(ServerEvent::Error {
+                        session: Some(session),
+                        code: "close_failed".into(),
+                        message: e.to_string(),
+                    });
                 } else {
-                    let _ = send(writer, &ServerEvent::Closed { session }).await;
+                    let _ = event_tx.send(ServerEvent::Closed { session });
                 }
             }
 
             ClientCommand::List => {
                 let sessions = self.manager.list().await;
-                let _ = send(writer, &ServerEvent::Listed { sessions }).await;
+                let _ = event_tx.send(ServerEvent::Listed { sessions });
             }
         }
     }
 }
 
-async fn send<W>(writer: &Arc<Mutex<W>>, event: &ServerEvent) -> Result<()>
+async fn line_writer_loop<W>(mut writer: W, mut rx: mpsc::UnboundedReceiver<ServerEvent>)
 where
-    W: AsyncWrite + Unpin + Send,
+    W: AsyncWrite + Unpin,
 {
-    let line = serde_json::to_string(event).map_err(|e| RoyError::Protocol(e.to_string()))?;
-    let mut w = writer.lock().await;
-    w.write_all(line.as_bytes()).await.map_err(RoyError::Io)?;
-    w.write_all(b"\n").await.map_err(RoyError::Io)?;
-    w.flush().await.map_err(RoyError::Io)?;
-    Ok(())
+    while let Some(event) = rx.recv().await {
+        let json = match serde_json::to_string(&event) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        if writer.write_all(json.as_bytes()).await.is_err() {
+            break;
+        }
+        if writer.write_all(b"\n").await.is_err() {
+            break;
+        }
+        if writer.flush().await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn ws_writer_loop<S>(
+    mut sink: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
+    mut rx: mpsc::UnboundedReceiver<ServerEvent>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    while let Some(event) = rx.recv().await {
+        let json = match serde_json::to_string(&event) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        if sink.send(Message::Text(json.into())).await.is_err() {
+            break;
+        }
+    }
+    let _ = sink.close().await;
 }
 
 #[cfg(test)]
@@ -387,8 +461,8 @@ mod tests {
     use crate::event::{StopReason, TurnEvent};
     use std::time::Duration;
 
-    /// Test factory that ignores agent/model/permission and always builds the
-    /// fake ACP agent.
+    /// Test factory: ignores agent/model/permission and always builds the fake
+    /// ACP agent.
     struct FakeAcpFactory;
     impl TransportFactory for FakeAcpFactory {
         fn build(
@@ -414,8 +488,21 @@ mod tests {
         std::env::temp_dir().join(format!("roy-daemon-test-{}-{n}", std::process::id()))
     }
 
-    /// End-to-end through the daemon over an in-memory duplex pipe:
-    /// spawn → attach → acquire_input → send → drain frames until Result.
+    async fn send_cmd_line<W: AsyncWrite + Unpin>(w: &mut W, cmd: &ClientCommand) {
+        let line = serde_json::to_string(cmd).unwrap();
+        w.write_all(line.as_bytes()).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        w.flush().await.unwrap();
+    }
+
+    async fn next_event_line<R: AsyncRead + Unpin>(
+        lines: &mut tokio::io::Lines<BufReader<R>>,
+    ) -> ServerEvent {
+        let line = lines.next_line().await.unwrap().expect("server hung up");
+        serde_json::from_str(line.trim()).unwrap()
+    }
+
+    /// End-to-end through the daemon over an in-memory duplex pipe.
     #[tokio::test]
     async fn spawn_attach_send_round_trip_over_duplex() {
         let dir = tmp_dir();
@@ -433,22 +520,7 @@ mod tests {
         let (client_rd, mut client_wr) = tokio::io::split(client_side);
         let mut events = BufReader::new(client_rd).lines();
 
-        async fn send_cmd<W: AsyncWrite + Unpin>(w: &mut W, cmd: &ClientCommand) {
-            let line = serde_json::to_string(cmd).unwrap();
-            w.write_all(line.as_bytes()).await.unwrap();
-            w.write_all(b"\n").await.unwrap();
-            w.flush().await.unwrap();
-        }
-
-        async fn next_event<R: AsyncRead + Unpin>(
-            lines: &mut tokio::io::Lines<BufReader<R>>,
-        ) -> ServerEvent {
-            let line = lines.next_line().await.unwrap().expect("server hung up");
-            serde_json::from_str(line.trim()).unwrap()
-        }
-
-        // 1. spawn
-        send_cmd(
+        send_cmd_line(
             &mut client_wr,
             &ClientCommand::Spawn {
                 agent: "opencode".into(),
@@ -459,13 +531,12 @@ mod tests {
             },
         )
         .await;
-        let session = match next_event(&mut events).await {
+        let session = match next_event_line(&mut events).await {
             ServerEvent::Spawned { session, .. } => session,
             other => panic!("expected Spawned, got {other:?}"),
         };
 
-        // 2. attach
-        send_cmd(
+        send_cmd_line(
             &mut client_wr,
             &ClientCommand::Attach {
                 session: session.clone(),
@@ -473,26 +544,24 @@ mod tests {
             },
         )
         .await;
-        match next_event(&mut events).await {
+        match next_event_line(&mut events).await {
             ServerEvent::Attached { .. } => {}
             other => panic!("expected Attached, got {other:?}"),
         }
 
-        // 3. acquire input
-        send_cmd(
+        send_cmd_line(
             &mut client_wr,
             &ClientCommand::AcquireInput {
                 session: session.clone(),
             },
         )
         .await;
-        match next_event(&mut events).await {
+        match next_event_line(&mut events).await {
             ServerEvent::InputAcquired { acquired: true, .. } => {}
             other => panic!("expected InputAcquired{{acquired:true}}, got {other:?}"),
         }
 
-        // 4. send
-        send_cmd(
+        send_cmd_line(
             &mut client_wr,
             &ClientCommand::Send {
                 session: session.clone(),
@@ -501,11 +570,10 @@ mod tests {
         )
         .await;
 
-        // 5. drain Frame events until terminal Result
         let mut got_text = false;
         let mut got_result_end_turn = false;
         for _ in 0..32 {
-            let ev = next_event(&mut events).await;
+            let ev = next_event_line(&mut events).await;
             if let ServerEvent::Frame { entry, .. } = ev {
                 match entry.event {
                     TurnEvent::AssistantText { ref text } if text == "ack" => got_text = true,
@@ -523,24 +591,148 @@ mod tests {
         assert!(got_text, "expected an 'ack' AssistantText frame");
         assert!(got_result_end_turn, "expected a terminal Result{{EndTurn}}");
 
-        // 6. close
-        send_cmd(
+        send_cmd_line(
             &mut client_wr,
             &ClientCommand::Close {
                 session: session.clone(),
             },
         )
         .await;
-        match next_event(&mut events).await {
+        match next_event_line(&mut events).await {
             ServerEvent::Closed { .. } => {}
             other => panic!("expected Closed, got {other:?}"),
         }
 
-        // Hang up; the server task should finish cleanly.
         drop(client_wr);
         drop(events);
         let _ = serve_handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
+    /// End-to-end through the daemon over a real TCP WebSocket. Validates
+    /// that the same control protocol works over WS framing.
+    #[tokio::test]
+    async fn spawn_attach_send_round_trip_over_websocket() {
+        let dir = tmp_dir();
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let _ = d.serve_ws_connection(ws).await;
+            })
+        };
+
+        let url = format!("ws://{addr}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        async fn ws_send(
+            ws: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            cmd: &ClientCommand,
+        ) {
+            let json = serde_json::to_string(cmd).unwrap();
+            ws.send(Message::Text(json.into())).await.unwrap();
+        }
+        async fn ws_recv(
+            ws: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        ) -> ServerEvent {
+            loop {
+                let msg = ws.next().await.expect("ws closed").unwrap();
+                if let Message::Text(text) = msg {
+                    return serde_json::from_str(text.as_str()).unwrap();
+                }
+            }
+        }
+
+        ws_send(
+            &mut ws,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                cwd: Some(std::env::current_dir().unwrap().to_string_lossy().into()),
+                model: None,
+                permission: None,
+                resume: None,
+            },
+        )
+        .await;
+        let session = match ws_recv(&mut ws).await {
+            ServerEvent::Spawned { session, .. } => session,
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+
+        ws_send(
+            &mut ws,
+            &ClientCommand::Attach {
+                session: session.clone(),
+                from_seq: None,
+            },
+        )
+        .await;
+        match ws_recv(&mut ws).await {
+            ServerEvent::Attached { .. } => {}
+            other => panic!("expected Attached, got {other:?}"),
+        }
+
+        ws_send(
+            &mut ws,
+            &ClientCommand::AcquireInput {
+                session: session.clone(),
+            },
+        )
+        .await;
+        match ws_recv(&mut ws).await {
+            ServerEvent::InputAcquired { acquired: true, .. } => {}
+            other => panic!("expected InputAcquired, got {other:?}"),
+        }
+
+        ws_send(
+            &mut ws,
+            &ClientCommand::Send {
+                session: session.clone(),
+                text: "hello".into(),
+            },
+        )
+        .await;
+
+        let mut got_end_turn = false;
+        for _ in 0..32 {
+            if let ServerEvent::Frame { entry, .. } = ws_recv(&mut ws).await {
+                if matches!(
+                    entry.event,
+                    TurnEvent::Result {
+                        stop_reason: StopReason::EndTurn,
+                        ..
+                    }
+                ) {
+                    got_end_turn = true;
+                    break;
+                }
+            }
+        }
+        assert!(got_end_turn, "expected terminal Result{{EndTurn}} over WS");
+
+        ws_send(
+            &mut ws,
+            &ClientCommand::Close {
+                session: session.clone(),
+            },
+        )
+        .await;
+        match ws_recv(&mut ws).await {
+            ServerEvent::Closed { .. } => {}
+            other => panic!("expected Closed, got {other:?}"),
+        }
+
+        let _ = ws.close(None).await;
+        let _ = server_task.await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -42,6 +42,9 @@ struct ServeArgs {
     socket: Option<PathBuf>,
     #[arg(long)]
     journal_dir: Option<PathBuf>,
+    /// Enable WebSocket listener on this port (in addition to the Unix socket).
+    #[arg(long)]
+    port: Option<u16>,
 }
 
 #[derive(clap::Args)]
@@ -134,10 +137,35 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     let journal_dir = args.journal_dir.unwrap_or_else(default_journal_dir);
     let daemon = Arc::new(Daemon::new(journal_dir, Arc::new(DefaultTransportFactory)));
     eprintln!("roy serve: listening on {}", socket.display());
-    daemon
-        .run_unix(&socket)
-        .await
-        .with_context(|| format!("listening on {}", socket.display()))?;
+
+    let unix = {
+        let d = Arc::clone(&daemon);
+        let socket = socket.clone();
+        tokio::spawn(async move { d.run_unix(&socket).await })
+    };
+
+    let ws = args.port.map(|port| {
+        let d = Arc::clone(&daemon);
+        let addr: std::net::SocketAddr =
+            format!("127.0.0.1:{port}").parse().expect("valid socket addr");
+        eprintln!("roy serve: WebSocket on {addr}");
+        tokio::spawn(async move { d.run_ws(addr).await })
+    });
+
+    // If either listener errors out, surface its error and stop.
+    if let Some(ws_handle) = ws {
+        let (unix_res, ws_res) = tokio::join!(unix, ws_handle);
+        unix_res
+            .map_err(|e| anyhow!("unix listener join error: {e}"))?
+            .with_context(|| format!("listening on {}", socket.display()))?;
+        ws_res
+            .map_err(|e| anyhow!("ws listener join error: {e}"))?
+            .context("WebSocket listener")?;
+    } else {
+        unix.await
+            .map_err(|e| anyhow!("unix listener join error: {e}"))?
+            .with_context(|| format!("listening on {}", socket.display()))?;
+    }
     Ok(())
 }
 
