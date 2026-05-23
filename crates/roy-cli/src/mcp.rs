@@ -202,6 +202,23 @@ fn tools_list() -> Value {
                     "required": ["session"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "roy_fire",
+                "description": "One-shot: Spawn (or Resume) a session, send a prompt, wait for the terminal Result. Returns assistant_text + stop_reason. Pass `resume` to reuse an existing session id, otherwise pass `agent` (and optional `cwd`).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
+                        "cwd": {"type": "string"},
+                        "resume": {"type": "string", "description": "Existing roy session id to resume into."},
+                        "prompt": {"type": "string"},
+                        "tags": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "timeout_ms": {"type": "integer", "minimum": 1}
+                    },
+                    "required": ["prompt"],
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -221,6 +238,7 @@ async fn tools_call(id: Value, req: &Value, socket_path: &Path) -> Value {
         "roy_close" => tool_close(socket_path, args).await,
         "roy_set_tags" => tool_set_tags(socket_path, args).await,
         "roy_wait_for_result" => tool_wait_for_result(socket_path, args).await,
+        "roy_fire" => tool_fire(socket_path, args).await,
         other => Err(anyhow!("unknown tool: {other}")),
     };
 
@@ -448,6 +466,98 @@ async fn tool_wait_for_result(socket_path: &Path, args: Value) -> anyhow::Result
         ServerEvent::Error { code, message, .. } => {
             Err(anyhow!("wait_for_result failed: {code}: {message}"))
         }
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
+}
+
+async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
+    use roy::FireTarget;
+
+    let prompt = args
+        .get("prompt")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing 'prompt'"))?
+        .to_string();
+    let agent = args.get("agent").and_then(Value::as_str);
+    let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_string);
+    let resume = args.get("resume").and_then(Value::as_str);
+    let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64);
+
+    let target = match (agent, resume) {
+        (Some(a), None) => FireTarget::Spawn {
+            preset: a.to_string(),
+            cwd,
+        },
+        (None, Some(sid)) => FireTarget::Resume {
+            session_id: sid.to_string(),
+        },
+        (Some(_), Some(_)) => return Err(anyhow!("`agent` and `resume` are mutually exclusive")),
+        (None, None) => return Err(anyhow!("provide either `agent` or `resume`")),
+    };
+
+    let mut tags = BTreeMap::new();
+    if let Some(obj) = args.get("tags").and_then(Value::as_object) {
+        for (k, v) in obj {
+            let val = v
+                .as_str()
+                .ok_or_else(|| anyhow!("tag value for `{k}` must be string"))?;
+            tags.insert(k.clone(), val.to_string());
+        }
+    }
+
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Fire {
+            target,
+            prompt,
+            tags,
+            timeout_ms,
+        },
+    )
+    .await?;
+
+    match next_event(&mut lines).await? {
+        ServerEvent::FireDone {
+            session,
+            seq_range,
+            result,
+            assistant_text,
+        } => {
+            let TurnEvent::Result {
+                cost_usd,
+                stop_reason,
+            } = result
+            else {
+                return Err(anyhow!("non-Result in FireDone"));
+            };
+            Ok(serde_json::to_string(&json!({
+                "type": "fire_done",
+                "session": session,
+                "seq_range": seq_range,
+                "stop_reason": format!("{stop_reason:?}"),
+                "cost_usd": cost_usd,
+                "assistant_text": assistant_text,
+            }))?)
+        }
+        ServerEvent::FireTimeout {
+            session,
+            partial_seq_range,
+        } => Ok(serde_json::to_string(&json!({
+            "type": "fire_timeout",
+            "session": session,
+            "partial_seq_range": partial_seq_range,
+        }))?),
+        ServerEvent::FireError {
+            session,
+            code,
+            message,
+        } => Ok(serde_json::to_string(&json!({
+            "type": "fire_error",
+            "session": session,
+            "code": code.to_string(),
+            "message": message,
+        }))?),
         other => Err(anyhow!("unexpected response: {other:?}")),
     }
 }
@@ -759,6 +869,7 @@ mod tests {
                 "roy_close",
                 "roy_set_tags",
                 "roy_wait_for_result",
+                "roy_fire",
             ]
         );
     }
