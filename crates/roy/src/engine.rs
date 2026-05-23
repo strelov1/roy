@@ -166,6 +166,13 @@ impl SessionEngine {
         self.resume_cursor.read().await.clone()
     }
 
+    /// Read-only journal snapshot of this live session. Same disk read as
+    /// `ArchivedJournal::replay_from`, but available on live sessions too
+    /// without subscribing to the broadcast — for poll-style clients.
+    pub async fn snapshot(&self, from_seq: Seq) -> Result<Vec<JournalEntry>> {
+        self.journal.replay_from(from_seq).await
+    }
+
     /// Subscribe an observer. Race-free: subscribes to live broadcast first,
     /// then reads journal up to that point, then yields the splice.
     pub async fn attach(&self, from_seq: Option<Seq>) -> Result<Attach> {

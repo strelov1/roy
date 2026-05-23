@@ -56,6 +56,17 @@ pub enum ClientCommand {
     /// journal, and forwards the stored cursor to `Transport::open` for the
     /// agent-side resume (e.g. ACP `session/load`).
     Resume { session: String },
+    /// Snapshot read of a session's journal — works on live AND archived
+    /// sessions. Unlike `Attach`, it does not subscribe to the live broadcast;
+    /// the daemon returns the current journal slice and the client decides
+    /// when to call again. Useful for polling.
+    ReadJournal {
+        session: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_seq: Option<Seq>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_entries: Option<usize>,
+    },
 }
 
 /// Events sent from the daemon back to a trigger client. `session` ties an
@@ -94,6 +105,17 @@ pub enum ServerEvent {
         session: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_cursor: Option<String>,
+    },
+    /// Response to `ReadJournal`: the requested slice of the journal.
+    /// `next_seq` is the seq the client should pass to its next `ReadJournal`
+    /// to continue from where this one stopped.
+    JournalRead {
+        session: String,
+        entries: Vec<JournalEntry>,
+        next_seq: Seq,
+        /// `true` if the snapshot was truncated by `max_entries` — more
+        /// entries are already on disk waiting for a follow-up read.
+        has_more: bool,
     },
     /// A command failed; if `session` is `Some`, the error pertains to that
     /// session.

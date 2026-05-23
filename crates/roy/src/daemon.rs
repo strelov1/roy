@@ -477,6 +477,48 @@ impl Daemon {
                 let _ = event_tx.send(ServerEvent::Listed { sessions });
             }
 
+            ClientCommand::ReadJournal {
+                session,
+                from_seq,
+                max_entries,
+            } => {
+                let from = from_seq.unwrap_or(0);
+                // Live session takes precedence; fall back to archive on miss.
+                let read_result = if let Some(engine) = self.manager.get(&session).await {
+                    engine.snapshot(from).await
+                } else {
+                    match self.manager.open_archive(&session).await {
+                        Ok(archive) => archive.replay_from(from).await,
+                        Err(e) => Err(e),
+                    }
+                };
+                match read_result {
+                    Ok(mut entries) => {
+                        let has_more = max_entries
+                            .map(|n| entries.len() > n)
+                            .unwrap_or(false);
+                        if let Some(n) = max_entries {
+                            entries.truncate(n);
+                        }
+                        let next_seq =
+                            entries.last().map(|e| e.seq + 1).unwrap_or(from);
+                        let _ = event_tx.send(ServerEvent::JournalRead {
+                            session,
+                            entries,
+                            next_seq,
+                            has_more,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(ServerEvent::Error {
+                            session: Some(session),
+                            code: "read_journal_failed".into(),
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+
             ClientCommand::ListArchived => {
                 match self.manager.list_archived().await {
                     Ok(sessions) => {
@@ -810,6 +852,156 @@ mod tests {
             }
         }
         assert!(saw_result, "archive replay must include the terminal Result");
+
+        drop(client_wr);
+        drop(events);
+        let _ = serve_handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `ReadJournal` returns a snapshot of the journal for a live session,
+    /// honours `from_seq` / `max_entries`, and reports `has_more` when
+    /// truncated.
+    #[tokio::test]
+    async fn read_journal_snapshot_paginates_a_live_session() {
+        let dir = tmp_dir();
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let serve_handle = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        // Spawn + drive one full turn so the journal has several entries.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                cwd: Some(std::env::current_dir().unwrap().to_string_lossy().into()),
+                model: None,
+                permission: None,
+                resume: None,
+            },
+        )
+        .await;
+        let session = match next_event_line(&mut events).await {
+            ServerEvent::Spawned { session, .. } => session,
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Attach {
+                session: session.clone(),
+                from_seq: None,
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut events).await; // Attached
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::AcquireInput {
+                session: session.clone(),
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut events).await; // InputAcquired
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Send {
+                session: session.clone(),
+                text: "hello".into(),
+            },
+        )
+        .await;
+        let mut total = 0;
+        loop {
+            if let ServerEvent::Frame { entry, .. } = next_event_line(&mut events).await {
+                total += 1;
+                if matches!(entry.event, TurnEvent::Result { .. }) {
+                    break;
+                }
+            }
+        }
+        assert!(total >= 2, "fake should emit at least one chunk + result");
+
+        // 1. ReadJournal from 0, no max — returns the whole journal.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::ReadJournal {
+                session: session.clone(),
+                from_seq: None,
+                max_entries: None,
+            },
+        )
+        .await;
+        let (all_entries, next_seq, has_more) = match next_event_line(&mut events).await {
+            ServerEvent::JournalRead {
+                entries,
+                next_seq,
+                has_more,
+                ..
+            } => (entries, next_seq, has_more),
+            other => panic!("expected JournalRead, got {other:?}"),
+        };
+        assert_eq!(all_entries.len(), total);
+        assert!(!has_more);
+        assert_eq!(next_seq, total as u64);
+
+        // 2. max_entries=1 truncates and sets has_more.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::ReadJournal {
+                session: session.clone(),
+                from_seq: Some(0),
+                max_entries: Some(1),
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::JournalRead {
+                entries,
+                next_seq,
+                has_more,
+                ..
+            } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].seq, 0);
+                assert_eq!(next_seq, 1);
+                assert!(has_more, "max_entries truncation must set has_more");
+            }
+            other => panic!("expected JournalRead, got {other:?}"),
+        }
+
+        // 3. from_seq past the end returns empty slice with next_seq == from_seq.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::ReadJournal {
+                session: session.clone(),
+                from_seq: Some(total as u64),
+                max_entries: None,
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::JournalRead {
+                entries,
+                next_seq,
+                has_more,
+                ..
+            } => {
+                assert!(entries.is_empty());
+                assert_eq!(next_seq, total as u64);
+                assert!(!has_more);
+            }
+            other => panic!("expected JournalRead, got {other:?}"),
+        }
 
         drop(client_wr);
         drop(events);

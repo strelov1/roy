@@ -139,6 +139,37 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "roy_run_detached",
+                "description": "Spawn an agent session, queue a task, and return immediately with the new session id. The session keeps running on the daemon — use roy_read_session to poll its progress and roy_close when done. Use this for long-running background tasks.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent": {"type": "string", "enum": ["claude_agent", "gemini", "opencode", "codex"]},
+                        "task": {"type": "string"},
+                        "cwd": {"type": "string"},
+                        "model": {"type": "string"},
+                        "permission": {"type": "string", "enum": ["allow", "deny"]},
+                        "resume": {"type": "string"}
+                    },
+                    "required": ["agent", "task"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "roy_read_session",
+                "description": "Snapshot read of a session's journal (live OR archived). Returns assistant text, tool calls, and stop reasons between `from_seq` and `next_seq`. Call again with the returned next_seq to keep polling. `max_entries` bounds the slice size; if truncated, `has_more` is true.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session": {"type": "string"},
+                        "from_seq": {"type": "integer", "minimum": 0},
+                        "max_entries": {"type": "integer", "minimum": 1}
+                    },
+                    "required": ["session"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "roy_close",
                 "description": "Ask the daemon to close a live session.",
                 "inputSchema": {
@@ -161,6 +192,8 @@ async fn tools_call(id: Value, req: &Value, socket_path: &PathBuf) -> Value {
         "roy_list_sessions" => tool_list(socket_path, false).await,
         "roy_list_archived" => tool_list(socket_path, true).await,
         "roy_run" => tool_run(socket_path, args).await,
+        "roy_run_detached" => tool_run_detached(socket_path, args).await,
+        "roy_read_session" => tool_read_session(socket_path, args).await,
         "roy_close" => tool_close(socket_path, args).await,
         other => Err(anyhow!("unknown tool: {other}")),
     };
@@ -378,6 +411,159 @@ async fn tool_run(socket_path: &PathBuf, args: Value) -> anyhow::Result<String> 
     let _ = next_event(&mut lines).await;
 
     Ok(format!("{text}\n[stop_reason: {stop_reason}]"))
+}
+
+async fn tool_run_detached(socket_path: &PathBuf, args: Value) -> anyhow::Result<String> {
+    let agent = args
+        .get("agent")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing 'agent'"))?
+        .to_string();
+    let task = args
+        .get("task")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing 'task'"))?
+        .to_string();
+    let cwd = args.get("cwd").and_then(Value::as_str).map(|s| s.to_string());
+    let model = args.get("model").and_then(Value::as_str).map(|s| s.to_string());
+    let permission = args
+        .get("permission")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let resume = args.get("resume").and_then(Value::as_str).map(|s| s.to_string());
+
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Spawn {
+            agent,
+            cwd,
+            model,
+            permission,
+            resume,
+        },
+    )
+    .await?;
+    let (session, resume_cursor) = match next_event(&mut lines).await? {
+        ServerEvent::Spawned {
+            session,
+            resume_cursor,
+        } => (session, resume_cursor),
+        ServerEvent::Error { code, message, .. } => {
+            return Err(anyhow!("spawn failed: {code}: {message}"))
+        }
+        other => return Err(anyhow!("unexpected response: {other:?}")),
+    };
+
+    // Acquire + send so the prompt is queued before we drop the lease.
+    send_cmd(
+        &mut writer,
+        &ClientCommand::AcquireInput {
+            session: session.clone(),
+        },
+    )
+    .await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::InputAcquired { acquired: true, .. } => {}
+        ServerEvent::InputAcquired { acquired: false, .. } => {
+            return Err(anyhow!("input lease already held"))
+        }
+        other => return Err(anyhow!("unexpected response: {other:?}")),
+    }
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Send {
+            session: session.clone(),
+            text: task,
+        },
+    )
+    .await?;
+    // No drain: dropping this connection releases the lease automatically;
+    // the engine actor keeps processing the queued prompt.
+
+    let payload = json!({
+        "session_id": session,
+        "resume_cursor": resume_cursor,
+    });
+    Ok(serde_json::to_string_pretty(&payload)?)
+}
+
+async fn tool_read_session(socket_path: &PathBuf, args: Value) -> anyhow::Result<String> {
+    let session = args
+        .get("session")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing 'session'"))?
+        .to_string();
+    let from_seq = args.get("from_seq").and_then(Value::as_u64);
+    let max_entries = args
+        .get("max_entries")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize);
+
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(
+        &mut writer,
+        &ClientCommand::ReadJournal {
+            session: session.clone(),
+            from_seq,
+            max_entries,
+        },
+    )
+    .await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::JournalRead {
+            entries,
+            next_seq,
+            has_more,
+            ..
+        } => {
+            // Render entries as a compact, LLM-friendly summary plus the
+            // structured next_seq for follow-up polling.
+            let mut rendered = Vec::with_capacity(entries.len());
+            let mut terminal: Option<String> = None;
+            for entry in &entries {
+                match &entry.event {
+                    TurnEvent::AssistantText { text } => {
+                        rendered.push(format!("[{}] assistant: {text}", entry.seq));
+                    }
+                    TurnEvent::ToolUse { name, .. } => {
+                        rendered.push(format!("[{}] tool_use: {name}", entry.seq));
+                    }
+                    TurnEvent::System { subtype } => {
+                        rendered.push(format!("[{}] system: {subtype}", entry.seq));
+                    }
+                    TurnEvent::Result { stop_reason, .. } => {
+                        rendered.push(format!(
+                            "[{}] result: {}",
+                            entry.seq,
+                            stop_reason.as_wire()
+                        ));
+                        terminal = Some(stop_reason.as_wire().to_string());
+                    }
+                    TurnEvent::Raw(_) => {
+                        rendered.push(format!("[{}] raw", entry.seq));
+                    }
+                }
+            }
+            let body = rendered.join("\n");
+            let footer = format!(
+                "\n[next_seq={next_seq} has_more={has_more}{}]",
+                terminal
+                    .map(|s| format!(" stop_reason={s}"))
+                    .unwrap_or_default()
+            );
+            Ok(if body.is_empty() {
+                format!("(no new entries){footer}")
+            } else {
+                format!("{body}{footer}")
+            })
+        }
+        ServerEvent::Error { code, message, .. } => {
+            Err(anyhow!("read failed: {code}: {message}"))
+        }
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
 }
 
 async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> anyhow::Result<()> {
