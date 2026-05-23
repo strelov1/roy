@@ -84,6 +84,32 @@ async fn session_via_transport_records_acp_cursor() {
     session.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn open_without_mode_skips_set_mode() {
+    // OpenCode has no ACP modes, so AcpConfig sets mode_id = None and open()
+    // must skip session/set_mode. The fake agent never receives set_mode here.
+    let config = AcpConfig {
+        command: "python3".to_string(),
+        args: vec!["tests/scripts/fake-acp-agent.py".to_string()],
+        mode_id: None,
+    };
+    let transport = AcpTransport::new(config);
+    let mut handle = transport
+        .open("ignored", None, std::env::current_dir().unwrap())
+        .await
+        .unwrap();
+
+    let mut events = Vec::new();
+    {
+        let mut stream = handle.send("hello").await.unwrap();
+        while let Some(ev) = stream.next().await {
+            events.push(ev);
+        }
+    }
+    assert!(matches!(events.last(), Some(TurnEvent::Result { .. })));
+    handle.close().await.unwrap();
+}
+
 // Real gemini. Ignored by default: needs the `gemini` binary, logged in.
 // Run with: cargo test --test acp_transport -- --ignored real_gemini
 #[tokio::test]
@@ -111,7 +137,37 @@ async fn real_gemini_spawn_and_turn() {
 }
 
 fn which_gemini() -> Option<()> {
-    std::process::Command::new("gemini")
+    which("gemini")
+}
+
+// Real opencode. Ignored by default: needs the `opencode` binary, logged in.
+// Run with: cargo test --test acp_transport -- --ignored real_opencode
+#[tokio::test]
+#[ignore]
+async fn real_opencode_spawn_and_turn() {
+    if which("opencode").is_none() {
+        eprintln!("skipping: opencode not on PATH");
+        return;
+    }
+    let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(AcpConfig::opencode()));
+    let mut session = Session::new(transport, std::env::current_dir().unwrap());
+
+    let mut answer = String::new();
+    {
+        let mut stream = session.send("reply with exactly the word: hello").await.unwrap();
+        while let Some(ev) = stream.next().await {
+            if let TurnEvent::AssistantText { text } = ev {
+                answer.push_str(&text);
+            }
+        }
+    }
+    assert!(answer.to_lowercase().contains("hello"), "got: {answer:?}");
+    assert!(session.resume_cursor().is_some());
+    session.close().await.unwrap();
+}
+
+fn which(bin: &str) -> Option<()> {
+    std::process::Command::new(bin)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

@@ -33,6 +33,16 @@ impl AcpConfig {
             mode_id: Some("yolo".to_string()),
         }
     }
+
+    /// opencode acp. OpenCode has no ACP "modes" (it exposes configOptions
+    /// instead), so no set_mode is sent.
+    pub fn opencode() -> Self {
+        Self {
+            command: "opencode".to_string(),
+            args: vec!["acp".to_string()],
+            mode_id: None,
+        }
+    }
 }
 
 pub struct AcpTransport {
