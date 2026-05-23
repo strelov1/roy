@@ -4,10 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["process", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "sync", "time", "fs"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
-futures-core = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
@@ -18,10 +17,6 @@ agent-client-protocol = "0.12.1"
 
 [dev-dependencies]
 futures = "0.3"
-
-[[example]]
-name = "demo"
-path = "examples/demo.rs"
 
 [[example]]
 name = "demo_gemini"

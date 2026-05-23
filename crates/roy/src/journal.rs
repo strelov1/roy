@@ -148,13 +148,13 @@ mod tests {
     use super::*;
     use crate::event::StopReason;
 
+    static TMPDIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn tmpdir() -> TempDir {
+        let n = TMPDIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let p = std::env::temp_dir().join(format!(
-            "roy-journal-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "roy-journal-test-{}-{n}",
+            std::process::id()
         ));
         TempDir(p)
     }

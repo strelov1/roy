@@ -78,37 +78,24 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::TurnEvent;
-    use crate::provider::Provider;
-    use crate::transport::PrintTransport;
+    use crate::transport::{AcpConfig, AcpTransport, PermissionPolicy};
+    use std::time::Duration;
 
-    struct FakeProvider;
-    impl Provider for FakeProvider {
-        fn command(&self) -> &str {
-            "tests/scripts/fake-agent.sh"
-        }
-        fn spawn_args(&self, _: &str, _: Option<&str>) -> Vec<String> {
-            vec![]
-        }
-        fn encode_user_message(&self, t: &str) -> String {
-            format!("{t}\n")
-        }
-        fn parse_line(&self, line: &str) -> Option<TurnEvent> {
-            crate::provider::ClaudeProvider::new(None).parse_line(line)
-        }
-        fn is_turn_end(&self, ev: &TurnEvent) -> bool {
-            matches!(ev, TurnEvent::Result { .. })
-        }
+    fn fake_acp() -> AcpTransport {
+        AcpTransport::new(AcpConfig {
+            command: "python3".to_string(),
+            args: vec!["tests/scripts/fake-acp-agent.py".to_string()],
+            mode_id: Some("yolo".to_string()),
+            permission_policy: PermissionPolicy::AllowAll,
+            open_timeout: Duration::from_secs(5),
+        })
     }
 
+    static TMPDIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn tmp_dir() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "roy-manager-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        let n = TMPDIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::env::temp_dir().join(format!("roy-manager-test-{}-{n}", std::process::id()))
     }
 
     #[tokio::test]
@@ -117,7 +104,7 @@ mod tests {
         let mgr = SessionManager::new(dir.clone());
         assert!(mgr.list().await.is_empty());
 
-        let transport: Arc<dyn Transport> = Arc::new(PrintTransport::new(Arc::new(FakeProvider)));
+        let transport: Arc<dyn Transport> = Arc::new(fake_acp());
         let engine = mgr
             .spawn(transport, std::env::current_dir().unwrap(), 256, 1024)
             .await
