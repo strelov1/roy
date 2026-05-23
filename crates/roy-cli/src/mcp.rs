@@ -188,6 +188,20 @@ fn tools_list() -> Value {
                     "required": ["session", "tags"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "roy_wait_for_result",
+                "description": "Long-poll for the next terminal Result on a session. Returns when a turn finishes; emits a `wait_timeout` payload after `timeout_ms` (default 600000 = 10 min).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session": {"type": "string"},
+                        "since_seq": {"type": "integer", "minimum": 0},
+                        "timeout_ms": {"type": "integer", "minimum": 1}
+                    },
+                    "required": ["session"],
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -206,6 +220,7 @@ async fn tools_call(id: Value, req: &Value, socket_path: &Path) -> Value {
         "roy_read_session" => tool_read_session(socket_path, args).await,
         "roy_close" => tool_close(socket_path, args).await,
         "roy_set_tags" => tool_set_tags(socket_path, args).await,
+        "roy_wait_for_result" => tool_wait_for_result(socket_path, args).await,
         other => Err(anyhow!("unknown tool: {other}")),
     };
 
@@ -379,6 +394,59 @@ async fn tool_set_tags(socket_path: &Path, args: Value) -> anyhow::Result<String
         )?),
         ServerEvent::Error { code, message, .. } => {
             Err(anyhow!("set-tags failed: {code}: {message}"))
+        }
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
+}
+
+async fn tool_wait_for_result(socket_path: &Path, args: Value) -> anyhow::Result<String> {
+    let session = args
+        .get("session")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing 'session' argument"))?
+        .to_string();
+    let since_seq = args.get("since_seq").and_then(Value::as_u64);
+    let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64);
+
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(
+        &mut writer,
+        &ClientCommand::WaitForResult {
+            session: session.clone(),
+            since_seq,
+            timeout_ms,
+        },
+    )
+    .await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::ResultReady {
+            session,
+            seq,
+            result,
+            assistant_text,
+        } => {
+            let TurnEvent::Result {
+                cost_usd,
+                stop_reason,
+            } = result
+            else {
+                return Err(anyhow!("non-Result in ResultReady"));
+            };
+            Ok(serde_json::to_string(&json!({
+                "type": "result_ready",
+                "session": session,
+                "seq": seq,
+                "stop_reason": format!("{stop_reason:?}"),
+                "cost_usd": cost_usd,
+                "assistant_text": assistant_text,
+            }))?)
+        }
+        ServerEvent::WaitTimeout { session } => Ok(serde_json::to_string(&json!({
+            "type": "wait_timeout",
+            "session": session,
+        }))?),
+        ServerEvent::Error { code, message, .. } => {
+            Err(anyhow!("wait_for_result failed: {code}: {message}"))
         }
         other => Err(anyhow!("unexpected response: {other:?}")),
     }
@@ -690,6 +758,7 @@ mod tests {
                 "roy_read_session",
                 "roy_close",
                 "roy_set_tags",
+                "roy_wait_for_result",
             ]
         );
     }
