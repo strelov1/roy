@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
     let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(AcpConfig::opencode()));
     let cwd = std::env::current_dir()?;
 
-    let engine = manager.spawn(transport, cwd, 256, 1024).await?;
+    let engine = manager.spawn(transport, cwd, 256, 1024, None).await?;
     let session_id = engine.id().to_string();
     eprintln!(
         "spawned session {session_id}; journal -> {}",

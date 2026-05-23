@@ -250,10 +250,8 @@ impl Daemon {
                 cwd,
                 model,
                 permission,
-                resume: _,
+                resume,
             } => {
-                // resume not yet wired — needs a SessionManager API that
-                // accepts a resume cursor. Out of scope this iteration.
                 let transport =
                     match self
                         .factory
@@ -272,7 +270,7 @@ impl Daemon {
                 let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
-                let engine = match self.manager.spawn(transport, cwd, 256, 1024).await {
+                let engine = match self.manager.spawn(transport, cwd, 256, 1024, resume).await {
                     Ok(e) => e,
                     Err(e) => {
                         let _ = event_tx.send(ServerEvent::Error {
@@ -602,6 +600,69 @@ mod tests {
             ServerEvent::Closed { .. } => {}
             other => panic!("expected Closed, got {other:?}"),
         }
+
+        drop(client_wr);
+        drop(events);
+        let _ = serve_handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Resume goes through to the transport: a Spawn with `resume = Some(sid)`
+    /// must use ACP `session/load` and the resulting `Spawned.resume_cursor`
+    /// must be the supplied `sid` (not a fresh one from `session/new`).
+    #[tokio::test]
+    async fn spawn_with_resume_uses_session_load() {
+        let dir = tmp_dir();
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let serve_handle = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        // Fresh session → fake's session/new returns "fake-acp-sid".
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                cwd: Some(std::env::current_dir().unwrap().to_string_lossy().into()),
+                model: None,
+                permission: None,
+                resume: None,
+            },
+        )
+        .await;
+        let fresh_cursor = match next_event_line(&mut events).await {
+            ServerEvent::Spawned { resume_cursor, .. } => resume_cursor,
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+        assert_eq!(fresh_cursor.as_deref(), Some("fake-acp-sid"));
+
+        // Resume → AcpTransport routes through session/load and keeps the
+        // supplied sid as the cursor.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                cwd: Some(std::env::current_dir().unwrap().to_string_lossy().into()),
+                model: None,
+                permission: None,
+                resume: Some("prior-session-sid".into()),
+            },
+        )
+        .await;
+        let resumed_cursor = match next_event_line(&mut events).await {
+            ServerEvent::Spawned { resume_cursor, .. } => resume_cursor,
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+        assert_eq!(resumed_cursor.as_deref(), Some("prior-session-sid"));
 
         drop(client_wr);
         drop(events);

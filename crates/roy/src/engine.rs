@@ -55,12 +55,16 @@ enum Cmd {
 
 impl SessionEngine {
     /// Open a transport handle, set up journal + broadcast, and spawn the
-    /// actor task. The returned `Arc<SessionEngine>` is cheap to clone and
-    /// hand to multiple attach sites.
+    /// actor task. `resume_cursor` is forwarded to `Transport::open` so the
+    /// agent side resumes via its native mechanism (e.g. ACP `session/load`)
+    /// while roy itself gets a fresh manager-side session id and journal.
+    /// The returned `Arc<SessionEngine>` is cheap to clone and hand to
+    /// multiple attach sites.
     pub async fn spawn(
         transport: Arc<dyn Transport>,
         cwd: PathBuf,
         opts: EngineOpts,
+        resume_cursor: Option<String>,
     ) -> Result<Arc<Self>> {
         let session_id = Uuid::new_v4().to_string();
         let journal =
@@ -68,7 +72,9 @@ impl SessionEngine {
         let (broadcast_tx, _) = broadcast::channel::<JournalEntry>(opts.broadcast_capacity);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
 
-        let handle = transport.open(&session_id, None, cwd).await?;
+        let handle = transport
+            .open(&session_id, resume_cursor.as_deref(), cwd)
+            .await?;
         let initial_cursor = handle.resume_cursor();
 
         let engine = Arc::new(Self {

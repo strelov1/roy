@@ -28,20 +28,23 @@ impl SessionManager {
     }
 
     /// Open a new session. The engine is spawned and registered before this
-    /// returns; observers can `attach` immediately afterwards.
+    /// returns; observers can `attach` immediately afterwards. Pass
+    /// `resume_cursor = Some(cursor)` to ask the underlying transport to
+    /// resume a prior agent-side session (e.g. via ACP `session/load`).
     pub async fn spawn(
         &self,
         transport: Arc<dyn Transport>,
         cwd: PathBuf,
         broadcast_capacity: usize,
         mem_capacity: usize,
+        resume_cursor: Option<String>,
     ) -> Result<Arc<SessionEngine>> {
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
             mem_capacity,
         };
-        let engine = SessionEngine::spawn(transport, cwd, opts).await?;
+        let engine = SessionEngine::spawn(transport, cwd, opts, resume_cursor).await?;
         let id = engine.id().to_string();
         self.sessions.write().await.insert(id, Arc::clone(&engine));
         Ok(engine)
@@ -103,7 +106,7 @@ mod tests {
 
         let transport: Arc<dyn Transport> = Arc::new(fake_acp());
         let engine = mgr
-            .spawn(transport, std::env::current_dir().unwrap(), 256, 1024)
+            .spawn(transport, std::env::current_dir().unwrap(), 256, 1024, None)
             .await
             .unwrap();
         let id = engine.id().to_string();

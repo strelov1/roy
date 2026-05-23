@@ -39,6 +39,7 @@ async fn two_attaches_see_the_same_seq_stream_until_result() {
         fake_acp_transport(),
         std::env::current_dir().unwrap(),
         opts(journal_dir.clone()),
+        None,
     )
     .await
     .unwrap();
@@ -99,6 +100,7 @@ async fn input_lease_is_exclusive_and_released_on_drop() {
         fake_acp_transport(),
         std::env::current_dir().unwrap(),
         opts(journal_dir.clone()),
+        None,
     )
     .await
     .unwrap();
@@ -125,6 +127,7 @@ async fn late_attach_replays_full_journal() {
         fake_acp_transport(),
         std::env::current_dir().unwrap(),
         opts(journal_dir.clone()),
+        None,
     )
     .await
     .unwrap();
