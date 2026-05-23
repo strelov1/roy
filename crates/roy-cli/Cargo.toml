@@ -1,0 +1,18 @@
+[package]
+name = "roy-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "roy"
+path = "src/main.rs"
+
+[dependencies]
+roy = { path = "../roy" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "sync", "time"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+futures = "0.3"
+tokio-stream = "0.1"
