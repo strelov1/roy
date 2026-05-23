@@ -568,9 +568,7 @@ impl Daemon {
             Ok(engine) => {
                 if let Some(new_tags) = tags {
                     let mut merged = engine.tags();
-                    for (k, v) in new_tags {
-                        merged.insert(k, v);
-                    }
+                    merged.extend(new_tags);
                     if let Err(e) = engine.set_tags(merged).await {
                         tracing::warn!(%session, error = %e, "failed to update tags on resume");
                     }
@@ -742,9 +740,7 @@ impl Daemon {
                     Ok(e) => {
                         if !tags.is_empty() {
                             let mut merged = e.tags();
-                            for (k, v) in tags {
-                                merged.insert(k, v);
-                            }
+                            merged.extend(tags);
                             let _ = e.set_tags(merged).await;
                         }
                         e

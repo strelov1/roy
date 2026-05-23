@@ -238,7 +238,7 @@ impl SessionEngine {
         self.tags.lock().unwrap().clone()
     }
 
-    /// Replace the session's tag map, persist it, and notify subscribers.
+    /// Replace the session's tag map and persist it.
     pub async fn set_tags(&self, tags: BTreeMap<String, String>) -> Result<()> {
         {
             let mut current = self.tags.lock().unwrap();
