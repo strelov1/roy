@@ -318,7 +318,13 @@ async fn run_actor(
             Cmd::Close => break,
         }
     }
-    let _ = handle.close().await;
+    if let Err(e) = handle.close().await {
+        tracing::warn!(
+            session = %engine.session_id,
+            error = %e,
+            "transport close failed; child process may be left in unknown state",
+        );
+    }
 }
 
 async fn drive_turn(
@@ -327,8 +333,8 @@ async fn drive_turn(
     text: &str,
     input_rx: &mut mpsc::UnboundedReceiver<Cmd>,
 ) {
-    let mut stream = match handle.send(text).await {
-        Ok(s) => s,
+    let (mut stream, cancel) = match handle.send(text).await {
+        Ok(pair) => pair,
         Err(e) => {
             // The transport refused the turn; synthesise a terminal Result
             // so attach subscribers still see a turn boundary.
@@ -355,27 +361,21 @@ async fn drive_turn(
             return;
         }
     };
-    // Drive the turn while draining `input_rx` for a Cancel. Dropping the
-    // stream is what fires the transport's cancel_tx → ACP session/cancel,
-    // which yields a terminal `Result { stop_reason: Cancelled }`.
+    // The cancel handle lives next to (not inside) the stream. Dropping it on
+    // `Cmd::Cancel` signals the transport's actor → ACP `session/cancel`; the
+    // stream itself stays open and still delivers the terminal `Result` once
+    // the agent winds down, so observers see a clean turn boundary.
+    let mut cancel = Some(cancel);
     loop {
         tokio::select! {
             biased;
             cmd = input_rx.recv() => match cmd {
                 Some(Cmd::Cancel) => {
-                    // Drain the cancelled turn so attach subscribers see the
-                    // terminal Result, then return.
-                    let mut s = stream;
-                    while let Some(event) = s.next().await {
-                        if let Err(e) = publish(engine, event).await {
-                            tracing::error!(
-                                session = %engine.session_id,
-                                error = %e,
-                                "journal append failed during cancel drain",
-                            );
-                        }
+                    if let Some(tx) = cancel.take() {
+                        drop(tx);
                     }
-                    return;
+                    // Stay in the loop; the cancelled turn still yields one
+                    // final event.
                 }
                 Some(Cmd::Prompt(_)) => {
                     tracing::warn!(
@@ -439,7 +439,16 @@ fn build_attach_stream(
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     let from = last_yielded.map(|s| s + 1).unwrap_or(expected_next);
-                    let catchup = journal.replay_from(from).await.unwrap_or_default();
+                    let catchup = match journal.replay_from(from).await {
+                        Ok(entries) => entries,
+                        Err(e) => {
+                            // Disk read failed; without catch-up the subscriber
+                            // would silently stall. Log and stop the stream so
+                            // the caller can attach again with a fresh seq.
+                            tracing::error!(error = %e, %from, "lagged catch-up replay failed");
+                            break;
+                        }
+                    };
                     for entry in catchup {
                         expected_next = entry.seq + 1;
                         last_yielded = Some(entry.seq);

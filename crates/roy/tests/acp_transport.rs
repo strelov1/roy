@@ -34,7 +34,7 @@ async fn open_send_streams_until_result() {
 
     let mut events = Vec::new();
     {
-        let mut stream = handle.send("hello").await.unwrap();
+        let (mut stream, _cancel) = handle.send("hello").await.unwrap();
         while let Some(ev) = stream.next().await {
             events.push(ev);
         }
@@ -56,7 +56,7 @@ async fn open_send_streams_until_result() {
     // Multi-turn on the same live process.
     let mut events2 = Vec::new();
     {
-        let mut stream = handle.send("again").await.unwrap();
+        let (mut stream, _cancel) = handle.send("again").await.unwrap();
         while let Some(ev) = stream.next().await {
             events2.push(ev);
         }
@@ -78,7 +78,7 @@ async fn auto_allows_permission_requests() {
     // permission request; reaching Result proves the auto-allow happened.
     let mut events = Vec::new();
     {
-        let mut stream = handle.send("do a thing").await.unwrap();
+        let (mut stream, _cancel) = handle.send("do a thing").await.unwrap();
         while let Some(ev) = stream.next().await {
             events.push(ev);
         }
@@ -107,7 +107,7 @@ async fn open_without_mode_skips_set_mode() {
 
     let mut events = Vec::new();
     {
-        let mut stream = handle.send("hello").await.unwrap();
+        let (mut stream, _cancel) = handle.send("hello").await.unwrap();
         while let Some(ev) = stream.next().await {
             events.push(ev);
         }
@@ -185,7 +185,7 @@ async fn mid_turn_exit_emits_error_result() {
 
     let mut events = Vec::new();
     {
-        let mut stream = handle.send("hello").await.unwrap();
+        let (mut stream, _cancel) = handle.send("hello").await.unwrap();
         while let Some(ev) = stream.next().await {
             events.push(ev);
         }
@@ -215,14 +215,14 @@ async fn dropping_a_turn_cancels_it_and_the_next_turn_proceeds() {
         .unwrap();
 
     {
-        let mut stream = handle.send("one").await.unwrap();
+        let (mut stream, _cancel) = handle.send("one").await.unwrap();
         let first = stream.next().await;
         assert!(matches!(first, Some(TurnEvent::AssistantText { text }) if text == "working"));
         // Drop the stream -> cancel turn 1.
     }
 
     let first2 = tokio::time::timeout(Duration::from_secs(5), async {
-        let mut stream = handle.send("two").await.unwrap();
+        let (mut stream, _cancel) = handle.send("two").await.unwrap();
         stream.next().await
     })
     .await
@@ -249,7 +249,7 @@ async fn real_gemini_spawn_and_turn() {
 
     let mut answer = String::new();
     {
-        let mut stream = handle
+        let (mut stream, _cancel) = handle
             .send("reply with exactly the word: hello")
             .await
             .unwrap();
@@ -285,7 +285,7 @@ async fn real_opencode_spawn_and_turn() {
 
     let mut answer = String::new();
     {
-        let mut stream = handle
+        let (mut stream, _cancel) = handle
             .send("reply with exactly the word: hello")
             .await
             .unwrap();
@@ -318,7 +318,7 @@ async fn real_codex_spawn_and_turn() {
 
     let mut answer = String::new();
     {
-        let mut stream = handle
+        let (mut stream, _cancel) = handle
             .send("reply with exactly the word: hello")
             .await
             .unwrap();
@@ -352,7 +352,7 @@ async fn real_claude_spawn_and_turn() {
 
     let mut answer = String::new();
     {
-        let mut stream = handle
+        let (mut stream, _cancel) = handle
             .send("reply with exactly the word: hello")
             .await
             .unwrap();

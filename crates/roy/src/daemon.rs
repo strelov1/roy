@@ -188,6 +188,13 @@ impl Daemon {
     pub async fn run_unix(self: Arc<Self>, socket_path: &Path) -> Result<()> {
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent).map_err(RoyError::Io)?;
+            // Lock the parent dir down: the daemon owns it, and any sibling
+            // file (sockets, pid files) carries control authority.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
         }
         // PID-file lock first: this is the single-instance gate. If it
         // succeeds, any leftover socket file is necessarily stale (the prior
@@ -202,6 +209,15 @@ impl Daemon {
         let _pid_lock = crate::pid_lock::PidLock::acquire(&pid_path)?;
         let _ = std::fs::remove_file(socket_path);
         let listener = UnixListener::bind(socket_path).map_err(RoyError::Io)?;
+        // Restrict socket to owner — connecting to it gives full control-
+        // protocol access (spawn agents, read journals). With the default
+        // umask 022 the socket would be world-connectable on Linux.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(RoyError::Io)?;
+        }
         tracing::info!(path = %socket_path.display(), "unix listener up");
 
         loop {
@@ -250,7 +266,11 @@ impl Daemon {
         let writer_handle = tokio::spawn(line_writer_loop(writer, event_rx));
         let result = self.dispatch_lines(reader, event_tx).await;
         // event_tx dropped → writer_loop sees None → exits cleanly.
-        let _ = writer_handle.await;
+        if let Err(e) = writer_handle.await {
+            if e.is_panic() {
+                tracing::error!(error = %e, "writer task panicked");
+            }
+        }
         result
     }
 
@@ -263,7 +283,11 @@ impl Daemon {
         let (ws_sink, ws_stream) = ws.split();
         let writer_handle = tokio::spawn(ws_writer_loop(ws_sink, event_rx));
         let result = self.dispatch_ws(ws_stream, event_tx).await;
-        let _ = writer_handle.await;
+        if let Err(e) = writer_handle.await {
+            if e.is_panic() {
+                tracing::error!(error = %e, "writer task panicked");
+            }
+        }
         result
     }
 
@@ -493,12 +517,13 @@ impl Daemon {
     ) {
         let archive = match self.manager.open_archive(&session).await {
             Ok(a) => a,
-            Err(_) => {
+            Err(e) => {
+                tracing::warn!(%session, error = %e, "archive open failed");
                 send_error(
                     event_tx,
                     Some(session),
                     ErrorCode::NoSession,
-                    "no such session (live or archived)",
+                    format!("no such session (live or archived): {e}"),
                 );
                 return;
             }
@@ -831,6 +856,51 @@ mod tests {
     ) -> ServerEvent {
         let line = lines.next_line().await.unwrap().expect("server hung up");
         serde_json::from_str(line.trim()).unwrap()
+    }
+
+    /// Unix socket and its parent directory must be created with owner-only
+    /// permissions — a sibling user on a shared box must NOT be able to
+    /// connect to the socket and drive the control protocol.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_socket_and_parent_dir_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir();
+        let socket_path = dir.join("daemon.sock");
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let socket_path_for_task = socket_path.clone();
+        let listener_handle = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move { d.run_unix(&socket_path_for_task).await })
+        };
+        // Wait for run_unix to bind + chmod the socket.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if socket_path.exists() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("daemon did not bind socket within 2s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let socket_mode = std::fs::metadata(&socket_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            socket_mode, 0o600,
+            "socket must be 0600, got {socket_mode:o}"
+        );
+        let parent_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            parent_mode, 0o700,
+            "parent dir must be 0700, got {parent_mode:o}"
+        );
+        listener_handle.abort();
+        let _ = listener_handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// End-to-end through the daemon over an in-memory duplex pipe.

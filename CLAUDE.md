@@ -9,6 +9,7 @@ Non-negotiable expectations for any change in this repo:
 - **No hacks, no temporary solutions, no tech debt.** Code must be reliable and simple. Don't ship "for now" workarounds or stop-gaps. When two designs exist, choose the idiomatic/intended one (e.g. a library's intended API) over a clever shim.
 - **Fix root causes, never symptoms.** When something breaks, trace it to the underlying cause and fix that. Don't patch the surface effect — prefer the fix that makes the symptom impossible, not merely invisible.
 - **Real refactors over awkward preservation.** If a clean change requires touching existing code (renaming, dropping a trait param, reshaping an abstraction), do it rather than bolting compatibility shims on top.
+- **No overengineering.** Each change must justify its own weight. When an audit or review surfaces many findings, filter to the ones with real impact (durability loss, lost panics, invisible IO errors) and skip paranoia-tier additions (logs for impossible cases, defensive instrumentation that doesn't change outcomes). "Clean and simple" beats "exhaustive".
 
 ## What this is
 

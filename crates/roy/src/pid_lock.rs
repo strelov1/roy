@@ -23,7 +23,16 @@ impl PidLock {
             std::fs::create_dir_all(parent).map_err(RoyError::Io)?;
         }
         loop {
-            match OpenOptions::new().create_new(true).write(true).open(&path) {
+            // Atomic create with owner-only mode — no window where the file
+            // exists with permissive umask perms before we chmod it.
+            let mut opts = OpenOptions::new();
+            opts.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&path) {
                 Ok(mut file) => {
                     write_pid(&mut file, std::process::id())?;
                     return Ok(Self { path });
@@ -134,6 +143,23 @@ mod tests {
 
         // PidLock::acquire must detect the stale PID and take over.
         let _lock = PidLock::acquire(&path).unwrap();
+    }
+
+    /// The pid file must be created with `0600` so a sibling user on a shared
+    /// machine can't read which PID owns the daemon (and `kill` it with `kill
+    /// -0` to probe presence). Atomic `OpenOptionsExt::mode` guarantees no
+    /// race-window where the file exists under the umask default.
+    #[cfg(unix)]
+    #[test]
+    fn pid_file_is_created_with_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = tmp_path();
+        let _lock = PidLock::acquire(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "pid file must be 0600 regardless of umask, got {mode:o}"
+        );
     }
 
     #[test]

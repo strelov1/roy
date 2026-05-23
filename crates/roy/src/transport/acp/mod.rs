@@ -36,7 +36,7 @@ use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use crate::error::{Result, RoyError};
 use crate::event::{StopReason, TurnEvent};
 
-use super::{Handle, Transport, TurnStream};
+use super::{CancelSignal, Handle, Transport, TurnStream};
 
 /// Shared sink that the global notification handler writes into. `Some(tx)`
 /// while a turn is active, `None` otherwise (updates outside a turn — e.g. a
@@ -586,7 +586,7 @@ pub struct AcpHandle {
 
 #[async_trait]
 impl Handle for AcpHandle {
-    async fn send(&mut self, prompt: &str) -> Result<TurnStream<'_>> {
+    async fn send(&mut self, prompt: &str) -> Result<(TurnStream, CancelSignal)> {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<TurnEvent>();
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
         self.cmd_tx
@@ -596,7 +596,7 @@ impl Handle for AcpHandle {
                 cancel_rx,
             })
             .map_err(|_| RoyError::ProcessExited)?;
-        Ok(turn_stream(event_rx, cancel_tx))
+        Ok((turn_stream(event_rx), cancel_tx))
     }
 
     fn resume_cursor(&self) -> Option<String> {
@@ -609,16 +609,12 @@ impl Handle for AcpHandle {
     }
 }
 
-/// Stream the turn's events. `cancel_tx` is held for the stream's lifetime: if
-/// the consumer drops the stream before the terminal `Result`, `cancel_tx` drops
-/// too and the actor cancels the turn. On normal completion the actor has
-/// already left the turn loop, so the drop is a no-op.
-fn turn_stream(
-    mut rx: mpsc::UnboundedReceiver<TurnEvent>,
-    cancel_tx: oneshot::Sender<()>,
-) -> TurnStream<'static> {
+/// Stream the turn's events. Cancellation is signalled out-of-band via the
+/// `CancelSignal` returned alongside the stream, so the stream stays connected
+/// even after a cancel and still yields the terminal `Result` once the agent
+/// winds down.
+fn turn_stream(mut rx: mpsc::UnboundedReceiver<TurnEvent>) -> TurnStream {
     Box::pin(async_stream::stream! {
-        let _cancel_tx = cancel_tx;
         let mut saw_result = false;
         while let Some(event) = rx.recv().await {
             let end = matches!(event, TurnEvent::Result { .. });

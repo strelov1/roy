@@ -10,7 +10,7 @@ async fn main() -> anyhow::Result<()> {
 
     for prompt in ["reply with exactly: hello", "now reply with exactly: world"] {
         println!("\n>>> {prompt}");
-        let mut stream = handle.send(prompt).await?;
+        let (mut stream, _cancel) = handle.send(prompt).await?;
         while let Some(ev) = stream.next().await {
             println!("  {ev:?}");
         }

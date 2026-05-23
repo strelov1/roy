@@ -163,7 +163,10 @@ impl SessionManager {
     ) -> Vec<(String, Option<RoyError>)> {
         let ids = match self.list_archived().await {
             Ok(v) => v,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::error!(error = %e, "resume_all: failed to list archives; nothing resumed");
+                return Vec::new();
+            }
         };
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
