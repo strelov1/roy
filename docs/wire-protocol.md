@@ -33,7 +33,9 @@ control frame):
 |--------------------|-----------------------------------------------------------------------------------------------|
 | `System`           | `{"type":"system","subtype":"…"}`                                                            |
 | `AssistantText`    | `{"type":"assistant_text","text":"…"}`                                                       |
+| `AssistantThought` | `{"type":"assistant_thought","text":"…"}`                                                    |
 | `ToolUse`          | `{"type":"tool_use","name":"…","input":…}`                                                   |
+| `Usage`            | `{"type":"usage","input_tokens":null|123,"output_tokens":null|456,"cost_usd":null|0.01}`     |
 | `Result`           | `{"type":"result","cost_usd":null|0.42,"stop_reason":"end_turn","is_error":false}`           |
 | `Raw`              | `{"type":"raw","value":…}`                                                                   |
 
@@ -96,7 +98,7 @@ triggers (and, indirectly, of every MCP tool result body).
 | `resume`          | `session`                                                                                       |
 | `read_journal`    | `session`, optional `from_seq`, optional `max_entries`                                          |
 
-`permission` is `"allow"` or `"deny"`. `agent` is one of `claude_agent`,
+`permission` is `"allow"` or `"deny"`. `agent` is one of `claude`,
 `gemini`, `opencode`, `codex` (with the default `TransportFactory`).
 
 ### ServerEvent (server → client)

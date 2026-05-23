@@ -14,6 +14,7 @@ fn fake_acp_transport() -> Arc<dyn Transport> {
         mode_id: Some("yolo".to_string()),
         permission_policy: PermissionPolicy::AllowAll,
         open_timeout: Duration::from_secs(5),
+        env_remove: Vec::new(),
     }))
 }
 

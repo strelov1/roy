@@ -60,7 +60,7 @@ use:
 | `gemini`          | the Google Gemini CLI (`npm i -g @google/gemini-cli`), logged in      |
 | `opencode`        | the OpenCode CLI on `$PATH`, logged in                                |
 | `codex`           | `npm i -g @zed-industries/codex-acp`                                  |
-| `claude_agent`    | `npm i -g @zed-industries/claude-code-acp` + API auth                 |
+| `claude`          | `npm i -g @zed-industries/claude-code-acp` + API auth                 |
 
 ## Quick start: daemon + CLI
 

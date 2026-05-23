@@ -4,3 +4,7 @@ Cargo.lock
 /.claude/
 /.idea/
 /.grok/
+
+# Playwright MCP scratch + ad-hoc screenshots from interactive sessions.
+/.playwright-mcp/
+/*.png

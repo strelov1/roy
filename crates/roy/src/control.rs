@@ -37,6 +37,8 @@ pub enum ErrorCode {
     ResumeFailed,
     /// `ReadJournal` failed.
     ReadJournalFailed,
+    /// `DeleteArchive` failed (session still live, or IO error).
+    DeleteFailed,
     /// Forward-compat: a code emitted by a newer server.
     Other(String),
 }
@@ -55,6 +57,7 @@ impl ErrorCode {
             ErrorCode::ListArchivedFailed => "list_archived_failed",
             ErrorCode::ResumeFailed => "resume_failed",
             ErrorCode::ReadJournalFailed => "read_journal_failed",
+            ErrorCode::DeleteFailed => "delete_failed",
             ErrorCode::Other(s) => s.as_str(),
         }
     }
@@ -72,6 +75,7 @@ impl ErrorCode {
             "list_archived_failed" => ErrorCode::ListArchivedFailed,
             "resume_failed" => ErrorCode::ResumeFailed,
             "read_journal_failed" => ErrorCode::ReadJournalFailed,
+            "delete_failed" => ErrorCode::DeleteFailed,
             other => ErrorCode::Other(other.to_string()),
         }
     }
@@ -100,7 +104,7 @@ impl<'de> Deserialize<'de> for ErrorCode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ClientCommand {
-    /// Open a new session. `agent` is the preset name (claude_agent, gemini,
+    /// Open a new session. `agent` is the preset name (claude, gemini,
     /// opencode, codex). `resume` re-attaches an agent-side session via the
     /// transport's resume_cursor.
     Spawn {
@@ -133,6 +137,9 @@ pub enum ClientCommand {
     Detach { session: String },
     /// Ask the daemon to close a session and remove it from the registry.
     Close { session: String },
+    /// Permanently delete an archived session's journal + metadata files.
+    /// Refuses if the session is currently live (close it first).
+    DeleteArchive { session: String },
     /// List session ids known to the daemon.
     List,
     /// List session ids whose journals exist on disk but are not in the live
@@ -168,7 +175,13 @@ pub enum ServerEvent {
         resume_cursor: Option<String>,
     },
     /// Response to `Attach`. `seq_at_attach` is the next seq after the replay.
-    Attached { session: String, seq_at_attach: Seq },
+    /// `agent` is the preset name the session was spawned with (e.g. `claude`,
+    /// `gemini`) — read from the live engine or the on-disk metadata.
+    Attached {
+        session: String,
+        seq_at_attach: Seq,
+        agent: String,
+    },
     /// One journal entry on a subscribed session.
     Frame {
         session: String,
@@ -182,6 +195,8 @@ pub enum ServerEvent {
     Detached { session: String },
     /// Response to `Close`.
     Closed { session: String },
+    /// Response to `DeleteArchive`.
+    Deleted { session: String },
     /// Response to `List`.
     Listed { sessions: Vec<String> },
     /// Response to `ListArchived`.

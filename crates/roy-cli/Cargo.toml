@@ -6,6 +6,9 @@ edition = "2021"
 [[bin]]
 name = "roy"
 path = "src/main.rs"
+# Suppress rustdoc for the binary: its target collides with the `roy` library's
+# at target/doc/roy/index.html. The library is the documented surface.
+doc = false
 
 [dependencies]
 roy = { path = "../roy" }

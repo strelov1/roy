@@ -214,6 +214,28 @@ impl SessionManager {
         engine.close()
     }
 
+    /// Permanently remove an archived session's journal + metadata from disk.
+    /// Refuses if the session is still live — caller must `close` first. The
+    /// metadata file may not exist (e.g. tests that never persisted one), so
+    /// its absence is not an error.
+    pub async fn delete_archive(&self, id: &str) -> Result<()> {
+        if self.sessions.read().await.contains_key(id) {
+            return Err(RoyError::Protocol(format!(
+                "session {id} is live — close it before deleting"
+            )));
+        }
+        let jsonl = self.journal_dir.join(format!("{id}.jsonl"));
+        let meta = self.journal_dir.join(format!("{id}.meta.json"));
+        tokio::fs::remove_file(&jsonl).await.map_err(RoyError::Io)?;
+        match tokio::fs::remove_file(&meta).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(RoyError::Io(e)),
+        }
+        tracing::info!(session = %id, "deleted archived session");
+        Ok(())
+    }
+
     pub fn journal_dir(&self) -> &PathBuf {
         &self.journal_dir
     }
@@ -245,6 +267,7 @@ mod tests {
                 mode_id: Some("yolo".to_string()),
                 permission_policy: PermissionPolicy::AllowAll,
                 open_timeout: Duration::from_secs(5),
+                env_remove: Vec::new(),
             })))
         }
     }

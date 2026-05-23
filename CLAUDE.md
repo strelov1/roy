@@ -17,7 +17,16 @@ A Cargo workspace with two crates:
 - **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting metadata so sessions survive across daemon restarts.
 - **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket / WebSocket) plus an MCP server (`roy mcp`) that exposes the daemon to MCP-aware AI clients.
 
-Roy spawns agent CLIs; it does not install them. Each preset (`claude_agent`, `gemini`, `opencode`, `codex`) maps to a CLI that must be on `PATH` and pre-authenticated.
+Roy spawns agent CLIs; it does not install them. The agent's working directory comes from the client: `roy run --cwd …`, MCP `cwd` argument, or `ClientCommand::Spawn.cwd`. When no client supplies one, the daemon falls back to `ROY_CWD` (env), then its own `current_dir`. Set `ROY_CWD` on the systemd/launchd unit to pin a default project root for every default-cwd session.
+
+Each preset maps to a specific binary that must be on `PATH` and pre-authenticated:
+
+| Preset | Binary | Notes |
+|--------|--------|-------|
+| `claude` | `claude-code-acp` | ACP adapter for Claude Code (not the plain `claude` CLI) |
+| `gemini` | `gemini` | Launched with `--acp --skip-trust`; uses `yolo` mode |
+| `opencode` | `opencode` | Launched with `acp`; no ACP modes |
+| `codex` | `codex-acp` | ACP adapter for Codex; uses `full-access` mode |
 
 ## Commands
 
@@ -32,12 +41,34 @@ cargo test open_send_streams_until_result -- --nocapture     # single test by na
 
 `clippy` is not installed in the toolchain by default (`rustup component add clippy` if needed).
 
+### CI gate
+
+`.github/workflows/ci.yml` runs three commands on every push and PR to `main`/`master`:
+
+```bash
+cargo fmt --all -- --check
+cargo build --workspace --all-targets
+cargo test --workspace --no-fail-fast
+```
+
+Run all three locally before pushing — the integration tests spawn `python3 tests/scripts/fake-acp-agent.py`, so a working `python3` on `PATH` is required.
+
+### Stdout/stderr and exit codes
+
+`roy run` and `roy attach` keep **stdout reserved for one JSON object per line** (the `event_to_json` shape — same as the journal and the WS/MCP wire). Structured `tracing` logs go to **stderr** via `init_tracing` (`RUST_LOG` overrides; default is `roy=info,roy_cli=info,warn`). `roy mcp` enforces the same discipline because MCP's stdio JSON-RPC framing collides with anything else on stdout.
+
+Process exit codes from `roy run` / `roy attach`:
+
+- `0` — clean terminal `Result` (non-error stop reason).
+- `1` — agent finished with `Result.stop_reason.is_error()`.
+- `2` — CLI-level failure (no daemon, bad flag, `ServerEvent::Error`, transport hang-up).
+
 ### Real-CLI smoke tests (ignored by default)
 
 Four tests hit real agent binaries and are `#[ignore]`d. They self-skip if the dependency is absent, so running them without setup is a no-op pass:
 
 ```bash
-cargo test --test acp_transport -- --ignored real_claude_agent   # needs `claude-code-acp` on PATH, logged in
+cargo test --test acp_transport -- --ignored real_claude   # needs `claude-code-acp` on PATH, logged in
 cargo test --test acp_transport -- --ignored real_gemini         # needs `gemini` on PATH, logged in
 cargo test --test acp_transport -- --ignored real_opencode       # needs `opencode` on PATH
 cargo test --test acp_transport -- --ignored real_codex          # needs `codex-acp` on PATH
@@ -48,7 +79,7 @@ cargo test --test acp_transport -- --ignored real_codex          # needs `codex-
 Each example drives one agent through a two-turn conversation (requires that agent's CLI installed and authenticated):
 
 ```bash
-cargo run --example demo_claude_agent
+cargo run --example demo_claude
 cargo run --example demo_gemini
 cargo run --example demo_opencode
 cargo run --example demo_codex
@@ -59,7 +90,7 @@ cargo run --example engine_two_attach     # SessionEngine + two concurrent attac
 
 A short pipeline. Triggers (CLI, MCP, WebSocket) talk to a single `Daemon`; `Daemon` owns a `SessionManager`; `SessionManager` owns `SessionEngine` actors; each engine drives one ACP `Transport`. Bytes only cross trait boundaries at `Transport`, so adding a new agent is a new `AcpConfig` preset, not new session/journal/protocol code.
 
-1. **`Daemon`** (`src/daemon.rs`) — accepts Unix-socket and WebSocket connections, parses `ClientCommand`s, dispatches to per-command `handle_*` methods, and pumps `ServerEvent`s back. Single-instance guard via `PidLock` (`src/pid_lock.rs`). Optional idle-GC + resume-all on startup via `ServeOpts`.
+1. **`Daemon`** (`src/daemon.rs`) — accepts Unix-socket and WebSocket connections, parses `ClientCommand`s, dispatches to per-command `handle_*` methods, and pumps `ServerEvent`s back. Single-instance guard via `PidLock` (`src/pid_lock.rs`): the lock at `<socket>.pid` is the source of truth; a second `roy serve` on the same socket bails with `daemon already running (pid N)`, but a dead PID is detected and taken over (handles `kill -9`). Optional idle-GC + resume-all on startup via `ServeOpts`. **The WebSocket listener (when enabled via `--port`) is currently unauthenticated** — bind to loopback only or front it with auth.
 
 2. **`SessionManager`** (`src/manager.rs`) — in-process registry of live `SessionEngine`s keyed by session id, plus on-disk archive operations: `list_archived`, `open_archive`, `read_journal` (unified live-or-archive read), `resume_all`, `sweep_idle`.
 
@@ -90,8 +121,18 @@ The opaque token to resume an agent-side session on the next `Transport::open`. 
 
 ### ACP details (`acp/mod.rs`)
 
-We own the child process directly (not `AcpAgent::from_args`) so we can detect mid-turn process exit and emit a terminal `Result { stop_reason: Error }`. A `watch` channel propagates "child died" into `run_session` / `run_turn`, which would otherwise hang on a never-resolved `send_request`. `update_to_event` maps `session/update` variants to `TurnEvent`; everything we don't model goes through `Raw(Value)`. Per-agent setup is centralized in `AcpConfig::{gemini, opencode, codex, claude_agent}`.
+We own the child process directly (not `AcpAgent::from_args`) so we can detect mid-turn process exit and emit a terminal `Result { stop_reason: Error }`. A `watch` channel propagates "child died" into `run_session` / `run_turn`, which would otherwise hang on a never-resolved `send_request`. `update_to_event` maps `session/update` variants to `TurnEvent`; everything we don't model goes through `Raw(Value)`. Per-agent setup is centralized in `AcpConfig::{gemini, opencode, codex, claude}`.
 
 ### Testing approach
 
 Integration tests avoid real CLIs by faking the agent: `tests/scripts/fake-acp-agent.py` speaks JSON-RPC over stdio and takes flags (`--permission`, `--exit-mid-turn`, `--no-initialize-reply`, `--jsonrpc-error`, etc.) to drive error/timeout/permission paths deterministically. Daemon-level tests (`crates/roy/src/daemon.rs` `#[cfg(test)] mod tests`) drive the full Unix-socket and WebSocket paths through `tokio::io::duplex` / real loopback TCP. Real-CLI smoke tests (`#[ignore]`d) live in `crates/roy/tests/acp_transport.rs`.
+
+## Reference docs
+
+Deep-dive design notes (read these before reshaping the wire format, persistence layer, or component layering):
+
+- `docs/architecture.md` — full layering and component responsibilities.
+- `docs/wire-protocol.md` — the single JSON shape used on stdout, in the JSONL journal, and on every trigger.
+- `docs/persistence.md` — journal + metadata files, the two ids (roy host id vs agent `resume_cursor`), resume flow, idle GC.
+
+Historical iteration notes are deliberately not preserved — `git log` is the authoritative record of how the code got to its current shape.

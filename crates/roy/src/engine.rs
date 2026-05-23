@@ -170,6 +170,10 @@ impl SessionEngine {
         &self.session_id
     }
 
+    pub fn agent(&self) -> &str {
+        &self.agent
+    }
+
     /// Most recent activity timestamp. Used by `SessionManager::sweep_idle`.
     pub fn last_activity(&self) -> Instant {
         *self.last_activity.lock().unwrap()

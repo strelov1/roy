@@ -62,9 +62,22 @@ pub fn event_to_json(event: &TurnEvent) -> Value {
     match event {
         TurnEvent::System { subtype } => json!({"type": "system", "subtype": subtype}),
         TurnEvent::AssistantText { text } => json!({"type": "assistant_text", "text": text}),
+        TurnEvent::AssistantThought { text } => {
+            json!({"type": "assistant_thought", "text": text})
+        }
         TurnEvent::ToolUse { name, input } => {
             json!({"type": "tool_use", "name": name, "input": input})
         }
+        TurnEvent::Usage {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+        } => json!({
+            "type": "usage",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd": cost_usd,
+        }),
         TurnEvent::Result {
             cost_usd,
             stop_reason,
@@ -99,6 +112,13 @@ pub fn event_from_json(v: &Value) -> Result<TurnEvent> {
                 .unwrap_or("")
                 .to_string(),
         }),
+        "assistant_thought" => Ok(TurnEvent::AssistantThought {
+            text: v
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        }),
         "tool_use" => Ok(TurnEvent::ToolUse {
             name: v
                 .get("name")
@@ -106,6 +126,11 @@ pub fn event_from_json(v: &Value) -> Result<TurnEvent> {
                 .unwrap_or("")
                 .to_string(),
             input: v.get("input").cloned().unwrap_or(Value::Null),
+        }),
+        "usage" => Ok(TurnEvent::Usage {
+            input_tokens: v.get("input_tokens").and_then(Value::as_u64),
+            output_tokens: v.get("output_tokens").and_then(Value::as_u64),
+            cost_usd: v.get("cost_usd").and_then(Value::as_f64),
         }),
         "result" => Ok(TurnEvent::Result {
             cost_usd: v.get("cost_usd").and_then(Value::as_f64),
@@ -144,12 +169,28 @@ pub enum TurnEvent {
     System {
         subtype: String,
     },
+    /// The agent's final visible message chunk. Concatenate across consecutive
+    /// `AssistantText` events to reconstruct the user-facing reply.
     AssistantText {
+        text: String,
+    },
+    /// Chain-of-thought / reasoning chunk emitted alongside the final reply.
+    /// Separate variant so UIs can render it muted or hidden behind a toggle.
+    AssistantThought {
         text: String,
     },
     ToolUse {
         name: String,
         input: Value,
+    },
+    /// Token / cost usage report from the agent. Emitted mid-turn (opencode
+    /// streams it via `usage_update` notifications) or once at turn end
+    /// (claude/codex include usage in their `session/prompt` response).
+    /// Fields are `Option` because each agent reports a different subset.
+    Usage {
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        cost_usd: Option<f64>,
     },
     Result {
         cost_usd: Option<f64>,

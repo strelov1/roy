@@ -1,10 +1,8 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use roy::error::RoyError;
 use roy::event::{StopReason, TurnEvent};
-use roy::session::Session;
 use roy::transport::{AcpConfig, AcpTransport, PermissionPolicy, Transport};
 
 fn fake_config(extra: &[&str]) -> AcpConfig {
@@ -16,6 +14,7 @@ fn fake_config(extra: &[&str]) -> AcpConfig {
         mode_id: Some("yolo".to_string()),
         permission_policy: PermissionPolicy::AllowAll,
         open_timeout: Duration::from_secs(5),
+        env_remove: Vec::new(),
     }
 }
 
@@ -89,20 +88,6 @@ async fn auto_allows_permission_requests() {
 }
 
 #[tokio::test]
-async fn session_via_transport_records_acp_cursor() {
-    let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(fake_config(&[])));
-    let mut session = Session::new(transport, std::env::current_dir().unwrap());
-
-    {
-        let mut stream = session.send("hi").await.unwrap();
-        while stream.next().await.is_some() {}
-    }
-    // Session stored the ACP sessionId (NOT its own uuid) as the resume cursor.
-    assert_eq!(session.resume_cursor(), Some("fake-acp-sid"));
-    session.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn open_without_mode_skips_set_mode() {
     // OpenCode has no ACP modes, so AcpConfig sets mode_id = None and open()
     // must skip session/set_mode. The fake agent never receives set_mode here.
@@ -112,6 +97,7 @@ async fn open_without_mode_skips_set_mode() {
         mode_id: None,
         permission_policy: PermissionPolicy::Deny,
         open_timeout: Duration::from_secs(5),
+        env_remove: Vec::new(),
     };
     let transport = AcpTransport::new(config);
     let mut handle = transport
@@ -255,12 +241,15 @@ async fn real_gemini_spawn_and_turn() {
         eprintln!("skipping: gemini not on PATH");
         return;
     }
-    let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(AcpConfig::gemini()));
-    let mut session = Session::new(transport, std::env::current_dir().unwrap());
+    let transport = AcpTransport::new(AcpConfig::gemini());
+    let mut handle = transport
+        .open("ignored", None, std::env::current_dir().unwrap())
+        .await
+        .unwrap();
 
     let mut answer = String::new();
     {
-        let mut stream = session
+        let mut stream = handle
             .send("reply with exactly the word: hello")
             .await
             .unwrap();
@@ -271,8 +260,8 @@ async fn real_gemini_spawn_and_turn() {
         }
     }
     assert!(answer.to_lowercase().contains("hello"), "got: {answer:?}");
-    assert!(session.resume_cursor().is_some());
-    session.close().await.unwrap();
+    assert!(handle.resume_cursor().is_some());
+    handle.close().await.unwrap();
 }
 
 fn which_gemini() -> Option<()> {
@@ -288,12 +277,15 @@ async fn real_opencode_spawn_and_turn() {
         eprintln!("skipping: opencode not on PATH");
         return;
     }
-    let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(AcpConfig::opencode()));
-    let mut session = Session::new(transport, std::env::current_dir().unwrap());
+    let transport = AcpTransport::new(AcpConfig::opencode());
+    let mut handle = transport
+        .open("ignored", None, std::env::current_dir().unwrap())
+        .await
+        .unwrap();
 
     let mut answer = String::new();
     {
-        let mut stream = session
+        let mut stream = handle
             .send("reply with exactly the word: hello")
             .await
             .unwrap();
@@ -304,8 +296,8 @@ async fn real_opencode_spawn_and_turn() {
         }
     }
     assert!(answer.to_lowercase().contains("hello"), "got: {answer:?}");
-    assert!(session.resume_cursor().is_some());
-    session.close().await.unwrap();
+    assert!(handle.resume_cursor().is_some());
+    handle.close().await.unwrap();
 }
 
 // Real codex via the codex-acp adapter. Ignored by default: needs the
@@ -318,12 +310,15 @@ async fn real_codex_spawn_and_turn() {
         eprintln!("skipping: codex-acp not on PATH");
         return;
     }
-    let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(AcpConfig::codex()));
-    let mut session = Session::new(transport, std::env::current_dir().unwrap());
+    let transport = AcpTransport::new(AcpConfig::codex());
+    let mut handle = transport
+        .open("ignored", None, std::env::current_dir().unwrap())
+        .await
+        .unwrap();
 
     let mut answer = String::new();
     {
-        let mut stream = session
+        let mut stream = handle
             .send("reply with exactly the word: hello")
             .await
             .unwrap();
@@ -334,27 +329,30 @@ async fn real_codex_spawn_and_turn() {
         }
     }
     assert!(answer.to_lowercase().contains("hello"), "got: {answer:?}");
-    assert!(session.resume_cursor().is_some());
-    session.close().await.unwrap();
+    assert!(handle.resume_cursor().is_some());
+    handle.close().await.unwrap();
 }
 
-// Real Claude Agent via the claude-code-acp adapter. Ignored by default: needs
+// Real Claude via the claude-code-acp adapter. Ignored by default: needs
 // the `claude-code-acp` binary on PATH (npm i -g @zed-industries/claude-code-acp)
 // and API auth (CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY) in the env.
-// Run with: cargo test --test acp_transport -- --ignored real_claude_agent
+// Run with: cargo test --test acp_transport -- --ignored real_claude
 #[tokio::test]
 #[ignore]
-async fn real_claude_agent_spawn_and_turn() {
+async fn real_claude_spawn_and_turn() {
     if which("claude-code-acp").is_none() {
         eprintln!("skipping: claude-code-acp not on PATH");
         return;
     }
-    let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(AcpConfig::claude_agent()));
-    let mut session = Session::new(transport, std::env::current_dir().unwrap());
+    let transport = AcpTransport::new(AcpConfig::claude());
+    let mut handle = transport
+        .open("ignored", None, std::env::current_dir().unwrap())
+        .await
+        .unwrap();
 
     let mut answer = String::new();
     {
-        let mut stream = session
+        let mut stream = handle
             .send("reply with exactly the word: hello")
             .await
             .unwrap();
@@ -365,8 +363,8 @@ async fn real_claude_agent_spawn_and_turn() {
         }
     }
     assert!(answer.to_lowercase().contains("hello"), "got: {answer:?}");
-    assert!(session.resume_cursor().is_some());
-    session.close().await.unwrap();
+    assert!(handle.resume_cursor().is_some());
+    handle.close().await.unwrap();
 }
 
 fn which(bin: &str) -> Option<()> {

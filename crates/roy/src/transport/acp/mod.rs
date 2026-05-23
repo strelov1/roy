@@ -62,6 +62,10 @@ pub struct AcpConfig {
     /// Upper bound on the open handshake (spawn + initialize + session). Guards
     /// against an agent that accepts the connection but never replies.
     pub open_timeout: Duration,
+    /// Env vars to strip from the child's environment at spawn (the daemon's
+    /// own env is inherited otherwise). Per-preset because the problematic
+    /// variables are agent-specific — e.g. `CLAUDECODE` for `claude-code-acp`.
+    pub env_remove: Vec<String>,
 }
 
 impl AcpConfig {
@@ -73,6 +77,7 @@ impl AcpConfig {
             mode_id: Some("yolo".to_string()),
             permission_policy: PermissionPolicy::AllowAll,
             open_timeout: Duration::from_secs(30),
+            env_remove: Vec::new(),
         }
     }
 
@@ -85,6 +90,7 @@ impl AcpConfig {
             mode_id: None,
             permission_policy: PermissionPolicy::Deny,
             open_timeout: Duration::from_secs(30),
+            env_remove: Vec::new(),
         }
     }
 
@@ -96,18 +102,22 @@ impl AcpConfig {
             mode_id: Some("full-access".to_string()),
             permission_policy: PermissionPolicy::AllowAll,
             open_timeout: Duration::from_secs(30),
+            env_remove: Vec::new(),
         }
     }
 
     /// Claude Code via the claude-code-acp adapter. No ACP modes; auto-approve
-    /// tools.
-    pub fn claude_agent() -> Self {
+    /// tools. `CLAUDECODE` is stripped: claude-code-acp has an anti-recursion
+    /// guard that refuses to start if it sees that variable set, which makes
+    /// `roy serve` impossible to run from inside another Claude Code session.
+    pub fn claude() -> Self {
         Self {
             command: "claude-code-acp".to_string(),
             args: Vec::new(),
             mode_id: None,
             permission_policy: PermissionPolicy::AllowAll,
             open_timeout: Duration::from_secs(30),
+            env_remove: vec!["CLAUDECODE".to_string()],
         }
     }
 }
@@ -144,14 +154,16 @@ impl Transport for AcpTransport {
     ) -> Result<Box<dyn Handle>> {
         let cwd = std::path::absolute(&cwd).map_err(RoyError::Io)?;
 
-        let mut child = Command::new(&self.config.command)
-            .args(&self.config.args)
+        let mut cmd = Command::new(&self.config.command);
+        cmd.args(&self.config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(RoyError::Io)?;
+            .kill_on_drop(true);
+        for key in &self.config.env_remove {
+            cmd.env_remove(key);
+        }
+        let mut child = cmd.spawn().map_err(RoyError::Io)?;
         let stdin = child
             .stdin
             .take()
@@ -160,7 +172,25 @@ impl Transport for AcpTransport {
             .stdout
             .take()
             .ok_or_else(|| RoyError::Protocol("child stdout not piped".into()))?;
-        let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
+
+        let sink: TurnSink = Arc::new(Mutex::new(None));
+        let sink_for_filter = Arc::clone(&sink);
+        let sink_for_notif = Arc::clone(&sink);
+        let sink_for_actor = Arc::clone(&sink);
+
+        // Line-based stdin filter between the child and the SDK:
+        //   - intercept `session/update {usage_update}` notifications, extract
+        //     tokens/cost into a `TurnEvent::Usage`, and drop the line so the
+        //     SDK never sees an unknown variant. This fixes opencode (whose
+        //     usage_update was triggering JSON-RPC error replies on what is
+        //     supposed to be a notification, aborting the turn).
+        //   - everything else passes through unchanged.
+        // The duplex's writer half lives in the filter task; when the child
+        // exits, BufReader returns None, the writer drops, and the SDK reading
+        // the reader half sees EOF.
+        let (filter_writer, filter_reader) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(filter_child_stdout(stdout, filter_writer, sink_for_filter));
+        let transport = ByteStreams::new(stdin.compat_write(), filter_reader.compat());
 
         let policy = self.config.permission_policy;
         let mode_id = self.config.mode_id.clone();
@@ -169,10 +199,6 @@ impl Transport for AcpTransport {
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
         let (ready_tx, ready_rx) = oneshot::channel::<String>();
-
-        let sink: TurnSink = Arc::new(Mutex::new(None));
-        let sink_for_notif = Arc::clone(&sink);
-        let sink_for_actor = Arc::clone(&sink);
 
         // Watch channel: sender lives in the watcher branch and is dropped
         // when the child exits, signalling every cloned receiver via `changed()`.
@@ -373,13 +399,23 @@ async fn run_turn(
 
     let stop_reason = tokio::select! {
         r = &mut prompt_fut => match r {
-            Ok(resp) => map_stop_reason(resp.stop_reason),
+            Ok(resp) => {
+                if let Some(usage) = extract_usage_from_response(&resp) {
+                    let _ = event_tx.send(usage);
+                }
+                map_stop_reason(resp.stop_reason)
+            }
             Err(_) => StopReason::Error,
         },
         _ = cancel_rx => {
             let _ = cx.send_notification(CancelNotification::new(session_id.clone()));
             match prompt_fut.await {
-                Ok(resp) => map_stop_reason(resp.stop_reason),
+                Ok(resp) => {
+                    if let Some(usage) = extract_usage_from_response(&resp) {
+                        let _ = event_tx.send(usage);
+                    }
+                    map_stop_reason(resp.stop_reason)
+                }
                 Err(_) => StopReason::Error,
             }
         }
@@ -395,16 +431,108 @@ async fn run_turn(
     Ok(())
 }
 
+/// Forward lines from the child's stdout to the SDK, intercepting `session/
+/// update` notifications whose variant the SDK doesn't model. Currently
+/// handles opencode's `usage_update`: extracts tokens/cost into a
+/// `TurnEvent::Usage` pushed straight into the active turn's sink, and drops
+/// the line so the SDK doesn't reply with a JSON-RPC error on a notification
+/// (which would otherwise make opencode abort the turn).
+async fn filter_child_stdout(
+    stdout: tokio::process::ChildStdout,
+    mut sink_out: tokio::io::DuplexStream,
+    turn_sink: TurnSink,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut lines = BufReader::new(stdout).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(usage) = try_extract_usage_update(&line) {
+            if let Some(tx) = turn_sink.lock().unwrap().as_ref() {
+                let _ = tx.send(usage);
+            }
+            continue;
+        }
+        if sink_out.write_all(line.as_bytes()).await.is_err() {
+            break;
+        }
+        if sink_out.write_all(b"\n").await.is_err() {
+            break;
+        }
+    }
+}
+
+/// Look for token / cost info on the agent's final `session/prompt` response.
+/// `PromptResponse` exposes `stop_reason` typed but `usage` only via
+/// passthrough fields — `serde_json::to_value` is the cheapest way to peek
+/// across SDK versions without hardcoding their internal shape. Claude and
+/// codex usually populate this; others (gemini, opencode) may not, in which
+/// case we get `None` and stay silent.
+fn extract_usage_from_response<T: serde::Serialize>(resp: &T) -> Option<TurnEvent> {
+    let v = serde_json::to_value(resp).ok()?;
+    // Tolerate both snake_case and camelCase across agents.
+    let usage = v.get("usage").or_else(|| v.get("_meta"))?;
+    let pick = |k1: &str, k2: &str| {
+        usage
+            .get(k1)
+            .or_else(|| usage.get(k2))
+            .and_then(Value::as_u64)
+    };
+    let input = pick("input_tokens", "inputTokens");
+    let output = pick("output_tokens", "outputTokens");
+    let cost = usage
+        .get("cost_usd")
+        .or_else(|| usage.get("costUsd"))
+        .and_then(Value::as_f64);
+    if input.is_none() && output.is_none() && cost.is_none() {
+        return None;
+    }
+    Some(TurnEvent::Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cost_usd: cost,
+    })
+}
+
+/// Recognise opencode's `session/update {sessionUpdate: "usage_update"}`
+/// notification and pull out the numbers we care about. Returns `None` for
+/// any other line — the caller passes those through unchanged.
+fn try_extract_usage_update(line: &str) -> Option<TurnEvent> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("method")?.as_str()? != "session/update" {
+        return None;
+    }
+    let update = v.pointer("/params/update")?;
+    if update.get("sessionUpdate")?.as_str()? != "usage_update" {
+        return None;
+    }
+    let used = update.get("used").and_then(Value::as_u64);
+    let cost = update.pointer("/cost/amount").and_then(Value::as_f64);
+    if used.is_none() && cost.is_none() {
+        return None;
+    }
+    Some(TurnEvent::Usage {
+        input_tokens: None,
+        output_tokens: used,
+        cost_usd: cost.filter(|c| *c > 0.0),
+    })
+}
+
 fn update_to_event(update: SessionUpdate) -> Option<TurnEvent> {
     match update {
         SessionUpdate::AgentMessageChunk(ContentChunk {
             content: ContentBlock::Text(text),
             ..
         }) => Some(TurnEvent::AssistantText { text: text.text }),
+        SessionUpdate::AgentThoughtChunk(ContentChunk {
+            content: ContentBlock::Text(text),
+            ..
+        }) => Some(TurnEvent::AssistantThought { text: text.text }),
         SessionUpdate::ToolCall(tool_call) => Some(TurnEvent::ToolUse {
             name: tool_call.title,
             input: tool_call.raw_input.unwrap_or(Value::Null),
         }),
+        // Drop status updates: the original ToolCall is already in the journal
+        // and `completed`/`failed` carry no info the UI needs to render again.
+        SessionUpdate::ToolCallUpdate(_) => None,
         SessionUpdate::AvailableCommandsUpdate(_) => None,
         other => serde_json::to_value(&other).ok().map(TurnEvent::Raw),
     }
@@ -506,4 +634,31 @@ fn turn_stream(
             };
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_preset_strips_claudecode_env() {
+        // claude-code-acp refuses to launch if CLAUDECODE is set. The preset
+        // must include it in env_remove so roy daemons launched from inside a
+        // Claude Code session can still spawn claude children.
+        let cfg = AcpConfig::claude();
+        assert!(
+            cfg.env_remove.iter().any(|k| k == "CLAUDECODE"),
+            "AcpConfig::claude() must strip CLAUDECODE, got env_remove={:?}",
+            cfg.env_remove
+        );
+    }
+
+    #[test]
+    fn other_presets_do_not_touch_env_by_default() {
+        // Sanity: only the claude preset has env-stripping behaviour. If we
+        // ever add to other presets, that decision deserves a deliberate test.
+        assert!(AcpConfig::gemini().env_remove.is_empty());
+        assert!(AcpConfig::opencode().env_remove.is_empty());
+        assert!(AcpConfig::codex().env_remove.is_empty());
+    }
 }

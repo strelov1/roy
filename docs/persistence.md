@@ -62,9 +62,9 @@ Fields:
 | field           | source                                                         |
 |-----------------|-----------------------------------------------------------------|
 | `session_id`    | roy-side UUID minted at first spawn; stable across restarts     |
-| `agent`         | the preset name (`claude_agent`, `gemini`, `opencode`, `codex`) |
+| `agent`         | the preset name (`claude`, `gemini`, `opencode`, `codex`)       |
 | `cwd`           | the working directory passed on spawn                           |
-| `model`         | the `--model` flag, if applicable (claude_agent only)           |
+| `model`         | the `--model` flag, if applicable (claude only)                 |
 | `permission`    | the requested `PermissionPolicy` (`allow` / `deny`)             |
 | `resume_cursor` | the agent-issued session id (e.g. ACP `sessionId`) most recently observed from `Handle::resume_cursor()` |
 

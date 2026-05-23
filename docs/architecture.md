@@ -64,7 +64,7 @@ stop_reason: Error }`; the SDK's high-level helper would otherwise leave
 
 `AcpConfig` presets centralise agent-specific knobs (command, args, ACP
 mode, default permission policy, open-handshake timeout) for the four
-supported agents: `claude_agent`, `gemini`, `opencode`, `codex`.
+supported agents: `claude`, `gemini`, `opencode`, `codex`.
 
 ### `SessionEngine` — the actor that owns a session
 

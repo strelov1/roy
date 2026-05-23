@@ -34,6 +34,15 @@ type SubsMap = HashMap<String, tokio::task::JoinHandle<()>>;
 /// Per-connection input leases, keyed by session id.
 type LeasesMap = HashMap<String, InputLease>;
 
+/// `ROY_CWD` lets the systemd/launchd unit pin a default project root for
+/// clients that don't supply `Spawn.cwd` (notably MCP tools without `cwd`).
+fn default_agent_cwd() -> PathBuf {
+    if let Some(s) = std::env::var_os("ROY_CWD") {
+        return PathBuf::from(s);
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
 /// Tiny helper to factor away the repetitive error-event send.
 fn send_error(tx: &EventTx, session: Option<String>, code: ErrorCode, message: impl Into<String>) {
     let _ = tx.send(ServerEvent::Error {
@@ -65,7 +74,7 @@ impl TransportFactory for DefaultTransportFactory {
         permission: Option<&str>,
     ) -> Result<Arc<dyn Transport>> {
         let mut config = match agent {
-            "claude_agent" => AcpConfig::claude_agent(),
+            "claude" => AcpConfig::claude(),
             "gemini" => AcpConfig::gemini(),
             "opencode" => AcpConfig::opencode(),
             "codex" => AcpConfig::codex(),
@@ -392,6 +401,23 @@ impl Daemon {
                     .await
             }
             ClientCommand::ListArchived => self.handle_list_archived(event_tx).await,
+            ClientCommand::DeleteArchive { session } => {
+                self.handle_delete_archive(session, event_tx).await
+            }
+        }
+    }
+
+    async fn handle_delete_archive(self: &Arc<Self>, session: String, event_tx: &EventTx) {
+        match self.manager.delete_archive(&session).await {
+            Ok(()) => {
+                let _ = event_tx.send(ServerEvent::Deleted { session });
+            }
+            Err(e) => send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::DeleteFailed,
+                e.to_string(),
+            ),
         }
     }
 
@@ -406,9 +432,7 @@ impl Daemon {
     ) {
         let cfg = SessionSpawnConfig {
             agent,
-            cwd: cwd
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+            cwd: cwd.map(PathBuf::from).unwrap_or_else(default_agent_cwd),
             model,
             permission,
             resume_cursor: resume,
@@ -492,9 +516,14 @@ impl Daemon {
             .last()
             .map(|e| e.seq + 1)
             .unwrap_or_else(|| from_seq.unwrap_or(0));
+        let agent = crate::session_meta::read_metadata(self.manager.journal_dir(), &session)
+            .await
+            .map(|m| m.agent)
+            .unwrap_or_default();
         let _ = event_tx.send(ServerEvent::Attached {
             session: session.clone(),
             seq_at_attach,
+            agent,
         });
         if let Some(prev) = subs.remove(&session) {
             prev.abort();
@@ -652,9 +681,11 @@ async fn attach_live(
             return;
         }
     };
+    let agent = engine.agent().to_string();
     let _ = event_tx.send(ServerEvent::Attached {
         session: session.clone(),
         seq_at_attach: attach.seq_at_attach,
+        agent,
     });
     if let Some(prev) = subs.remove(&session) {
         prev.abort();
@@ -739,6 +770,7 @@ mod tests {
                 mode_id: Some("yolo".to_string()),
                 permission_policy: PermissionPolicy::AllowAll,
                 open_timeout: Duration::from_secs(5),
+                env_remove: Vec::new(),
             })))
         }
     }

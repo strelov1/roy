@@ -123,7 +123,7 @@ fn tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent": {"type": "string", "enum": ["claude_agent", "gemini", "opencode", "codex"]},
+                        "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
                         "task": {"type": "string"},
                         "cwd": {"type": "string"},
                         "model": {"type": "string"},
@@ -140,7 +140,7 @@ fn tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent": {"type": "string", "enum": ["claude_agent", "gemini", "opencode", "codex"]},
+                        "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
                         "task": {"type": "string"},
                         "cwd": {"type": "string"},
                         "model": {"type": "string"},
@@ -244,6 +244,7 @@ async fn send_cmd(
 
 /// Shared shape of arguments for `roy_run` / `roy_run_detached`. Both tools
 /// queue a `Spawn` with the same fields; only the post-spawn behavior differs.
+#[derive(Debug)]
 struct SpawnArgs {
     agent: String,
     task: String,
@@ -536,6 +537,26 @@ async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<St
                     TurnEvent::AssistantText { text } => {
                         rendered.push(format!("[{}] assistant: {text}", entry.seq));
                     }
+                    TurnEvent::AssistantThought { text } => {
+                        rendered.push(format!("[{}] thought: {text}", entry.seq));
+                    }
+                    TurnEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                        cost_usd,
+                    } => {
+                        let mut parts = Vec::new();
+                        if let Some(n) = input_tokens {
+                            parts.push(format!("in={n}"));
+                        }
+                        if let Some(n) = output_tokens {
+                            parts.push(format!("out={n}"));
+                        }
+                        if let Some(c) = cost_usd {
+                            parts.push(format!("cost=${c:.4}"));
+                        }
+                        rendered.push(format!("[{}] usage: {}", entry.seq, parts.join(" ")));
+                    }
                     TurnEvent::ToolUse { name, .. } => {
                         rendered.push(format!("[{}] tool_use: {name}", entry.seq));
                     }
@@ -575,4 +596,177 @@ async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> anyhow::R
     w.write_all(b"\n").await?;
     w.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `tools/list` must enumerate exactly the six tools the LLM-facing surface
+    /// promises. A drift between this set and the documented API would silently
+    /// break MCP clients, so the test pins the list explicitly.
+    #[test]
+    fn tools_list_enumerates_the_documented_six_tools() {
+        let list = tools_list();
+        let names: Vec<&str> = list["tools"]
+            .as_array()
+            .expect("tools is an array")
+            .iter()
+            .map(|t| t["name"].as_str().expect("tool name is a string"))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "roy_list_sessions",
+                "roy_list_archived",
+                "roy_run",
+                "roy_run_detached",
+                "roy_read_session",
+                "roy_close",
+            ]
+        );
+    }
+
+    #[test]
+    fn initialize_result_wraps_id_and_advertises_tools_capability() {
+        let r = initialize_result(json!(42));
+        assert_eq!(r["jsonrpc"], "2.0");
+        assert_eq!(r["id"], json!(42));
+        assert_eq!(r["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
+        assert_eq!(r["result"]["serverInfo"]["name"], SERVER_NAME);
+        assert!(r["result"]["capabilities"]
+            .as_object()
+            .unwrap()
+            .contains_key("tools"));
+    }
+
+    #[test]
+    fn ok_and_error_response_match_jsonrpc_envelope() {
+        let ok = ok_result(json!("abc"), json!({"foo": 1}));
+        assert_eq!(ok["jsonrpc"], "2.0");
+        assert_eq!(ok["id"], json!("abc"));
+        assert_eq!(ok["result"], json!({"foo": 1}));
+
+        let err = error_response(json!(7), -32601, "method not found: xyz");
+        assert_eq!(err["jsonrpc"], "2.0");
+        assert_eq!(err["id"], json!(7));
+        assert_eq!(err["error"]["code"], json!(-32601));
+        assert_eq!(err["error"]["message"], json!("method not found: xyz"));
+    }
+
+    #[test]
+    fn parse_spawn_args_extracts_required_and_optional_fields() {
+        let parsed = parse_spawn_args(&json!({
+            "agent": "opencode",
+            "task": "do it",
+            "cwd": "/tmp",
+            "model": "gpt-x",
+            "permission": "allow",
+            "resume": "sid-1"
+        }))
+        .unwrap();
+        assert_eq!(parsed.agent, "opencode");
+        assert_eq!(parsed.task, "do it");
+        assert_eq!(parsed.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(parsed.model.as_deref(), Some("gpt-x"));
+        assert_eq!(parsed.permission.as_deref(), Some("allow"));
+        assert_eq!(parsed.resume.as_deref(), Some("sid-1"));
+    }
+
+    #[test]
+    fn parse_spawn_args_omits_missing_optional_fields() {
+        let parsed = parse_spawn_args(&json!({
+            "agent": "gemini",
+            "task": "go"
+        }))
+        .unwrap();
+        assert_eq!(parsed.agent, "gemini");
+        assert_eq!(parsed.task, "go");
+        assert!(parsed.cwd.is_none());
+        assert!(parsed.model.is_none());
+        assert!(parsed.permission.is_none());
+        assert!(parsed.resume.is_none());
+    }
+
+    #[test]
+    fn parse_spawn_args_errors_when_required_fields_missing() {
+        let err = parse_spawn_args(&json!({"task": "x"})).unwrap_err();
+        assert!(err.to_string().contains("'agent'"));
+
+        let err = parse_spawn_args(&json!({"agent": "gemini"})).unwrap_err();
+        assert!(err.to_string().contains("'task'"));
+    }
+
+    /// `dispatch` must answer `initialize`, `tools/list`, `ping`, and unknown
+    /// methods without ever touching the socket — these branches don't open a
+    /// daemon connection, so an invalid path is a fine stand-in.
+    #[tokio::test]
+    async fn dispatch_initialize_returns_handshake_envelope() {
+        let bogus = Path::new("/dev/null/not-a-socket");
+        let resp = dispatch(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+            bogus,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["id"], json!(1));
+        assert_eq!(resp["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_list_returns_full_inventory() {
+        let bogus = Path::new("/dev/null/not-a-socket");
+        let resp = dispatch(
+            &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            bogus,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["id"], json!(2));
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"roy_run"));
+        assert!(names.contains(&"roy_read_session"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_ping_returns_empty_ok() {
+        let bogus = Path::new("/dev/null/not-a-socket");
+        let resp = dispatch(&json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}), bogus)
+            .await
+            .unwrap();
+        assert_eq!(resp["result"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_method_returns_method_not_found() {
+        let bogus = Path::new("/dev/null/not-a-socket");
+        let resp = dispatch(
+            &json!({"jsonrpc": "2.0", "id": 4, "method": "totally/unknown"}),
+            bogus,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["error"]["code"], json!(-32601));
+        assert!(resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("totally/unknown"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_notification_yields_no_response() {
+        let bogus = Path::new("/dev/null/not-a-socket");
+        // No `id` field → notification → must produce no response.
+        let resp = dispatch(
+            &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            bogus,
+        )
+        .await;
+        assert!(resp.is_none());
+    }
 }

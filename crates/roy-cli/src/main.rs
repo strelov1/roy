@@ -67,7 +67,7 @@ struct ServeArgs {
 
 #[derive(clap::Args)]
 struct RunArgs {
-    /// claude_agent | gemini | opencode | codex
+    /// claude | gemini | opencode | codex
     agent: String,
     task: String,
     #[arg(long)]
@@ -240,14 +240,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         &mut writer,
         &ClientCommand::Spawn {
             agent: args.agent.clone(),
-            cwd: args
-                .cwd
-                .map(|p| p.to_string_lossy().into_owned())
-                .or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .map(|p| p.to_string_lossy().into_owned())
-                }),
+            cwd: args.cwd.map(|p| p.to_string_lossy().into_owned()),
             model: args.model.clone(),
             permission: args.permission.clone(),
             resume: args.resume.clone(),
@@ -319,34 +312,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     )
     .await?;
 
-    // Drain frames until terminal Result.
-    let mut exit_code = ExitCode::SUCCESS;
-    loop {
-        match read_event(&mut events).await? {
-            ServerEvent::Frame { entry, .. } => {
-                print_entry(&entry, args.with_seq);
-                if let TurnEvent::Result {
-                    ref stop_reason, ..
-                } = entry.event
-                {
-                    if stop_reason.is_error() {
-                        exit_code = ExitCode::from(1);
-                    }
-                    break;
-                }
-            }
-            ServerEvent::Error {
-                session: _,
-                code,
-                message,
-            } => {
-                anyhow::bail!("session error: {code}: {message}");
-            }
-            other => {
-                eprintln!("roy: skipping unexpected event: {other:?}");
-            }
-        }
-    }
+    let exit_code = drain_until_terminal_result(&mut events, args.with_seq).await?;
 
     // Final session line so the caller can resume later.
     let payload = serde_json::json!({
@@ -391,30 +357,7 @@ async fn cmd_attach(args: AttachArgs) -> anyhow::Result<ExitCode> {
         other => anyhow::bail!("unexpected response to Attach: {other:?}"),
     }
 
-    let mut exit_code = ExitCode::SUCCESS;
-    loop {
-        match read_event(&mut events).await? {
-            ServerEvent::Frame { entry, .. } => {
-                print_entry(&entry, args.with_seq);
-                if let TurnEvent::Result {
-                    ref stop_reason, ..
-                } = entry.event
-                {
-                    if stop_reason.is_error() {
-                        exit_code = ExitCode::from(1);
-                    }
-                    break;
-                }
-            }
-            ServerEvent::Error { code, message, .. } => {
-                anyhow::bail!("attach error: {code}: {message}");
-            }
-            other => {
-                eprintln!("roy: skipping unexpected event: {other:?}");
-            }
-        }
-    }
-    Ok(exit_code)
+    drain_until_terminal_result(&mut events, args.with_seq).await
 }
 
 async fn cmd_list(archived: bool) -> anyhow::Result<()> {
@@ -494,10 +437,10 @@ async fn cmd_close(args: CloseArgs) -> anyhow::Result<()> {
 
 fn validate_flags(args: &RunArgs) -> anyhow::Result<()> {
     let is_acp_only = matches!(args.agent.as_str(), "gemini" | "opencode" | "codex");
-    let is_claude_like = matches!(args.agent.as_str(), "claude_agent");
+    let is_claude_like = matches!(args.agent.as_str(), "claude");
 
     if args.model.is_some() && !is_claude_like {
-        anyhow::bail!("--model only applies to claude_agent");
+        anyhow::bail!("--model only applies to claude");
     }
     if args.permission.is_some() && !(is_acp_only || is_claude_like) {
         anyhow::bail!("--permission requires an ACP agent");
@@ -532,4 +475,33 @@ async fn read_event<R: AsyncBufReadExt + Unpin>(
         .await?
         .ok_or_else(|| anyhow!("daemon hung up"))?;
     Ok(serde_json::from_str(line.trim())?)
+}
+
+async fn drain_until_terminal_result<R: AsyncBufReadExt + Unpin>(
+    events: &mut tokio::io::Lines<R>,
+    with_seq: bool,
+) -> anyhow::Result<ExitCode> {
+    loop {
+        match read_event(events).await? {
+            ServerEvent::Frame { entry, .. } => {
+                print_entry(&entry, with_seq);
+                if let TurnEvent::Result {
+                    ref stop_reason, ..
+                } = entry.event
+                {
+                    return Ok(if stop_reason.is_error() {
+                        ExitCode::from(1)
+                    } else {
+                        ExitCode::SUCCESS
+                    });
+                }
+            }
+            ServerEvent::Error { code, message, .. } => {
+                anyhow::bail!("agent error: {code}: {message}");
+            }
+            other => {
+                eprintln!("roy: skipping unexpected event: {other:?}");
+            }
+        }
+    }
 }
