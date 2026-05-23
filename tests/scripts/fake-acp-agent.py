@@ -7,8 +7,9 @@ Flags:
                          client selects the allow_once option by its id.
   --cancellable          stream one chunk then wait; finish (cancelled) only
                          after receiving session/cancel.
-  --exit-mid-turn        stream one chunk then exit the process.
-  --exit-on-initialize   exit on the initialize request.
+  --exit-mid-turn        stream one chunk then crash (non-zero exit) so the
+                         SDK's child-monitor surfaces the failure.
+  --exit-on-initialize   crash (non-zero exit) on the initialize request.
   --no-initialize-reply  never answer initialize.
   --jsonrpc-error        answer initialize with a JSON-RPC error.
 """
@@ -51,7 +52,7 @@ for line in sys.stdin:
 
     if method == "initialize":
         if "--exit-on-initialize" in flags:
-            sys.exit(0)
+            sys.exit(1)
         if "--no-initialize-reply" in flags:
             continue
         if "--jsonrpc-error" in flags:
@@ -71,7 +72,7 @@ for line in sys.stdin:
         sid = m["params"]["sessionId"]
         if "--exit-mid-turn" in flags:
             chunk(sid, "partial")
-            sys.exit(0)
+            sys.exit(1)
         if "--permission" in flags:
             out({"jsonrpc": "2.0", "id": 9001, "method": "session/request_permission",
                  "params": {"sessionId": sid, "toolCall": {"toolCallId": "t1", "title": "Bash"},

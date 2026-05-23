@@ -1,12 +1,17 @@
 //! ACP transport built on the official `agent-client-protocol` SDK.
 //!
-//! The SDK owns JSON-RPC framing, version negotiation, the typed schema, and
-//! process spawning. This module adapts its connection model (an `async` scope
-//! that owns the live session) onto roy's `Transport`/`Handle`/`TurnEvent`
-//! contract via a single actor task that owns the `ActiveSession` and serves
-//! prompt/close commands over a channel.
+//! Lower-level model: the actor drives turns by sending raw `PromptRequest`s
+//! via `cx.send_request(...).block_task()` and listens to session updates
+//! through an `on_receive_notification` handler that forwards mapped events
+//! into the current turn's `event_tx`. We deliberately do NOT use the SDK's
+//! `ActiveSession`/`read_update` API because its update channel can be left
+//! dangling when the underlying transport closes cleanly (the channel's own
+//! sender stays alive inside `ActiveSession`), which produces a permanent
+//! hang on agent-side `exit(0)`. The lower-level `send_request` resolves
+//! with `Err` when the connection dies, giving us a reliable terminal signal.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,17 +20,22 @@ use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::schema::{
     CancelNotification, ContentBlock, ContentChunk, InitializeRequest, LoadSessionRequest,
-    NewSessionResponse, PermissionOptionKind, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate, SetSessionModeRequest, StopReason as AcpStopReason,
+    NewSessionRequest, PermissionOptionKind, PromptRequest, ProtocolVersion,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
+    SetSessionModeRequest, StopReason as AcpStopReason, TextContent,
 };
-use agent_client_protocol::util::MatchDispatch;
-use agent_client_protocol::{ActiveSession, Agent, Client, ConnectionTo, Dispatch, SessionMessage};
+use agent_client_protocol::{Agent, Client, ConnectionTo};
 
 use crate::error::{Result, RoyError};
 use crate::event::{StopReason, TurnEvent};
 
 use super::{Handle, Transport, TurnStream};
+
+/// Shared sink that the global notification handler writes into. `Some(tx)`
+/// while a turn is active, `None` otherwise (updates outside a turn — e.g. a
+/// `session/load` history replay — are dropped).
+type TurnSink = Arc<Mutex<Option<mpsc::UnboundedSender<TurnEvent>>>>;
 
 /// How to answer agent-initiated `session/request_permission` requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,10 +147,25 @@ impl Transport for AcpTransport {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
         let (ready_tx, ready_rx) = oneshot::channel::<String>();
 
+        let sink: TurnSink = Arc::new(Mutex::new(None));
+        let sink_for_notif = Arc::clone(&sink);
+        let sink_for_actor = Arc::clone(&sink);
+
         let task = tokio::spawn(async move {
             Client
                 .builder()
                 .name("roy")
+                .on_receive_notification(
+                    async move |notif: SessionNotification, _cx| {
+                        if let Some(event) = update_to_event(notif.update) {
+                            if let Some(tx) = sink_for_notif.lock().unwrap().as_ref() {
+                                let _ = tx.send(event);
+                            }
+                        }
+                        Ok(())
+                    },
+                    agent_client_protocol::on_receive_notification!(),
+                )
                 .on_receive_request(
                     async move |request: RequestPermissionRequest, responder, _cx| {
                         let outcome = permission_outcome(&request, policy);
@@ -149,7 +174,7 @@ impl Transport for AcpTransport {
                     agent_client_protocol::on_receive_request!(),
                 )
                 .connect_with(agent, async move |cx: ConnectionTo<Agent>| {
-                    run_session(cx, cwd, resume, mode_id, ready_tx, cmd_rx).await
+                    run_session(cx, cwd, resume, mode_id, ready_tx, cmd_rx, sink_for_actor).await
                 })
                 .await
         });
@@ -174,8 +199,7 @@ fn build_agent(command: &str, args: &[String]) -> Result<agent_client_protocol::
 }
 
 /// Drive one connection: handshake, open the session, then serve commands until
-/// the handle closes (or the agent process dies). Errors before the session is
-/// ready propagate to `open` via the dropped `ready_tx`.
+/// the handle closes (or the agent process dies).
 async fn run_session(
     cx: ConnectionTo<Agent>,
     cwd: PathBuf,
@@ -183,10 +207,11 @@ async fn run_session(
     mode_id: Option<String>,
     ready_tx: oneshot::Sender<String>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
+    sink: TurnSink,
 ) -> std::result::Result<(), agent_client_protocol::Error> {
-    let mut session = setup_session(&cx, cwd, resume, mode_id).await?;
+    let session_id = setup_session(&cx, cwd, resume, mode_id).await?;
 
-    if ready_tx.send(session.session_id().to_string()).is_err() {
+    if ready_tx.send(session_id.to_string()).is_err() {
         // Caller stopped waiting on `open`; nothing to serve.
         return Ok(());
     }
@@ -197,7 +222,7 @@ async fn run_session(
                 text,
                 event_tx,
                 cancel_rx,
-            } => run_turn(&mut session, &text, &event_tx, cancel_rx).await?,
+            } => run_turn(&cx, &session_id, &text, &event_tx, cancel_rx, &sink).await?,
             Command::Close => break,
         }
     }
@@ -209,101 +234,84 @@ async fn setup_session(
     cwd: PathBuf,
     resume: Option<String>,
     mode_id: Option<String>,
-) -> std::result::Result<ActiveSession<'static, Agent>, agent_client_protocol::Error> {
+) -> std::result::Result<SessionId, agent_client_protocol::Error> {
     cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
         .block_task()
         .await?;
 
-    let session = match resume {
+    let (session_id, modes) = match resume {
         Some(sid) => {
             cx.send_request(LoadSessionRequest::new(sid.clone(), cwd))
                 .block_task()
                 .await?;
-            cx.attach_session(NewSessionResponse::new(sid), Default::default())?
+            (SessionId::from(sid), None)
         }
-        None => cx.build_session(cwd).block_task().start_session().await?,
+        None => {
+            let response = cx
+                .send_request(NewSessionRequest::new(cwd))
+                .block_task()
+                .await?;
+            (response.session_id, response.modes)
+        }
     };
 
     if let Some(mode) = mode_id {
-        if let Some(state) = session.modes() {
+        if let Some(state) = &modes {
             let available = state.available_modes.iter().any(|m| m.id.0.as_ref() == mode);
             if !available {
                 return Err(agent_client_protocol::Error::internal_error()
                     .data(format!("mode '{mode}' is not available for this session")));
             }
         }
-        cx.send_request(SetSessionModeRequest::new(session.session_id().clone(), mode))
+        cx.send_request(SetSessionModeRequest::new(session_id.clone(), mode))
             .block_task()
             .await?;
     }
 
-    Ok(session)
+    Ok(session_id)
 }
 
-/// Stream one prompt turn into `event_tx` until the terminal stop reason. If the
-/// caller drops the stream early, `cancel_rx` resolves and we send
-/// `session/cancel`, then drain to the (now `Cancelled`) stop reason.
+/// Stream one prompt turn into `event_tx` until the prompt response resolves.
+/// If the caller drops the stream early, `cancel_rx` resolves and we send
+/// `session/cancel`, then continue awaiting the (now cancelled) response.
 async fn run_turn(
-    session: &mut ActiveSession<'static, Agent>,
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
     text: &str,
     event_tx: &mpsc::UnboundedSender<TurnEvent>,
     cancel_rx: oneshot::Receiver<()>,
+    sink: &Mutex<Option<mpsc::UnboundedSender<TurnEvent>>>,
 ) -> std::result::Result<(), agent_client_protocol::Error> {
-    let connection = session.connection();
-    let session_id = session.session_id().clone();
-    let cancel =
-        || connection.send_notification(CancelNotification::new(session_id.clone()));
+    // Install sink so the global notification handler forwards updates here.
+    *sink.lock().unwrap() = Some(event_tx.clone());
 
-    session.send_prompt(text)?;
-    let mut cancel_rx = Some(cancel_rx);
+    let prompt = PromptRequest::new(
+        session_id.clone(),
+        vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+    );
+    let mut prompt_fut = Box::pin(cx.send_request(prompt).block_task());
 
-    loop {
-        let message = match cancel_rx.as_mut() {
-            Some(cr) => tokio::select! {
-                m = session.read_update() => m?,
-                _ = cr => {
-                    cancel()?;
-                    cancel_rx = None;
-                    continue;
-                }
-            },
-            None => session.read_update().await?,
-        };
-
-        match message {
-            SessionMessage::SessionMessage(dispatch) => {
-                if let Some(event) = dispatch_to_event(dispatch).await {
-                    if event_tx.send(event).is_err() && cancel_rx.is_some() {
-                        cancel()?;
-                        cancel_rx = None;
-                    }
-                }
-            }
-            SessionMessage::StopReason(stop) => {
-                let _ = event_tx.send(TurnEvent::Result {
-                    cost_usd: None,
-                    stop_reason: map_stop_reason(stop),
-                });
-                break;
-            }
-            _ => {}
+    let response = tokio::select! {
+        r = &mut prompt_fut => r,
+        _ = cancel_rx => {
+            // Caller dropped the turn; fire-and-forget cancel, then drain the
+            // (cancelled) response so we emit a terminal Result.
+            let _ = cx.send_notification(CancelNotification::new(session_id.clone()));
+            prompt_fut.await
         }
-    }
-    Ok(())
-}
+    };
 
-/// Extract a `SessionNotification` from a routed dispatch and map its update to
-/// a `TurnEvent`. Non-notification dispatches and unmapped updates yield `None`.
-async fn dispatch_to_event(dispatch: Dispatch) -> Option<TurnEvent> {
-    let mut event = None;
-    let _ = MatchDispatch::new(dispatch)
-        .if_notification(async |notif: SessionNotification| {
-            event = update_to_event(notif.update);
-            Ok::<(), agent_client_protocol::Error>(())
-        })
-        .await
-        .otherwise_ignore();
-    event
+    let stop_reason = match response {
+        Ok(resp) => map_stop_reason(resp.stop_reason),
+        Err(_) => StopReason::Error,
+    };
+    let _ = event_tx.send(TurnEvent::Result {
+        cost_usd: None,
+        stop_reason,
+    });
+
+    *sink.lock().unwrap() = None;
+    Ok(())
 }
 
 fn update_to_event(update: SessionUpdate) -> Option<TurnEvent> {
