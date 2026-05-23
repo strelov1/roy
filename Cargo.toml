@@ -38,3 +38,7 @@ path = "examples/demo_codex.rs"
 [[example]]
 name = "demo_claude_agent"
 path = "examples/demo_claude_agent.rs"
+
+[[example]]
+name = "engine_two_attach"
+path = "examples/engine_two_attach.rs"
