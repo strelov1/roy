@@ -226,7 +226,7 @@ async fn cancel_turn_yields_cancelled_result() {
 }
 
 #[tokio::test]
-async fn wait_for_result_recovers_from_broadcast_lag() {
+async fn wait_for_result_concatenates_many_chunks_then_result() {
     let dir = tmp_journal_dir();
     let mut engine_opts = opts(dir.clone());
     engine_opts.broadcast_capacity = 2;
