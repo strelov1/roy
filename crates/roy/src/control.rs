@@ -3,7 +3,7 @@
 //! (length-prefixed bytes on Unix socket, ws::Message::Text on WebSocket); the
 //! payload — these enums — is the same.
 //!
-//! See `docs/superpowers/specs/2026-05-23-session-engine.md`.
+//! See `docs/architecture.md`.
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

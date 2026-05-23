@@ -57,7 +57,7 @@ impl StopReason {
 
 /// JSON wire-format mapping for a `TurnEvent`. Single source of truth for CLI
 /// stdout, the JSONL journal, and any future trigger protocol (Unix socket /
-/// WebSocket). See `docs/superpowers/specs/2026-05-22-roy-cli-design.md`.
+/// WebSocket). See `docs/wire-protocol.md`.
 pub fn event_to_json(event: &TurnEvent) -> Value {
     match event {
         TurnEvent::System { subtype } => json!({"type": "system", "subtype": subtype}),

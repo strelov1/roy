@@ -102,7 +102,7 @@ roy close <session-id>
 ```
 
 stdout is always one JSON object per line (the `event_to_json` shape; see
-`docs/superpowers/specs/2026-05-22-roy-cli-design.md`). stderr carries
+`docs/wire-protocol.md`). stderr carries
 structured logs from `tracing` — `RUST_LOG=roy=debug roy serve` for verbose
 output.
 

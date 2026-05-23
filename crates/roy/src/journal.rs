@@ -4,7 +4,7 @@
 //! an in-memory `VecDeque` of the most recent `mem_capacity` entries with
 //! monotonic `seq`. Same wire format (`event_to_json`) as CLI stdout and the
 //! future trigger protocols — see `event.rs` and the spec at
-//! `docs/superpowers/specs/2026-05-23-session-engine.md`.
+//! `docs/architecture.md`.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};

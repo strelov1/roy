@@ -1,6 +1,6 @@
 //! `roy` CLI: a thin trigger over the `roy serve` daemon.
 //!
-//! Subcommands defined per `docs/superpowers/specs/2026-05-22-roy-cli-design.md`.
+//! Subcommands defined per `docs/wire-protocol.md`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

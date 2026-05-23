@@ -2,7 +2,7 @@
 //! into a persistent journal and a live broadcast channel, lets N observers
 //! `attach`, and gates writes via a single `InputLease`.
 //!
-//! See `docs/superpowers/specs/2026-05-23-session-engine.md` for the design.
+//! See `docs/architecture.md` for the design.
 
 use std::path::PathBuf;
 use std::pin::Pin;
