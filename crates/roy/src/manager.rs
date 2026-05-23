@@ -43,10 +43,7 @@ impl SessionManager {
         };
         let engine = SessionEngine::spawn(transport, cwd, opts).await?;
         let id = engine.id().to_string();
-        self.sessions
-            .write()
-            .await
-            .insert(id, Arc::clone(&engine));
+        self.sessions.write().await.insert(id, Arc::clone(&engine));
         Ok(engine)
     }
 

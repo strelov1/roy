@@ -1,10 +1,19 @@
 //! `roy` CLI: a thin trigger over the `roy serve` daemon.
 //!
 //! Subcommands defined per `docs/superpowers/specs/2026-05-22-roy-cli-design.md`.
-//! Each subcommand is a separate iteration; this file currently only wires up
-//! the clap structure so the binary compiles and `roy --help` is correct.
 
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use anyhow::{anyhow, Context};
 use clap::{Parser, Subcommand};
+use roy::{
+    daemon::{Daemon, DefaultTransportFactory},
+    ClientCommand, JournalEntry, ServerEvent, TurnEvent,
+};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 
 #[derive(Parser)]
 #[command(name = "roy", about = "Spawn and orchestrate coding-agent sessions")]
@@ -30,29 +39,29 @@ enum Cmd {
 #[derive(clap::Args)]
 struct ServeArgs {
     #[arg(long)]
-    socket: Option<String>,
+    socket: Option<PathBuf>,
     #[arg(long)]
-    port: Option<u16>,
-    #[arg(long)]
-    journal_dir: Option<String>,
+    journal_dir: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
 struct RunArgs {
+    /// claude_agent | gemini | opencode | codex
     agent: String,
     task: String,
     #[arg(long)]
-    cwd: Option<String>,
+    cwd: Option<PathBuf>,
     #[arg(long)]
     model: Option<String>,
+    /// allow | deny (ACP agents only)
     #[arg(long)]
     permission: Option<String>,
+    /// Spawn the session and exit immediately, leaving it running on the daemon.
     #[arg(long)]
     detach: bool,
     #[arg(long)]
     resume: Option<String>,
-    #[arg(long)]
-    pretty: bool,
+    /// Prefix journal entries with their seq.
     #[arg(long)]
     with_seq: bool,
 }
@@ -63,8 +72,6 @@ struct AttachArgs {
     #[arg(long)]
     from_seq: Option<u64>,
     #[arg(long)]
-    pretty: bool,
-    #[arg(long)]
     with_seq: bool,
 }
 
@@ -73,11 +80,342 @@ struct CloseArgs {
     session: String,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
-        Cmd::Serve(_) | Cmd::Run(_) | Cmd::Attach(_) | Cmd::List | Cmd::Close(_) => {
-            anyhow::bail!("not yet wired up — see iteration plan");
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("roy: failed to start tokio runtime: {e}");
+            return ExitCode::from(2);
         }
+    };
+    rt.block_on(async {
+        match dispatch(cli).await {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("roy: {e:#}");
+                ExitCode::from(2)
+            }
+        }
+    })
+}
+
+async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
+    match cli.command {
+        Cmd::Serve(args) => cmd_serve(args).await.map(|()| ExitCode::SUCCESS),
+        Cmd::Run(args) => cmd_run(args).await,
+        Cmd::Attach(args) => cmd_attach(args).await,
+        Cmd::List => cmd_list().await.map(|()| ExitCode::SUCCESS),
+        Cmd::Close(args) => cmd_close(args).await.map(|()| ExitCode::SUCCESS),
     }
 }
+
+fn default_socket() -> PathBuf {
+    if let Ok(s) = std::env::var("ROY_SOCKET") {
+        return PathBuf::from(s);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".roy/daemon.sock")
+}
+
+fn default_journal_dir() -> PathBuf {
+    if let Ok(s) = std::env::var("ROY_JOURNAL_DIR") {
+        return PathBuf::from(s);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".roy/journals")
+}
+
+async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
+    let socket = args.socket.unwrap_or_else(default_socket);
+    let journal_dir = args.journal_dir.unwrap_or_else(default_journal_dir);
+    let daemon = Arc::new(Daemon::new(journal_dir, Arc::new(DefaultTransportFactory)));
+    eprintln!("roy serve: listening on {}", socket.display());
+    daemon
+        .run_unix(&socket)
+        .await
+        .with_context(|| format!("listening on {}", socket.display()))?;
+    Ok(())
+}
+
+/// Open a Unix-socket connection to the daemon, or bail with a hint when no
+/// daemon is running. The default socket path is `~/.roy/daemon.sock` and
+/// `ROY_SOCKET` overrides it.
+async fn connect() -> anyhow::Result<UnixStream> {
+    let path = default_socket();
+    UnixStream::connect(&path).await.map_err(|e| {
+        anyhow!(
+            "no daemon at {} ({e}) — start it with `roy serve`",
+            path.display()
+        )
+    })
+}
+
+async fn send_cmd<W: AsyncWriteExt + Unpin>(w: &mut W, cmd: &ClientCommand) -> anyhow::Result<()> {
+    let line = serde_json::to_string(cmd)?;
+    w.write_all(line.as_bytes()).await?;
+    w.write_all(b"\n").await?;
+    w.flush().await?;
+    Ok(())
+}
+
+async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
+    validate_flags(&args)?;
+
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    // Spawn the session.
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Spawn {
+            agent: args.agent.clone(),
+            cwd: args
+                .cwd
+                .map(|p| p.to_string_lossy().into_owned())
+                .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned())),
+            model: args.model.clone(),
+            permission: args.permission.clone(),
+            resume: args.resume.clone(),
+        },
+    )
+    .await?;
+    let (session, resume_cursor) = match read_event(&mut events).await? {
+        ServerEvent::Spawned {
+            session,
+            resume_cursor,
+        } => {
+            if args.detach {
+                let payload = serde_json::json!({
+                    "type": "session",
+                    "id": session,
+                    "resume_cursor": resume_cursor,
+                });
+                println!("{payload}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            (session, resume_cursor)
+        }
+        ServerEvent::Error { code, message, .. } => {
+            anyhow::bail!("spawn failed: {code}: {message}");
+        }
+        other => anyhow::bail!("unexpected response to Spawn: {other:?}"),
+    };
+
+    // Attach BEFORE sending so we never miss frames.
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Attach {
+            session: session.clone(),
+            from_seq: None,
+        },
+    )
+    .await?;
+    match read_event(&mut events).await? {
+        ServerEvent::Attached { .. } => {}
+        ServerEvent::Error { code, message, .. } => {
+            anyhow::bail!("attach failed: {code}: {message}");
+        }
+        other => anyhow::bail!("unexpected response to Attach: {other:?}"),
+    }
+
+    // Acquire input + send the task.
+    send_cmd(
+        &mut writer,
+        &ClientCommand::AcquireInput {
+            session: session.clone(),
+        },
+    )
+    .await?;
+    match read_event(&mut events).await? {
+        ServerEvent::InputAcquired { acquired: true, .. } => {}
+        ServerEvent::InputAcquired { acquired: false, .. } => {
+            anyhow::bail!("input lease already held by another client");
+        }
+        other => anyhow::bail!("unexpected response to AcquireInput: {other:?}"),
+    }
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Send {
+            session: session.clone(),
+            text: args.task,
+        },
+    )
+    .await?;
+
+    // Drain frames until terminal Result.
+    let mut exit_code = ExitCode::SUCCESS;
+    loop {
+        match read_event(&mut events).await? {
+            ServerEvent::Frame { entry, .. } => {
+                print_entry(&entry, args.with_seq);
+                if let TurnEvent::Result { ref stop_reason, .. } = entry.event {
+                    if stop_reason.is_error() {
+                        exit_code = ExitCode::from(1);
+                    }
+                    break;
+                }
+            }
+            ServerEvent::Error {
+                session: _,
+                code,
+                message,
+            } => {
+                anyhow::bail!("session error: {code}: {message}");
+            }
+            other => {
+                eprintln!("roy: skipping unexpected event: {other:?}");
+            }
+        }
+    }
+
+    // Final session line so the caller can resume later.
+    let payload = serde_json::json!({
+        "type": "session",
+        "id": session,
+        "resume_cursor": resume_cursor,
+    });
+    println!("{payload}");
+
+    // Close the session (it's a one-shot `run`; the daemon keeps the
+    // session only if `--detach` was given, which we already returned above).
+    let _ = send_cmd(
+        &mut writer,
+        &ClientCommand::Close {
+            session: session.clone(),
+        },
+    )
+    .await;
+    let _ = read_event(&mut events).await;
+
+    Ok(exit_code)
+}
+
+async fn cmd_attach(args: AttachArgs) -> anyhow::Result<ExitCode> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Attach {
+            session: args.session.clone(),
+            from_seq: args.from_seq,
+        },
+    )
+    .await?;
+    match read_event(&mut events).await? {
+        ServerEvent::Attached { .. } => {}
+        ServerEvent::Error { code, message, .. } => {
+            anyhow::bail!("attach failed: {code}: {message}");
+        }
+        other => anyhow::bail!("unexpected response to Attach: {other:?}"),
+    }
+
+    let mut exit_code = ExitCode::SUCCESS;
+    loop {
+        match read_event(&mut events).await? {
+            ServerEvent::Frame { entry, .. } => {
+                print_entry(&entry, args.with_seq);
+                if let TurnEvent::Result { ref stop_reason, .. } = entry.event {
+                    if stop_reason.is_error() {
+                        exit_code = ExitCode::from(1);
+                    }
+                    break;
+                }
+            }
+            ServerEvent::Error { code, message, .. } => {
+                anyhow::bail!("attach error: {code}: {message}");
+            }
+            other => {
+                eprintln!("roy: skipping unexpected event: {other:?}");
+            }
+        }
+    }
+    Ok(exit_code)
+}
+
+async fn cmd_list() -> anyhow::Result<()> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    send_cmd(&mut writer, &ClientCommand::List).await?;
+    match read_event(&mut events).await? {
+        ServerEvent::Listed { sessions } => {
+            for s in sessions {
+                println!("{s}");
+            }
+        }
+        other => anyhow::bail!("unexpected response to List: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn cmd_close(args: CloseArgs) -> anyhow::Result<()> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Close {
+            session: args.session.clone(),
+        },
+    )
+    .await?;
+    match read_event(&mut events).await? {
+        ServerEvent::Closed { .. } => Ok(()),
+        ServerEvent::Error { code, message, .. } => {
+            anyhow::bail!("close failed: {code}: {message}")
+        }
+        other => anyhow::bail!("unexpected response to Close: {other:?}"),
+    }
+}
+
+fn validate_flags(args: &RunArgs) -> anyhow::Result<()> {
+    let is_acp_only = matches!(args.agent.as_str(), "gemini" | "opencode" | "codex");
+    let is_claude_like = matches!(args.agent.as_str(), "claude_agent");
+
+    if args.model.is_some() && !is_claude_like {
+        anyhow::bail!("--model only applies to claude_agent");
+    }
+    if args.permission.is_some() && !(is_acp_only || is_claude_like) {
+        anyhow::bail!("--permission requires an ACP agent");
+    }
+    if let Some(p) = args.permission.as_deref() {
+        if !matches!(p, "allow" | "deny") {
+            anyhow::bail!("--permission must be 'allow' or 'deny'");
+        }
+    }
+    Ok(())
+}
+
+fn print_entry(entry: &JournalEntry, with_seq: bool) {
+    let line = if with_seq {
+        serde_json::to_string(&serde_json::json!({
+            "seq": entry.seq,
+            "event": entry.event,
+        }))
+        .expect("serialize")
+    } else {
+        serde_json::to_string(&entry.event).expect("serialize")
+    };
+    println!("{line}");
+}
+
+/// Local helper around `next_event` that yields a single-line ServerEvent.
+async fn read_event<R: AsyncBufReadExt + Unpin>(
+    lines: &mut tokio::io::Lines<R>,
+) -> anyhow::Result<ServerEvent> {
+    let line = lines
+        .next_line()
+        .await?
+        .ok_or_else(|| anyhow!("daemon hung up"))?;
+    Ok(serde_json::from_str(line.trim())?)
+}
+

@@ -51,20 +51,19 @@ async fn two_attaches_see_the_same_seq_stream_until_result() {
     let lease = engine.try_acquire_input().expect("free lease");
     lease.send("hello").unwrap();
 
-    let collect_until_result =
-        |mut stream: std::pin::Pin<
-            Box<dyn futures::Stream<Item = roy::JournalEntry> + Send>,
-        >| async move {
-            let mut acc = Vec::new();
-            while let Some(entry) = stream.next().await {
-                let is_end = matches!(entry.event, TurnEvent::Result { .. });
-                acc.push(entry);
-                if is_end {
-                    break;
-                }
+    let collect_until_result = |mut stream: std::pin::Pin<
+        Box<dyn futures::Stream<Item = roy::JournalEntry> + Send>,
+    >| async move {
+        let mut acc = Vec::new();
+        while let Some(entry) = stream.next().await {
+            let is_end = matches!(entry.event, TurnEvent::Result { .. });
+            acc.push(entry);
+            if is_end {
+                break;
             }
-            acc
-        };
+        }
+        acc
+    };
 
     let a_events = collect_until_result(attach_a.stream).await;
     let b_events = collect_until_result(attach_b.stream).await;
@@ -105,7 +104,10 @@ async fn input_lease_is_exclusive_and_released_on_drop() {
     .unwrap();
 
     let lease = engine.try_acquire_input().expect("first acquire");
-    assert!(engine.try_acquire_input().is_none(), "second acquire must fail");
+    assert!(
+        engine.try_acquire_input().is_none(),
+        "second acquire must fail"
+    );
     drop(lease);
     assert!(
         engine.try_acquire_input().is_some(),

@@ -63,9 +63,8 @@ impl SessionEngine {
         opts: EngineOpts,
     ) -> Result<Arc<Self>> {
         let session_id = Uuid::new_v4().to_string();
-        let journal = Arc::new(
-            Journal::open(&opts.journal_dir, &session_id, opts.mem_capacity).await?,
-        );
+        let journal =
+            Arc::new(Journal::open(&opts.journal_dir, &session_id, opts.mem_capacity).await?);
         let (broadcast_tx, _) = broadcast::channel::<JournalEntry>(opts.broadcast_capacity);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
 

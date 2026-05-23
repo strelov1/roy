@@ -155,7 +155,10 @@ mod tests {
             message: "input lease not held".into(),
         })
         .unwrap();
-        assert!(!s.contains("\"session\""), "session: None should be skipped: {s}");
+        assert!(
+            !s.contains("\"session\""),
+            "session: None should be skipped: {s}"
+        );
         assert!(s.contains("\"code\":\"no_lease\""));
     }
 }

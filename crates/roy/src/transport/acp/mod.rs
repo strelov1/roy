@@ -1,22 +1,28 @@
 //! ACP transport built on the official `agent-client-protocol` SDK.
 //!
-//! Lower-level model: the actor drives turns by sending raw `PromptRequest`s
-//! via `cx.send_request(...).block_task()` and listens to session updates
-//! through an `on_receive_notification` handler that forwards mapped events
-//! into the current turn's `event_tx`. We deliberately do NOT use the SDK's
-//! `ActiveSession`/`read_update` API because its update channel can be left
-//! dangling when the underlying transport closes cleanly (the channel's own
-//! sender stays alive inside `ActiveSession`), which produces a permanent
-//! hang on agent-side `exit(0)`. The lower-level `send_request` resolves
-//! with `Err` when the connection dies, giving us a reliable terminal signal.
+//! Why we spawn the child ourselves instead of using `AcpAgent::from_args`:
+//! `AcpAgent`'s built-in child monitor treats a clean `exit(0)` as normal
+//! shutdown and returns `Ok(())`, after which the SDK's `run_until` keeps
+//! awaiting our foreground task forever — a pending `send_request` never
+//! resolves because the JSON-RPC dispatch loop has already finished. The
+//! agent dying mid-turn is then indistinguishable from "still working".
+//!
+//! Instead we own the `Child` directly, hand the SDK the child's stdio as
+//! `ByteStreams`, and run a `child.wait()` watcher in the same task. When
+//! the process exits — for any reason — the watcher drops a `watch::Sender`
+//! and `run_session` / `run_turn` bail out via `dead_rx.changed()`,
+//! producing a terminal `Result { stop_reason: Error }`.
 
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
+use tokio::process::Command;
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use agent_client_protocol::schema::{
     CancelNotification, ContentBlock, ContentChunk, InitializeRequest, LoadSessionRequest,
@@ -25,7 +31,7 @@ use agent_client_protocol::schema::{
     SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
     SetSessionModeRequest, StopReason as AcpStopReason, TextContent,
 };
-use agent_client_protocol::{Agent, Client, ConnectionTo};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
 use crate::error::{Result, RoyError};
 use crate::event::{StopReason, TurnEvent};
@@ -117,7 +123,7 @@ impl AcpTransport {
 }
 
 /// One unit of work for the session actor.
-enum Command {
+enum SessionCommand {
     Prompt {
         text: String,
         event_tx: mpsc::UnboundedSender<TurnEvent>,
@@ -137,22 +143,54 @@ impl Transport for AcpTransport {
         cwd: PathBuf,
     ) -> Result<Box<dyn Handle>> {
         let cwd = std::path::absolute(&cwd).map_err(RoyError::Io)?;
-        let agent = build_agent(&self.config.command, &self.config.args)?;
+
+        let mut child = Command::new(&self.config.command)
+            .args(&self.config.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(RoyError::Io)?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| RoyError::Protocol("child stdin not piped".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| RoyError::Protocol("child stdout not piped".into()))?;
+        let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
 
         let policy = self.config.permission_policy;
         let mode_id = self.config.mode_id.clone();
         let resume = resume_cursor.map(str::to_string);
         let open_timeout = self.config.open_timeout;
 
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
         let (ready_tx, ready_rx) = oneshot::channel::<String>();
 
         let sink: TurnSink = Arc::new(Mutex::new(None));
         let sink_for_notif = Arc::clone(&sink);
         let sink_for_actor = Arc::clone(&sink);
 
+        // Watch channel: sender lives in the watcher branch and is dropped
+        // when the child exits, signalling every cloned receiver via `changed()`.
+        let (dead_tx, dead_rx) = watch::channel(());
+
+        // Inline child-monitor + session driver. Keeping them in the same task
+        // means cancelling the task (e.g. on `open_timeout`) drops `child` and
+        // `kill_on_drop` fires — no orphan watcher task.
         let task = tokio::spawn(async move {
-            Client
+            let watcher = async move {
+                let _ = child.wait().await;
+                drop(dead_tx);
+                // Keep child owned so it isn't dropped (and killed) while the
+                // session future might still be processing buffered messages.
+                std::future::pending::<()>().await;
+            };
+
+            let session = Client
                 .builder()
                 .name("roy")
                 .on_receive_notification(
@@ -173,10 +211,24 @@ impl Transport for AcpTransport {
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
-                .connect_with(agent, async move |cx: ConnectionTo<Agent>| {
-                    run_session(cx, cwd, resume, mode_id, ready_tx, cmd_rx, sink_for_actor).await
-                })
-                .await
+                .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
+                    run_session(
+                        cx,
+                        cwd,
+                        resume,
+                        mode_id,
+                        ready_tx,
+                        cmd_rx,
+                        sink_for_actor,
+                        dead_rx,
+                    )
+                    .await
+                });
+
+            tokio::select! {
+                r = session => r,
+                _ = watcher => unreachable!("watcher branch is pending::<()>"),
+            }
         });
 
         match tokio::time::timeout(open_timeout, ready_rx).await {
@@ -193,37 +245,58 @@ impl Transport for AcpTransport {
     }
 }
 
-fn build_agent(command: &str, args: &[String]) -> Result<agent_client_protocol::AcpAgent> {
-    let argv = std::iter::once(command.to_string()).chain(args.iter().cloned());
-    agent_client_protocol::AcpAgent::from_args(argv).map_err(|e| RoyError::Protocol(e.to_string()))
-}
-
 /// Drive one connection: handshake, open the session, then serve commands until
-/// the handle closes (or the agent process dies).
+/// the handle closes or the child process dies.
 async fn run_session(
     cx: ConnectionTo<Agent>,
     cwd: PathBuf,
     resume: Option<String>,
     mode_id: Option<String>,
     ready_tx: oneshot::Sender<String>,
-    mut cmd_rx: mpsc::UnboundedReceiver<Command>,
+    mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
     sink: TurnSink,
+    mut dead_rx: watch::Receiver<()>,
 ) -> std::result::Result<(), agent_client_protocol::Error> {
-    let session_id = setup_session(&cx, cwd, resume, mode_id).await?;
+    let session_id = tokio::select! {
+        r = setup_session(&cx, cwd, resume, mode_id) => r?,
+        _ = dead_rx.changed() => {
+            return Err(agent_client_protocol::Error::internal_error()
+                .data("agent process exited during initialize"));
+        }
+    };
 
     if ready_tx.send(session_id.to_string()).is_err() {
         // Caller stopped waiting on `open`; nothing to serve.
         return Ok(());
     }
 
-    while let Some(cmd) = cmd_rx.recv().await {
+    loop {
+        let cmd = tokio::select! {
+            biased;
+            _ = dead_rx.changed() => return Ok(()),
+            c = cmd_rx.recv() => match c {
+                Some(c) => c,
+                None => return Ok(()),
+            },
+        };
         match cmd {
-            Command::Prompt {
+            SessionCommand::Prompt {
                 text,
                 event_tx,
                 cancel_rx,
-            } => run_turn(&cx, &session_id, &text, &event_tx, cancel_rx, &sink).await?,
-            Command::Close => break,
+            } => {
+                run_turn(
+                    &cx,
+                    &session_id,
+                    &text,
+                    &event_tx,
+                    cancel_rx,
+                    &sink,
+                    &mut dead_rx,
+                )
+                .await?
+            }
+            SessionCommand::Close => break,
         }
     }
     Ok(())
@@ -257,7 +330,10 @@ async fn setup_session(
 
     if let Some(mode) = mode_id {
         if let Some(state) = &modes {
-            let available = state.available_modes.iter().any(|m| m.id.0.as_ref() == mode);
+            let available = state
+                .available_modes
+                .iter()
+                .any(|m| m.id.0.as_ref() == mode);
             if !available {
                 return Err(agent_client_protocol::Error::internal_error()
                     .data(format!("mode '{mode}' is not available for this session")));
@@ -273,7 +349,10 @@ async fn setup_session(
 
 /// Stream one prompt turn into `event_tx` until the prompt response resolves.
 /// If the caller drops the stream early, `cancel_rx` resolves and we send
-/// `session/cancel`, then continue awaiting the (now cancelled) response.
+/// `session/cancel`, then drain the (cancelled) response so we emit a terminal
+/// `Result`. If the child dies mid-turn, `dead_rx` fires and we synthesize a
+/// terminal `Result { Error }` instead — the SDK would never resolve the
+/// pending request on its own.
 async fn run_turn(
     cx: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -281,6 +360,7 @@ async fn run_turn(
     event_tx: &mpsc::UnboundedSender<TurnEvent>,
     cancel_rx: oneshot::Receiver<()>,
     sink: &Mutex<Option<mpsc::UnboundedSender<TurnEvent>>>,
+    dead_rx: &mut watch::Receiver<()>,
 ) -> std::result::Result<(), agent_client_protocol::Error> {
     // Install sink so the global notification handler forwards updates here.
     *sink.lock().unwrap() = Some(event_tx.clone());
@@ -291,20 +371,21 @@ async fn run_turn(
     );
     let mut prompt_fut = Box::pin(cx.send_request(prompt).block_task());
 
-    let response = tokio::select! {
-        r = &mut prompt_fut => r,
+    let stop_reason = tokio::select! {
+        r = &mut prompt_fut => match r {
+            Ok(resp) => map_stop_reason(resp.stop_reason),
+            Err(_) => StopReason::Error,
+        },
         _ = cancel_rx => {
-            // Caller dropped the turn; fire-and-forget cancel, then drain the
-            // (cancelled) response so we emit a terminal Result.
             let _ = cx.send_notification(CancelNotification::new(session_id.clone()));
-            prompt_fut.await
+            match prompt_fut.await {
+                Ok(resp) => map_stop_reason(resp.stop_reason),
+                Err(_) => StopReason::Error,
+            }
         }
+        _ = dead_rx.changed() => StopReason::Error,
     };
 
-    let stop_reason = match response {
-        Ok(resp) => map_stop_reason(resp.stop_reason),
-        Err(_) => StopReason::Error,
-    };
     let _ = event_tx.send(TurnEvent::Result {
         cost_usd: None,
         stop_reason,
@@ -368,7 +449,7 @@ fn permission_outcome(
 }
 
 pub struct AcpHandle {
-    cmd_tx: mpsc::UnboundedSender<Command>,
+    cmd_tx: mpsc::UnboundedSender<SessionCommand>,
     acp_sid: String,
 }
 
@@ -378,7 +459,7 @@ impl Handle for AcpHandle {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<TurnEvent>();
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
         self.cmd_tx
-            .send(Command::Prompt {
+            .send(SessionCommand::Prompt {
                 text: prompt.to_string(),
                 event_tx,
                 cancel_rx,
@@ -392,7 +473,7 @@ impl Handle for AcpHandle {
     }
 
     async fn close(&mut self) -> Result<()> {
-        let _ = self.cmd_tx.send(Command::Close);
+        let _ = self.cmd_tx.send(SessionCommand::Close);
         Ok(())
     }
 }

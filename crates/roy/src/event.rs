@@ -113,7 +113,9 @@ pub fn event_from_json(v: &Value) -> Result<TurnEvent> {
                 v.get("stop_reason").and_then(Value::as_str).unwrap_or(""),
             ),
         }),
-        "raw" => Ok(TurnEvent::Raw(v.get("value").cloned().unwrap_or(Value::Null))),
+        "raw" => Ok(TurnEvent::Raw(
+            v.get("value").cloned().unwrap_or(Value::Null),
+        )),
         other => Err(RoyError::Protocol(format!("unknown event type '{other}'"))),
     }
 }

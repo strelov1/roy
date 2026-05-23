@@ -23,7 +23,10 @@ async fn main() -> anyhow::Result<()> {
 
     let engine = manager.spawn(transport, cwd, 256, 1024).await?;
     let session_id = engine.id().to_string();
-    eprintln!("spawned session {session_id}; journal -> {}", journal_dir.display());
+    eprintln!(
+        "spawned session {session_id}; journal -> {}",
+        journal_dir.display()
+    );
 
     let attach_a = engine.attach(None).await?;
     let attach_b = engine.attach(None).await?;

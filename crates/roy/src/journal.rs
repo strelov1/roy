@@ -153,10 +153,7 @@ mod tests {
 
     fn tmpdir() -> TempDir {
         let n = TMPDIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "roy-journal-test-{}-{n}",
-            std::process::id()
-        ));
+        let p = std::env::temp_dir().join(format!("roy-journal-test-{}-{n}", std::process::id()));
         TempDir(p)
     }
 
