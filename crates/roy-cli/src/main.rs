@@ -47,6 +47,8 @@ enum Cmd {
     SetTags(SetTagsArgs),
     /// Long-poll for the next terminal Result on a session.
     Wait(WaitArgs),
+    /// One-shot fire: spawn (or resume) a session, send a prompt, wait for the result.
+    Fire(FireArgs),
     /// Run an MCP server (stdio JSON-RPC) that exposes roy daemon operations
     /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
     /// IDE plugin) which talks to it over stdio.
@@ -130,6 +132,24 @@ struct WaitArgs {
 }
 
 #[derive(clap::Args)]
+struct FireArgs {
+    /// Required when --resume is absent. claude | gemini | opencode | codex.
+    #[arg(value_name = "AGENT")]
+    agent: Option<String>,
+    /// The prompt to send. Required.
+    prompt: String,
+    #[arg(long, conflicts_with = "resume")]
+    cwd: Option<PathBuf>,
+    /// Resume an existing session id instead of spawning a new one.
+    #[arg(long, conflicts_with_all = ["agent", "cwd"])]
+    resume: Option<String>,
+    #[arg(long = "tag", value_parser = parse_tag_kv)]
+    tags: Vec<(String, String)>,
+    #[arg(long)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(clap::Args)]
 struct McpArgs {
     /// Override the daemon socket the MCP tools connect to.
     #[arg(long)]
@@ -171,6 +191,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Close(args) => cmd_close(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::SetTags(args) => cmd_set_tags(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Wait(args) => cmd_wait(args).await,
+        Cmd::Fire(args) => cmd_fire(args).await,
         Cmd::Mcp(args) => {
             let socket = args.socket.unwrap_or_else(default_socket);
             mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
@@ -558,6 +579,95 @@ async fn cmd_wait(args: WaitArgs) -> anyhow::Result<ExitCode> {
             anyhow::bail!("wait failed: {code}: {message}");
         }
         other => anyhow::bail!("unexpected response to WaitForResult: {other:?}"),
+    }
+}
+
+async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
+    use roy::FireTarget;
+
+    let target = match (args.agent, args.resume) {
+        (Some(agent), None) => FireTarget::Spawn {
+            preset: agent,
+            cwd: args.cwd.map(|p| p.to_string_lossy().into_owned()),
+        },
+        (None, Some(session_id)) => FireTarget::Resume { session_id },
+        (Some(_), Some(_)) => anyhow::bail!("--resume conflicts with positional AGENT"),
+        (None, None) => anyhow::bail!("provide either AGENT or --resume SESSION"),
+    };
+
+    let tags: BTreeMap<String, String> = args.tags.into_iter().collect();
+
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Fire {
+            target,
+            prompt: args.prompt,
+            tags,
+            timeout_ms: args.timeout_ms,
+        },
+    )
+    .await?;
+
+    match read_event(&mut events).await? {
+        ServerEvent::FireDone {
+            session,
+            seq_range,
+            result,
+            assistant_text,
+        } => {
+            let TurnEvent::Result {
+                cost_usd,
+                stop_reason,
+            } = &result
+            else {
+                anyhow::bail!("daemon sent non-Result in FireDone: {result:?}");
+            };
+            let payload = serde_json::json!({
+                "type": "fire_done",
+                "session": session,
+                "seq_range": seq_range,
+                "stop_reason": format!("{stop_reason:?}"),
+                "cost_usd": cost_usd,
+                "assistant_text": assistant_text,
+            });
+            println!("{payload}");
+            Ok(if stop_reason.is_error() {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            })
+        }
+        ServerEvent::FireTimeout {
+            session,
+            partial_seq_range,
+        } => {
+            let payload = serde_json::json!({
+                "type": "fire_timeout",
+                "session": session,
+                "partial_seq_range": partial_seq_range,
+            });
+            println!("{payload}");
+            Ok(ExitCode::from(2))
+        }
+        ServerEvent::FireError {
+            session,
+            code,
+            message,
+        } => {
+            let payload = serde_json::json!({
+                "type": "fire_error",
+                "session": session,
+                "code": code.to_string(),
+                "message": message,
+            });
+            println!("{payload}");
+            Ok(ExitCode::from(2))
+        }
+        other => anyhow::bail!("unexpected response to Fire: {other:?}"),
     }
 }
 

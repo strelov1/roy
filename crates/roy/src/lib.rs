@@ -9,7 +9,7 @@ pub mod pid_lock;
 pub mod session_meta;
 pub mod transport;
 
-pub use control::{ClientCommand, ErrorCode, ServerEvent};
+pub use control::{ClientCommand, ErrorCode, FireTarget, ServerEvent};
 pub use daemon::{Daemon, DefaultTransportFactory, ServeOpts, TransportFactory};
 pub use engine::{Attach, EngineOpts, InputLease, SessionEngine, SessionSpawnConfig};
 pub use error::{Result, RoyError};
