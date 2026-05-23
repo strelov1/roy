@@ -12,6 +12,10 @@ Flags:
   --exit-on-initialize   crash (non-zero exit) on the initialize request.
   --no-initialize-reply  never answer initialize.
   --jsonrpc-error        answer initialize with a JSON-RPC error.
+  --flood N              on the default prompt branch, emit N AssistantText
+                         chunks ("flood-0\\n", "flood-1\\n", ...) before the
+                         final "ack" chunk and terminal Result. Used by tests
+                         that stress the broadcast/journal pipeline.
 """
 import sys, json
 

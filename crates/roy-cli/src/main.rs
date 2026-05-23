@@ -133,15 +133,17 @@ struct WaitArgs {
 
 #[derive(clap::Args)]
 struct FireArgs {
-    /// Required when --resume is absent. claude | gemini | opencode | codex.
-    #[arg(value_name = "AGENT")]
-    agent: Option<String>,
-    /// The prompt to send. Required.
+    /// The prompt to send to the agent.
     prompt: String,
+    /// Preset to spawn: claude | gemini | opencode | codex. Required when
+    /// `--resume` is absent.
+    #[arg(long, conflicts_with = "resume", required_unless_present = "resume")]
+    agent: Option<String>,
+    /// Working directory for a new session. Ignored with --resume.
     #[arg(long, conflicts_with = "resume")]
     cwd: Option<PathBuf>,
     /// Resume an existing session id instead of spawning a new one.
-    #[arg(long, conflicts_with_all = ["agent", "cwd"])]
+    #[arg(long)]
     resume: Option<String>,
     #[arg(long = "tag", value_parser = parse_tag_kv)]
     tags: Vec<(String, String)>,
@@ -591,8 +593,8 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
             cwd: args.cwd.map(|p| p.to_string_lossy().into_owned()),
         },
         (None, Some(session_id)) => FireTarget::Resume { session_id },
-        (Some(_), Some(_)) => anyhow::bail!("--resume conflicts with positional AGENT"),
-        (None, None) => anyhow::bail!("provide either AGENT or --resume SESSION"),
+        (Some(_), Some(_)) => anyhow::bail!("--agent conflicts with --resume"),
+        (None, None) => anyhow::bail!("provide either --agent or --resume"),
     };
 
     let tags: BTreeMap<String, String> = args.tags.into_iter().collect();
@@ -839,5 +841,50 @@ mod tag_parser_tests {
     #[test]
     fn rejects_no_equals() {
         assert!(parse_tag_kv("no-equals").is_err());
+    }
+}
+
+#[cfg(test)]
+mod fire_args_tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn fire_with_agent_and_prompt_parses() {
+        let cli = Cli::try_parse_from(["roy", "fire", "hello world", "--agent", "claude"]);
+        assert!(cli.is_ok(), "expected success, got {:?}", cli.err());
+    }
+
+    #[test]
+    fn fire_with_resume_and_prompt_parses() {
+        let cli = Cli::try_parse_from(["roy", "fire", "hello world", "--resume", "abc-123"]);
+        assert!(cli.is_ok(), "expected success, got {:?}", cli.err());
+    }
+
+    #[test]
+    fn fire_without_agent_or_resume_rejected() {
+        let cli = Cli::try_parse_from(["roy", "fire", "hello world"]);
+        assert!(
+            cli.is_err(),
+            "expected error when neither --agent nor --resume given"
+        );
+    }
+
+    #[test]
+    fn fire_with_agent_and_resume_rejected() {
+        let cli = Cli::try_parse_from(["roy", "fire", "p", "--agent", "claude", "--resume", "abc"]);
+        assert!(
+            cli.is_err(),
+            "expected error: --agent conflicts with --resume"
+        );
+    }
+
+    #[test]
+    fn fire_with_cwd_and_resume_rejected() {
+        let cli = Cli::try_parse_from(["roy", "fire", "p", "--resume", "abc", "--cwd", "/tmp"]);
+        assert!(
+            cli.is_err(),
+            "expected error: --cwd conflicts with --resume"
+        );
     }
 }
