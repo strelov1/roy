@@ -10,7 +10,7 @@ pub mod session;
 pub mod session_meta;
 pub mod transport;
 
-pub use control::{ClientCommand, ServerEvent};
+pub use control::{ClientCommand, ErrorCode, ServerEvent};
 pub use daemon::{Daemon, DefaultTransportFactory, ServeOpts, TransportFactory};
 pub use engine::{Attach, EngineOpts, InputLease, SessionEngine, SessionSpawnConfig};
 pub use error::{Result, RoyError};

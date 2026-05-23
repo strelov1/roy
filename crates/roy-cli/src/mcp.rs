@@ -7,7 +7,7 @@
 //!
 //! Spec reference: <https://modelcontextprotocol.io/specification/2024-11-05>.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
 use roy::{ClientCommand, ServerEvent, TurnEvent};
@@ -51,7 +51,7 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn dispatch(req: &Value, socket_path: &PathBuf) -> Option<Value> {
+async fn dispatch(req: &Value, socket_path: &Path) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let id = req.get("id").cloned();
     // JSON-RPC notifications have no `id`; they expect no response.
@@ -183,7 +183,7 @@ fn tools_list() -> Value {
     })
 }
 
-async fn tools_call(id: Value, req: &Value, socket_path: &PathBuf) -> Value {
+async fn tools_call(id: Value, req: &Value, socket_path: &Path) -> Value {
     let params = req.get("params").cloned().unwrap_or(Value::Null);
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -219,7 +219,7 @@ async fn tools_call(id: Value, req: &Value, socket_path: &PathBuf) -> Value {
 /// Open a daemon connection, return (reader-lines, writer-half) ready for one
 /// command exchange.
 async fn open_daemon(
-    socket_path: &PathBuf,
+    socket_path: &Path,
 ) -> anyhow::Result<(
     tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
     tokio::net::unix::OwnedWriteHalf,
@@ -246,6 +246,35 @@ async fn send_cmd(
     Ok(())
 }
 
+/// Shared shape of arguments for `roy_run` / `roy_run_detached`. Both tools
+/// queue a `Spawn` with the same fields; only the post-spawn behavior differs.
+struct SpawnArgs {
+    agent: String,
+    task: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    permission: Option<String>,
+    resume: Option<String>,
+}
+
+fn parse_spawn_args(args: &Value) -> anyhow::Result<SpawnArgs> {
+    let required = |k: &str| {
+        args.get(k)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("missing '{k}'"))
+    };
+    let optional = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
+    Ok(SpawnArgs {
+        agent: required("agent")?,
+        task: required("task")?,
+        cwd: optional("cwd"),
+        model: optional("model"),
+        permission: optional("permission"),
+        resume: optional("resume"),
+    })
+}
+
 async fn next_event(
     lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
 ) -> anyhow::Result<ServerEvent> {
@@ -256,7 +285,7 @@ async fn next_event(
     Ok(serde_json::from_str(line.trim())?)
 }
 
-async fn tool_list(socket_path: &PathBuf, archived: bool) -> anyhow::Result<String> {
+async fn tool_list(socket_path: &Path, archived: bool) -> anyhow::Result<String> {
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
     let cmd = if archived {
         ClientCommand::ListArchived
@@ -276,7 +305,7 @@ async fn tool_list(socket_path: &PathBuf, archived: bool) -> anyhow::Result<Stri
     }
 }
 
-async fn tool_close(socket_path: &PathBuf, args: Value) -> anyhow::Result<String> {
+async fn tool_close(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     let session = args
         .get("session")
         .and_then(Value::as_str)
@@ -299,24 +328,15 @@ async fn tool_close(socket_path: &PathBuf, args: Value) -> anyhow::Result<String
     }
 }
 
-async fn tool_run(socket_path: &PathBuf, args: Value) -> anyhow::Result<String> {
-    let agent = args
-        .get("agent")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing 'agent'"))?
-        .to_string();
-    let task = args
-        .get("task")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing 'task'"))?
-        .to_string();
-    let cwd = args.get("cwd").and_then(Value::as_str).map(|s| s.to_string());
-    let model = args.get("model").and_then(Value::as_str).map(|s| s.to_string());
-    let permission = args
-        .get("permission")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string());
-    let resume = args.get("resume").and_then(Value::as_str).map(|s| s.to_string());
+async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
+    let SpawnArgs {
+        agent,
+        task,
+        cwd,
+        model,
+        permission,
+        resume,
+    } = parse_spawn_args(&args)?;
 
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
 
@@ -413,7 +433,7 @@ async fn tool_run(socket_path: &PathBuf, args: Value) -> anyhow::Result<String> 
     Ok(format!("{text}\n[stop_reason: {stop_reason}]"))
 }
 
-async fn tool_run_detached(socket_path: &PathBuf, args: Value) -> anyhow::Result<String> {
+async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     let agent = args
         .get("agent")
         .and_then(Value::as_str)
@@ -489,7 +509,7 @@ async fn tool_run_detached(socket_path: &PathBuf, args: Value) -> anyhow::Result
     Ok(serde_json::to_string_pretty(&payload)?)
 }
 
-async fn tool_read_session(socket_path: &PathBuf, args: Value) -> anyhow::Result<String> {
+async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     let session = args
         .get("session")
         .and_then(Value::as_str)

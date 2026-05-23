@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-use crate::control::{ClientCommand, ServerEvent};
+use crate::control::{ClientCommand, ErrorCode, ServerEvent};
 use crate::engine::{InputLease, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
 use crate::manager::SessionManager;
@@ -307,7 +307,7 @@ impl Daemon {
             Err(e) => {
                 let _ = event_tx.send(ServerEvent::Error {
                     session: None,
-                    code: "bad_request".into(),
+                    code: ErrorCode::BadRequest,
                     message: e.to_string(),
                 });
                 return;
@@ -345,7 +345,7 @@ impl Daemon {
                     Err(e) => {
                         let _ = event_tx.send(ServerEvent::Error {
                             session: None,
-                            code: "spawn_failed".into(),
+                            code: ErrorCode::SpawnFailed,
                             message: e.to_string(),
                         });
                         return;
@@ -365,7 +365,7 @@ impl Daemon {
                     Err(e) => {
                         let _ = event_tx.send(ServerEvent::Error {
                             session: Some(session),
-                            code: "resume_failed".into(),
+                            code: ErrorCode::ResumeFailed,
                             message: e.to_string(),
                         });
                         return;
@@ -393,7 +393,7 @@ impl Daemon {
                                         Err(e) => {
                                             let _ = event_tx.send(ServerEvent::Error {
                                                 session: Some(session),
-                                                code: "archive_read_failed".into(),
+                                                code: ErrorCode::ArchiveReadFailed,
                                                 message: e.to_string(),
                                             });
                                             return;
@@ -430,7 +430,7 @@ impl Daemon {
                             Err(_) => {
                                 let _ = event_tx.send(ServerEvent::Error {
                                     session: Some(session),
-                                    code: "no_session".into(),
+                                    code: ErrorCode::NoSession,
                                     message: "no such session (live or archived)".into(),
                                 });
                             }
@@ -443,7 +443,7 @@ impl Daemon {
                     Err(e) => {
                         let _ = event_tx.send(ServerEvent::Error {
                             session: Some(session),
-                            code: "attach_failed".into(),
+                            code: ErrorCode::AttachFailed,
                             message: e.to_string(),
                         });
                         return;
@@ -481,7 +481,7 @@ impl Daemon {
                     None => {
                         let _ = event_tx.send(ServerEvent::Error {
                             session: Some(session),
-                            code: "no_session".into(),
+                            code: ErrorCode::NoSession,
                             message: "no such session".into(),
                         });
                         return;
@@ -501,7 +501,7 @@ impl Daemon {
                 let Some(lease) = leases.get(&session) else {
                     let _ = event_tx.send(ServerEvent::Error {
                         session: Some(session),
-                        code: "no_lease".into(),
+                        code: ErrorCode::NoLease,
                         message: "input lease not held by this connection".into(),
                     });
                     return;
@@ -509,7 +509,7 @@ impl Daemon {
                 if let Err(e) = lease.send(text) {
                     let _ = event_tx.send(ServerEvent::Error {
                         session: Some(session),
-                        code: "send_failed".into(),
+                        code: ErrorCode::SendFailed,
                         message: e.to_string(),
                     });
                 }
@@ -535,7 +535,7 @@ impl Daemon {
                 if let Err(e) = self.manager.close(&session).await {
                     let _ = event_tx.send(ServerEvent::Error {
                         session: Some(session),
-                        code: "close_failed".into(),
+                        code: ErrorCode::CloseFailed,
                         message: e.to_string(),
                     });
                 } else {
@@ -565,12 +565,13 @@ impl Daemon {
                 };
                 match read_result {
                     Ok(mut entries) => {
-                        let has_more = max_entries
-                            .map(|n| entries.len() > n)
-                            .unwrap_or(false);
-                        if let Some(n) = max_entries {
+                        let has_more = if let Some(n) = max_entries {
+                            let more = entries.len() > n;
                             entries.truncate(n);
-                        }
+                            more
+                        } else {
+                            false
+                        };
                         let next_seq =
                             entries.last().map(|e| e.seq + 1).unwrap_or(from);
                         let _ = event_tx.send(ServerEvent::JournalRead {
@@ -583,7 +584,7 @@ impl Daemon {
                     Err(e) => {
                         let _ = event_tx.send(ServerEvent::Error {
                             session: Some(session),
-                            code: "read_journal_failed".into(),
+                            code: ErrorCode::ReadJournalFailed,
                             message: e.to_string(),
                         });
                     }
@@ -598,7 +599,7 @@ impl Daemon {
                     Err(e) => {
                         let _ = event_tx.send(ServerEvent::Error {
                             session: None,
-                            code: "list_archived_failed".into(),
+                            code: ErrorCode::ListArchivedFailed,
                             message: e.to_string(),
                         });
                     }

@@ -5,9 +5,96 @@
 //!
 //! See `docs/superpowers/specs/2026-05-23-session-engine.md`.
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::journal::{JournalEntry, Seq};
+
+/// Typed error codes emitted in `ServerEvent::Error`. Wire form is the
+/// snake_case string returned by `as_wire`; unknown strings parse as
+/// `Other(s)` so an older client can still read newer codes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ErrorCode {
+    /// The JSON could not be parsed as a `ClientCommand`.
+    BadRequest,
+    /// `Spawn` failed (transport factory or `SessionManager::spawn`).
+    SpawnFailed,
+    /// The named session is not live (and, for `Attach`, no archive exists).
+    NoSession,
+    /// `Attach` failed after the session was found.
+    AttachFailed,
+    /// Reading the on-disk archive failed.
+    ArchiveReadFailed,
+    /// `Send` was issued without this connection holding the input lease.
+    NoLease,
+    /// `InputLease::send` failed (engine actor gone).
+    SendFailed,
+    /// `Close` failed.
+    CloseFailed,
+    /// `ListArchived` failed (e.g. journal_dir unreadable).
+    ListArchivedFailed,
+    /// `Resume` failed (missing metadata, transport build failed, etc.).
+    ResumeFailed,
+    /// `ReadJournal` failed.
+    ReadJournalFailed,
+    /// Forward-compat: a code emitted by a newer server.
+    Other(String),
+}
+
+impl ErrorCode {
+    pub fn as_wire(&self) -> &str {
+        match self {
+            ErrorCode::BadRequest => "bad_request",
+            ErrorCode::SpawnFailed => "spawn_failed",
+            ErrorCode::NoSession => "no_session",
+            ErrorCode::AttachFailed => "attach_failed",
+            ErrorCode::ArchiveReadFailed => "archive_read_failed",
+            ErrorCode::NoLease => "no_lease",
+            ErrorCode::SendFailed => "send_failed",
+            ErrorCode::CloseFailed => "close_failed",
+            ErrorCode::ListArchivedFailed => "list_archived_failed",
+            ErrorCode::ResumeFailed => "resume_failed",
+            ErrorCode::ReadJournalFailed => "read_journal_failed",
+            ErrorCode::Other(s) => s.as_str(),
+        }
+    }
+
+    pub fn from_wire(s: &str) -> Self {
+        match s {
+            "bad_request" => ErrorCode::BadRequest,
+            "spawn_failed" => ErrorCode::SpawnFailed,
+            "no_session" => ErrorCode::NoSession,
+            "attach_failed" => ErrorCode::AttachFailed,
+            "archive_read_failed" => ErrorCode::ArchiveReadFailed,
+            "no_lease" => ErrorCode::NoLease,
+            "send_failed" => ErrorCode::SendFailed,
+            "close_failed" => ErrorCode::CloseFailed,
+            "list_archived_failed" => ErrorCode::ListArchivedFailed,
+            "resume_failed" => ErrorCode::ResumeFailed,
+            "read_journal_failed" => ErrorCode::ReadJournalFailed,
+            other => ErrorCode::Other(other.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire())
+    }
+}
+
+impl Serialize for ErrorCode {
+    fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
+        ser.serialize_str(self.as_wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for ErrorCode {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(de).map_err(D::Error::custom)?;
+        Ok(ErrorCode::from_wire(&s))
+    }
+}
 
 /// Commands sent from a trigger client to the daemon.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,7 +209,7 @@ pub enum ServerEvent {
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        code: String,
+        code: ErrorCode,
         message: String,
     },
 }
@@ -190,7 +277,7 @@ mod tests {
     fn error_event_serializes_without_session_when_absent() {
         let s = serde_json::to_string(&ServerEvent::Error {
             session: None,
-            code: "no_lease".into(),
+            code: ErrorCode::NoLease,
             message: "input lease not held".into(),
         })
         .unwrap();
@@ -199,5 +286,38 @@ mod tests {
             "session: None should be skipped: {s}"
         );
         assert!(s.contains("\"code\":\"no_lease\""));
+    }
+
+    #[test]
+    fn error_code_roundtrips_for_known_variants() {
+        let cases = [
+            ErrorCode::BadRequest,
+            ErrorCode::SpawnFailed,
+            ErrorCode::NoSession,
+            ErrorCode::AttachFailed,
+            ErrorCode::ArchiveReadFailed,
+            ErrorCode::NoLease,
+            ErrorCode::SendFailed,
+            ErrorCode::CloseFailed,
+            ErrorCode::ListArchivedFailed,
+            ErrorCode::ResumeFailed,
+            ErrorCode::ReadJournalFailed,
+        ];
+        for code in cases {
+            let json = serde_json::to_string(&code).unwrap();
+            assert!(
+                json.starts_with('"') && json.ends_with('"'),
+                "expected bare snake_case string, got {json}"
+            );
+            let back: ErrorCode = serde_json::from_str(&json).unwrap();
+            assert_eq!(code, back);
+        }
+    }
+
+    #[test]
+    fn unknown_error_code_parses_into_other_and_re_serializes_verbatim() {
+        let code: ErrorCode = serde_json::from_str("\"future_event\"").unwrap();
+        assert_eq!(code, ErrorCode::Other("future_event".into()));
+        assert_eq!(serde_json::to_string(&code).unwrap(), "\"future_event\"");
     }
 }
