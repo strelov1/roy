@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use roy::error::RoyError;
-use roy::event::TurnEvent;
+use roy::event::{StopReason, TurnEvent};
 use roy::session::Session;
-use roy::transport::{AcpConfig, AcpTransport, PermissionPolicy, StderrMode, Transport};
+use roy::transport::{AcpConfig, AcpTransport, PermissionPolicy, Transport};
 
 fn fake_config(extra: &[&str]) -> AcpConfig {
     let mut args = vec!["tests/scripts/fake-acp-agent.py".to_string()];
@@ -15,14 +15,13 @@ fn fake_config(extra: &[&str]) -> AcpConfig {
         args,
         mode_id: Some("yolo".to_string()),
         permission_policy: PermissionPolicy::AllowAll,
-        request_timeout: Duration::from_secs(5),
-        stderr_mode: StderrMode::Null,
+        open_timeout: Duration::from_secs(5),
     }
 }
 
-fn fake_config_with_timeout(extra: &[&str], request_timeout: Duration) -> AcpConfig {
+fn fake_config_with_timeout(extra: &[&str], open_timeout: Duration) -> AcpConfig {
     let mut config = fake_config(extra);
-    config.request_timeout = request_timeout;
+    config.open_timeout = open_timeout;
     config
 }
 
@@ -47,7 +46,7 @@ async fn open_send_streams_until_result() {
     assert!(matches!(
         events.last(),
         Some(TurnEvent::Result {
-            is_error: false,
+            stop_reason: StopReason::EndTurn,
             ..
         })
     ));
@@ -112,8 +111,7 @@ async fn open_without_mode_skips_set_mode() {
         args: vec!["tests/scripts/fake-acp-agent.py".to_string()],
         mode_id: None,
         permission_policy: PermissionPolicy::Deny,
-        request_timeout: Duration::from_secs(5),
-        stderr_mode: StderrMode::Null,
+        open_timeout: Duration::from_secs(5),
     };
     let transport = AcpTransport::new(config);
     let mut handle = transport
@@ -133,7 +131,7 @@ async fn open_without_mode_skips_set_mode() {
 }
 
 #[tokio::test]
-async fn open_returns_process_exited_when_agent_dies_during_initialize() {
+async fn open_surfaces_error_when_agent_dies_during_initialize() {
     let transport = AcpTransport::new(fake_config_with_timeout(
         &["--exit-on-initialize"],
         Duration::from_secs(5),
@@ -147,7 +145,11 @@ async fn open_returns_process_exited_when_agent_dies_during_initialize() {
         Err(err) => err,
     };
 
-    assert!(matches!(err, RoyError::ProcessExited));
+    // The SDK surfaces a dead agent as a connection/protocol error.
+    assert!(matches!(
+        err,
+        RoyError::Protocol(_) | RoyError::ProcessExited
+    ));
 }
 
 #[tokio::test]
@@ -208,8 +210,40 @@ async fn mid_turn_exit_emits_error_result() {
         .any(|e| matches!(e, TurnEvent::AssistantText { text } if text == "partial")));
     assert!(matches!(
         events.last(),
-        Some(TurnEvent::Result { is_error: true, .. })
+        Some(TurnEvent::Result {
+            stop_reason: StopReason::Error,
+            ..
+        })
     ));
+}
+
+#[tokio::test]
+async fn dropping_a_turn_cancels_it_and_the_next_turn_proceeds() {
+    // The fake `--cancellable` agent only finishes a turn after it receives
+    // session/cancel. So turn 2 can only make progress if dropping turn 1's
+    // stream actually cancelled it and freed the actor.
+    let transport = AcpTransport::new(fake_config(&["--cancellable"]));
+    let mut handle = transport
+        .open("ignored", None, std::env::current_dir().unwrap())
+        .await
+        .unwrap();
+
+    {
+        let mut stream = handle.send("one").await.unwrap();
+        let first = stream.next().await;
+        assert!(matches!(first, Some(TurnEvent::AssistantText { text }) if text == "working"));
+        // Drop the stream -> cancel turn 1.
+    }
+
+    let first2 = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = handle.send("two").await.unwrap();
+        stream.next().await
+    })
+    .await
+    .expect("turn 2 must not hang; turn 1 should have been cancelled");
+
+    assert!(matches!(first2, Some(TurnEvent::AssistantText { text }) if text == "working"));
+    handle.close().await.unwrap();
 }
 
 // Real gemini. Ignored by default: needs the `gemini` binary, logged in.

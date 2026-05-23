@@ -1,4 +1,4 @@
-use crate::event::TurnEvent;
+use crate::event::{StopReason, TurnEvent};
 use serde_json::Value;
 
 /// One CLI's dialect. Pure logic: no process spawning, no I/O. Lets the
@@ -110,7 +110,20 @@ impl Provider for ClaudeProvider {
             "result" => {
                 let cost_usd = v.get("total_cost_usd").and_then(Value::as_f64);
                 let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-                Some(TurnEvent::Result { cost_usd, is_error })
+                let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("");
+                let stop_reason = if !is_error {
+                    StopReason::EndTurn
+                } else if subtype.contains("max_turns") {
+                    StopReason::MaxTurnRequests
+                } else if subtype.is_empty() {
+                    StopReason::Error
+                } else {
+                    StopReason::Other(subtype.to_string())
+                };
+                Some(TurnEvent::Result {
+                    cost_usd,
+                    stop_reason,
+                })
             }
             _ => Some(TurnEvent::Raw(v)),
         }
@@ -179,7 +192,7 @@ mod tests {
             ev,
             TurnEvent::Result {
                 cost_usd: Some(0.06),
-                is_error: false
+                stop_reason: StopReason::EndTurn
             }
         );
         assert!(p().is_turn_end(&ev));

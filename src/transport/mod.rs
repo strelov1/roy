@@ -50,18 +50,6 @@ where
     })
 }
 
-pub(crate) fn owned_event_stream(mut rx: mpsc::Receiver<TurnEvent>) -> TurnStream<'static> {
-    Box::pin(async_stream::stream! {
-        while let Some(ev) = rx.recv().await {
-            let end = matches!(ev, TurnEvent::Result { .. });
-            yield ev;
-            if end {
-                break;
-            }
-        }
-    })
-}
-
 /// How bytes move between us and the agent process.
 #[async_trait]
 pub trait Transport: Send + Sync {
