@@ -43,6 +43,8 @@ enum Cmd {
     ListArchived,
     /// Ask the daemon to close a session.
     Close(CloseArgs),
+    /// Replace the tag map on a live session. Empty `--tag` list clears all tags.
+    SetTags(SetTagsArgs),
     /// Run an MCP server (stdio JSON-RPC) that exposes roy daemon operations
     /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
     /// IDE plugin) which talks to it over stdio.
@@ -108,6 +110,14 @@ struct CloseArgs {
 }
 
 #[derive(clap::Args)]
+struct SetTagsArgs {
+    session: String,
+    /// Repeatable: `--tag k=v --tag k2=v2`. Empty list clears all tags.
+    #[arg(long = "tag", value_parser = parse_tag_kv)]
+    tags: Vec<(String, String)>,
+}
+
+#[derive(clap::Args)]
 struct McpArgs {
     /// Override the daemon socket the MCP tools connect to.
     #[arg(long)]
@@ -147,6 +157,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::List => cmd_list(false).await.map(|()| ExitCode::SUCCESS),
         Cmd::ListArchived => cmd_list(true).await.map(|()| ExitCode::SUCCESS),
         Cmd::Close(args) => cmd_close(args).await.map(|()| ExitCode::SUCCESS),
+        Cmd::SetTags(args) => cmd_set_tags(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Mcp(args) => {
             let socket = args.socket.unwrap_or_else(default_socket);
             mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
@@ -442,6 +453,54 @@ async fn cmd_close(args: CloseArgs) -> anyhow::Result<()> {
     }
 }
 
+async fn cmd_set_tags(args: SetTagsArgs) -> anyhow::Result<()> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    let tags: BTreeMap<String, String> = args.tags.into_iter().collect();
+
+    send_cmd(
+        &mut writer,
+        &ClientCommand::SetTags {
+            session: args.session.clone(),
+            tags: tags.clone(),
+        },
+    )
+    .await?;
+    match read_event(&mut events).await? {
+        ServerEvent::SessionUpdated {
+            session,
+            tags: Some(t),
+            ..
+        } => {
+            let payload = serde_json::json!({
+                "type": "session_updated",
+                "session": session,
+                "tags": t,
+            });
+            println!("{payload}");
+            Ok(())
+        }
+        ServerEvent::Error { code, message, .. } => {
+            anyhow::bail!("set-tags failed: {code}: {message}")
+        }
+        other => anyhow::bail!("unexpected response to SetTags: {other:?}"),
+    }
+}
+
+/// Parse a CLI `--tag k=v` argument. Empty key is rejected. The first `=`
+/// is the separator; subsequent `=` characters are part of the value.
+pub(crate) fn parse_tag_kv(s: &str) -> anyhow::Result<(String, String)> {
+    let (key, value) = s
+        .split_once('=')
+        .ok_or_else(|| anyhow!("expected k=v, got `{s}`"))?;
+    if key.is_empty() {
+        anyhow::bail!("tag key must not be empty (got `{s}`)");
+    }
+    Ok((key.to_string(), value.to_string()))
+}
+
 fn validate_flags(args: &RunArgs) -> anyhow::Result<()> {
     let is_acp_only = matches!(args.agent.as_str(), "gemini" | "opencode" | "codex");
     let is_claude_like = matches!(args.agent.as_str(), "claude");
@@ -567,5 +626,36 @@ mod tests {
             a.permission = Some(value.into());
             validate_flags(&a).unwrap_or_else(|e| panic!("{value}: {e}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tag_parser_tests {
+    use super::parse_tag_kv;
+
+    #[test]
+    fn parses_simple_kv() {
+        assert_eq!(
+            parse_tag_kv("foo=bar").unwrap(),
+            ("foo".to_string(), "bar".to_string())
+        );
+    }
+
+    #[test]
+    fn allows_equals_inside_value() {
+        assert_eq!(
+            parse_tag_kv("k=a=b=c").unwrap(),
+            ("k".to_string(), "a=b=c".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_empty_key() {
+        assert!(parse_tag_kv("=value").is_err());
+    }
+
+    #[test]
+    fn rejects_no_equals() {
+        assert!(parse_tag_kv("no-equals").is_err());
     }
 }
