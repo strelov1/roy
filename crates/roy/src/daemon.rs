@@ -90,13 +90,23 @@ impl Daemon {
         }
     }
 
-    /// Listen on a Unix socket, accept connections forever.
+    /// Listen on a Unix socket, accept connections forever. Refuses to start
+    /// if another roy daemon already owns `<socket_path>.pid`.
     pub async fn run_unix(self: Arc<Self>, socket_path: &Path) -> Result<()> {
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent).map_err(RoyError::Io)?;
         }
-        // Best-effort cleanup of a stale socket file from a crashed previous
-        // run. The bind itself is the actual single-instance gate.
+        // PID-file lock first: this is the single-instance gate. If it
+        // succeeds, any leftover socket file is necessarily stale (the prior
+        // owner is dead by the liveness check inside `PidLock::acquire`).
+        let pid_path = socket_path.with_extension(
+            socket_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| format!("{e}.pid"))
+                .unwrap_or_else(|| "pid".to_string()),
+        );
+        let _pid_lock = crate::pid_lock::PidLock::acquire(&pid_path)?;
         let _ = std::fs::remove_file(socket_path);
         let listener = UnixListener::bind(socket_path).map_err(RoyError::Io)?;
 
