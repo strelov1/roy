@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 use crate::daemon::TransportFactory;
 use crate::engine::{EngineOpts, SessionEngine, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
+use crate::journal::{JournalEntry, Seq};
 use crate::session_meta::read_metadata;
 
 pub struct SessionManager {
@@ -132,6 +133,22 @@ impl SessionManager {
         Ok(archived)
     }
 
+    /// Read a slice of a session's journal regardless of liveness: prefer the
+    /// live engine's in-memory window (cheaper, monotonic), fall back to the
+    /// on-disk archive if no live engine is registered. Single source of truth
+    /// for poll-style readers — both the CLI and MCP tools route through here.
+    pub async fn read_journal(
+        &self,
+        session_id: &str,
+        from_seq: Seq,
+    ) -> Result<Vec<JournalEntry>> {
+        if let Some(engine) = self.get(session_id).await {
+            return engine.snapshot(from_seq).await;
+        }
+        let archive = self.open_archive(session_id).await?;
+        archive.replay_from(from_seq).await
+    }
+
     /// Open the journal for a session that is not (currently) live. Errors if
     /// either the session IS live (use `get` instead) or no journal file
     /// exists.
@@ -208,6 +225,7 @@ impl SessionManager {
             .await
             .remove(id)
             .ok_or_else(|| RoyError::Protocol(format!("no such session: {id}")))?;
+        tracing::info!(session = %id, "closing session");
         engine.close()
     }
 

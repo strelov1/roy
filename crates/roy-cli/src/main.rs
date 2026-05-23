@@ -114,6 +114,7 @@ struct McpArgs {
 }
 
 fn main() -> ExitCode {
+    init_tracing();
     let cli = Cli::parse();
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -150,6 +151,20 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
             mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
         }
     }
+}
+
+/// Set up tracing on stderr so `roy run`/`roy mcp` keep stdout reserved for
+/// their JSON payload. `RUST_LOG` overrides the default ("info" for roy,
+/// "warn" for everything else).
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("roy=info,roy_cli=info,warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .try_init();
 }
 
 fn default_socket() -> PathBuf {

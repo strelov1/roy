@@ -26,6 +26,24 @@ pub struct JournalEntry {
     pub event: TurnEvent,
 }
 
+/// Parse one JSONL line into a `JournalEntry`. Single source of truth for the
+/// on-disk format — used by both `Journal::resume`, the disk-fallback inside
+/// `Journal::replay_from`, and `ArchivedJournal::replay_from`. Returns
+/// `Protocol` errors with the offending line so a corrupt journal surfaces
+/// clearly instead of silently dropping entries.
+fn parse_entry_line(line: &str) -> Result<JournalEntry> {
+    let v: Value = serde_json::from_str(line).map_err(|e| RoyError::Protocol(e.to_string()))?;
+    let seq = v
+        .get("seq")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| RoyError::Protocol(format!("journal entry missing seq: {line}")))?;
+    let event = event_from_json(
+        v.get("event")
+            .ok_or_else(|| RoyError::Protocol(format!("journal entry missing event: {line}")))?,
+    )?;
+    Ok(JournalEntry { seq, event })
+}
+
 pub struct Journal {
     path: PathBuf,
     inner: Mutex<JournalInner>,
@@ -83,20 +101,12 @@ impl Journal {
             if line.trim().is_empty() {
                 continue;
             }
-            let v: Value =
-                serde_json::from_str(&line).map_err(|e| RoyError::Protocol(e.to_string()))?;
-            let seq = v
-                .get("seq")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| RoyError::Protocol(format!("journal entry missing seq: {line}")))?;
-            let event = event_from_json(v.get("event").ok_or_else(|| {
-                RoyError::Protocol(format!("journal entry missing event: {line}"))
-            })?)?;
+            let entry = parse_entry_line(&line)?;
             if mem.len() == mem_capacity {
                 mem.pop_front();
             }
-            mem.push_back(JournalEntry { seq, event });
-            next_seq = seq + 1;
+            next_seq = entry.seq + 1;
+            mem.push_back(entry);
         }
         let writer = OpenOptions::new()
             .write(true)
@@ -171,19 +181,11 @@ impl Journal {
             if line.trim().is_empty() {
                 continue;
             }
-            let v: Value =
-                serde_json::from_str(&line).map_err(|e| RoyError::Protocol(e.to_string()))?;
-            let seq = v
-                .get("seq")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| RoyError::Protocol(format!("journal entry missing seq: {line}")))?;
-            if seq < from_seq || seq >= oldest_in_mem {
+            let entry = parse_entry_line(&line)?;
+            if entry.seq < from_seq || entry.seq >= oldest_in_mem {
                 continue;
             }
-            let event = event_from_json(v.get("event").ok_or_else(|| {
-                RoyError::Protocol(format!("journal entry missing event: {line}"))
-            })?)?;
-            disk.push(JournalEntry { seq, event });
+            disk.push(entry);
         }
 
         // Continuous coverage: disk [from_seq, oldest_in_mem) ++ mem [oldest_in_mem, latest].
@@ -227,19 +229,11 @@ impl ArchivedJournal {
             if line.trim().is_empty() {
                 continue;
             }
-            let v: Value =
-                serde_json::from_str(&line).map_err(|e| RoyError::Protocol(e.to_string()))?;
-            let seq = v
-                .get("seq")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| RoyError::Protocol(format!("journal entry missing seq: {line}")))?;
-            if seq < from_seq {
+            let entry = parse_entry_line(&line)?;
+            if entry.seq < from_seq {
                 continue;
             }
-            let event = event_from_json(v.get("event").ok_or_else(|| {
-                RoyError::Protocol(format!("journal entry missing event: {line}"))
-            })?)?;
-            out.push(JournalEntry { seq, event });
+            out.push(entry);
         }
         Ok(out)
     }

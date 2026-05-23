@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc};
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
 
@@ -63,7 +63,7 @@ pub struct SessionEngine {
     cwd: PathBuf,
     model: Option<String>,
     permission: Option<String>,
-    resume_cursor: RwLock<Option<String>>,
+    resume_cursor: StdMutex<Option<String>>,
     journal: Arc<Journal>,
     broadcast_tx: broadcast::Sender<JournalEntry>,
     input_tx: mpsc::UnboundedSender<Cmd>,
@@ -132,7 +132,7 @@ impl SessionEngine {
             cwd: cfg.cwd.clone(),
             model: cfg.model.clone(),
             permission: cfg.permission.clone(),
-            resume_cursor: RwLock::new(initial_cursor.clone()),
+            resume_cursor: StdMutex::new(initial_cursor.clone()),
             journal,
             broadcast_tx,
             input_tx,
@@ -157,15 +157,17 @@ impl SessionEngine {
         let engine_for_actor = Arc::clone(&engine);
         tokio::spawn(run_actor(engine_for_actor, handle, input_rx));
 
+        tracing::info!(
+            session = %engine.session_id,
+            agent = %engine.agent,
+            cwd = %engine.cwd.display(),
+            "session engine started"
+        );
         Ok(engine)
     }
 
     pub fn id(&self) -> &str {
         &self.session_id
-    }
-
-    pub fn agent(&self) -> &str {
-        &self.agent
     }
 
     /// Most recent activity timestamp. Used by `SessionManager::sweep_idle`.
@@ -177,8 +179,8 @@ impl SessionEngine {
         *self.last_activity.lock().unwrap() = Instant::now();
     }
 
-    pub async fn resume_cursor(&self) -> Option<String> {
-        self.resume_cursor.read().await.clone()
+    pub fn resume_cursor(&self) -> Option<String> {
+        self.resume_cursor.lock().unwrap().clone()
     }
 
     /// Read-only journal snapshot of this live session. Same disk read as
@@ -224,7 +226,7 @@ impl SessionEngine {
     }
 
     async fn persist_metadata(&self) {
-        let cursor = self.resume_cursor.read().await.clone();
+        let cursor = self.resume_cursor.lock().unwrap().clone();
         let meta = SessionMetadata {
             session_id: self.session_id.clone(),
             agent: self.agent.clone(),
@@ -255,10 +257,6 @@ impl InputLease {
             .send(Cmd::Prompt(prompt.into()))
             .map_err(|_| RoyError::Protocol("engine actor gone".into()))
     }
-
-    pub fn engine(&self) -> &Arc<SessionEngine> {
-        &self.engine
-    }
 }
 
 impl Drop for InputLease {
@@ -280,7 +278,7 @@ async fn run_actor(
                 engine.touch_activity();
                 drive_turn(&engine, handle.as_mut(), &text).await;
                 if let Some(cursor) = handle.resume_cursor() {
-                    *engine.resume_cursor.write().await = Some(cursor);
+                    *engine.resume_cursor.lock().unwrap() = Some(cursor);
                     engine.persist_metadata().await;
                 }
             }
