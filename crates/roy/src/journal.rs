@@ -62,6 +62,59 @@ impl Journal {
         })
     }
 
+    /// Open an existing journal in append mode and recompute `next_seq` from
+    /// the last entry on disk. Hydrates the in-memory ring with the most
+    /// recent `mem_capacity` entries. Used by `SessionManager::resume`.
+    pub async fn resume(dir: &Path, session_id: &str, mem_capacity: usize) -> Result<Self> {
+        let path = dir.join(format!("{session_id}.jsonl"));
+        if !tokio::fs::try_exists(&path).await.map_err(RoyError::Io)? {
+            return Err(RoyError::Protocol(format!(
+                "no journal at {}",
+                path.display()
+            )));
+        }
+        // Read pass: parse all entries to find the tail (mem_capacity entries
+        // closest to the end) and the next free seq.
+        let read_file = File::open(&path).await.map_err(RoyError::Io)?;
+        let mut lines = BufReader::new(read_file).lines();
+        let mut mem: VecDeque<JournalEntry> = VecDeque::with_capacity(mem_capacity);
+        let mut next_seq: Seq = 0;
+        while let Some(line) = lines.next_line().await.map_err(RoyError::Io)? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: Value =
+                serde_json::from_str(&line).map_err(|e| RoyError::Protocol(e.to_string()))?;
+            let seq = v
+                .get("seq")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| RoyError::Protocol(format!("journal entry missing seq: {line}")))?;
+            let event = event_from_json(v.get("event").ok_or_else(|| {
+                RoyError::Protocol(format!("journal entry missing event: {line}"))
+            })?)?;
+            if mem.len() == mem_capacity {
+                mem.pop_front();
+            }
+            mem.push_back(JournalEntry { seq, event });
+            next_seq = seq + 1;
+        }
+        let writer = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(&path)
+            .await
+            .map_err(RoyError::Io)?;
+        Ok(Self {
+            path,
+            inner: Mutex::new(JournalInner {
+                writer,
+                mem,
+                mem_capacity,
+                next_seq,
+            }),
+        })
+    }
+
     /// Append one event. Single-writer in practice (the session actor) — but
     /// guarded by an async mutex for safety. Returns the assigned `seq`.
     pub async fn append(&self, event: TurnEvent) -> Result<Seq> {
@@ -337,5 +390,38 @@ mod tests {
         let dir = tmpdir();
         let err = ArchivedJournal::open(&dir.0, "no-such-sid").await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn resume_continues_next_seq_from_disk() {
+        let dir = tmpdir();
+        let session = "s-resume";
+        // Open and append 3 entries.
+        {
+            let j = Journal::open(&dir.0, session, 10).await.unwrap();
+            for i in 0..3u32 {
+                j.append(TurnEvent::AssistantText {
+                    text: format!("first-{i}"),
+                })
+                .await
+                .unwrap();
+            }
+        }
+        // Resume must read the tail, see seqs 0..2, and assign seq 3 next.
+        let j2 = Journal::resume(&dir.0, session, 10).await.unwrap();
+        let seq = j2
+            .append(TurnEvent::AssistantText {
+                text: "after-resume".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(seq, 3, "next_seq must continue from the last on-disk entry");
+        let all = j2.replay_from(0).await.unwrap();
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[3].seq, 3);
+        match &all[3].event {
+            TurnEvent::AssistantText { text } => assert_eq!(text, "after-resume"),
+            other => panic!("expected AssistantText, got {other:?}"),
+        }
     }
 }

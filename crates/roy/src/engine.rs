@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::error::{Result, RoyError};
 use crate::event::{StopReason, TurnEvent};
 use crate::journal::{Journal, JournalEntry, Seq};
+use crate::session_meta::{write_metadata, SessionMetadata};
 use crate::transport::{Handle, Transport};
 
 /// Tunables for `SessionEngine::spawn`.
@@ -38,9 +39,29 @@ impl EngineOpts {
     }
 }
 
+/// Inputs that uniquely identify a session at spawn (or resume) time. Stored
+/// as `SessionMetadata` beside the journal so the daemon can resurrect a live
+/// session after a restart.
+#[derive(Debug, Clone)]
+pub struct SessionSpawnConfig {
+    pub agent: String,
+    pub cwd: PathBuf,
+    pub model: Option<String>,
+    pub permission: Option<String>,
+    /// Forwarded to `Transport::open` so the agent side resumes via its
+    /// native mechanism (e.g. ACP `session/load`). The roy-side session id
+    /// and journal are still freshly minted on `spawn`.
+    pub resume_cursor: Option<String>,
+}
+
 /// Owned by `SessionManager` (or directly by callers in single-session use).
 pub struct SessionEngine {
     session_id: String,
+    journal_dir: PathBuf,
+    agent: String,
+    cwd: PathBuf,
+    model: Option<String>,
+    permission: Option<String>,
     resume_cursor: RwLock<Option<String>>,
     journal: Arc<Journal>,
     broadcast_tx: broadcast::Sender<JournalEntry>,
@@ -54,37 +75,78 @@ enum Cmd {
 }
 
 impl SessionEngine {
-    /// Open a transport handle, set up journal + broadcast, and spawn the
-    /// actor task. `resume_cursor` is forwarded to `Transport::open` so the
-    /// agent side resumes via its native mechanism (e.g. ACP `session/load`)
-    /// while roy itself gets a fresh manager-side session id and journal.
-    /// The returned `Arc<SessionEngine>` is cheap to clone and hand to
-    /// multiple attach sites.
+    /// Open a transport handle for a fresh session, set up journal +
+    /// broadcast, persist metadata, and spawn the actor task. The returned
+    /// `Arc<SessionEngine>` is cheap to clone and hand to multiple attach
+    /// sites.
     pub async fn spawn(
         transport: Arc<dyn Transport>,
-        cwd: PathBuf,
         opts: EngineOpts,
-        resume_cursor: Option<String>,
+        cfg: SessionSpawnConfig,
     ) -> Result<Arc<Self>> {
         let session_id = Uuid::new_v4().to_string();
         let journal =
             Arc::new(Journal::open(&opts.journal_dir, &session_id, opts.mem_capacity).await?);
+        Self::start(transport, opts, session_id, journal, cfg).await
+    }
+
+    /// Resurrect a previously-closed session: open its existing journal in
+    /// append mode and re-spawn the actor with the same id. The supplied
+    /// `cfg.resume_cursor` is what the daemon retrieved from the on-disk
+    /// metadata and is forwarded to `Transport::open`.
+    pub async fn resume(
+        transport: Arc<dyn Transport>,
+        opts: EngineOpts,
+        session_id: String,
+        cfg: SessionSpawnConfig,
+    ) -> Result<Arc<Self>> {
+        let journal =
+            Arc::new(Journal::resume(&opts.journal_dir, &session_id, opts.mem_capacity).await?);
+        Self::start(transport, opts, session_id, journal, cfg).await
+    }
+
+    async fn start(
+        transport: Arc<dyn Transport>,
+        opts: EngineOpts,
+        session_id: String,
+        journal: Arc<Journal>,
+        cfg: SessionSpawnConfig,
+    ) -> Result<Arc<Self>> {
         let (broadcast_tx, _) = broadcast::channel::<JournalEntry>(opts.broadcast_capacity);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
 
         let handle = transport
-            .open(&session_id, resume_cursor.as_deref(), cwd)
+            .open(&session_id, cfg.resume_cursor.as_deref(), cfg.cwd.clone())
             .await?;
-        let initial_cursor = handle.resume_cursor();
+        let initial_cursor = handle.resume_cursor().or(cfg.resume_cursor.clone());
 
         let engine = Arc::new(Self {
-            session_id,
-            resume_cursor: RwLock::new(initial_cursor),
+            session_id: session_id.clone(),
+            journal_dir: opts.journal_dir.clone(),
+            agent: cfg.agent.clone(),
+            cwd: cfg.cwd.clone(),
+            model: cfg.model.clone(),
+            permission: cfg.permission.clone(),
+            resume_cursor: RwLock::new(initial_cursor.clone()),
             journal,
             broadcast_tx,
             input_tx,
             input_lease_held: StdMutex::new(false),
         });
+
+        // Persist initial metadata so a daemon restart can find this session.
+        let _ = write_metadata(
+            &opts.journal_dir,
+            &SessionMetadata {
+                session_id,
+                agent: cfg.agent,
+                cwd: cfg.cwd,
+                model: cfg.model,
+                permission: cfg.permission,
+                resume_cursor: initial_cursor,
+            },
+        )
+        .await;
 
         let engine_for_actor = Arc::clone(&engine);
         tokio::spawn(run_actor(engine_for_actor, handle, input_rx));
@@ -94,6 +156,10 @@ impl SessionEngine {
 
     pub fn id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn agent(&self) -> &str {
+        &self.agent
     }
 
     pub async fn resume_cursor(&self) -> Option<String> {
@@ -133,6 +199,19 @@ impl SessionEngine {
         self.input_tx
             .send(Cmd::Close)
             .map_err(|_| RoyError::Protocol("engine actor gone".into()))
+    }
+
+    async fn persist_metadata(&self) {
+        let cursor = self.resume_cursor.read().await.clone();
+        let meta = SessionMetadata {
+            session_id: self.session_id.clone(),
+            agent: self.agent.clone(),
+            cwd: self.cwd.clone(),
+            model: self.model.clone(),
+            permission: self.permission.clone(),
+            resume_cursor: cursor,
+        };
+        let _ = write_metadata(&self.journal_dir, &meta).await;
     }
 }
 
@@ -179,6 +258,7 @@ async fn run_actor(
                 drive_turn(&engine, handle.as_mut(), &text).await;
                 if let Some(cursor) = handle.resume_cursor() {
                     *engine.resume_cursor.write().await = Some(cursor);
+                    engine.persist_metadata().await;
                 }
             }
             Cmd::Close => break,

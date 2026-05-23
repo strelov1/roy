@@ -11,17 +11,28 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use roy::transport::{AcpConfig, AcpTransport, Transport};
-use roy::{Attach, SessionManager, TurnEvent};
+use roy::daemon::DefaultTransportFactory;
+use roy::{Attach, SessionManager, SessionSpawnConfig, TurnEvent};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let journal_dir = std::env::temp_dir().join("roy-demo-journals");
-    let manager = SessionManager::new(journal_dir.clone());
-    let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(AcpConfig::opencode()));
+    let manager = SessionManager::new(journal_dir.clone(), Arc::new(DefaultTransportFactory));
     let cwd = std::env::current_dir()?;
 
-    let engine = manager.spawn(transport, cwd, 256, 1024, None).await?;
+    let engine = manager
+        .spawn(
+            SessionSpawnConfig {
+                agent: "opencode".into(),
+                cwd,
+                model: None,
+                permission: None,
+                resume_cursor: None,
+            },
+            256,
+            1024,
+        )
+        .await?;
     let session_id = engine.id().to_string();
     eprintln!(
         "spawned session {session_id}; journal -> {}",

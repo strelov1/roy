@@ -30,8 +30,14 @@ enum Cmd {
     Run(RunArgs),
     /// Attach to an existing session and stream its journal to stdout.
     Attach(AttachArgs),
+    /// Resurrect a previously-closed session (reads its on-disk metadata,
+    /// rebuilds the engine with the same id and journal).
+    Resume(ResumeArgs),
     /// List live sessions known to the daemon.
     List,
+    /// List sessions whose journals exist on disk but are not live (closed
+    /// sessions, restart survivors).
+    ListArchived,
     /// Ask the daemon to close a session.
     Close(CloseArgs),
 }
@@ -79,6 +85,11 @@ struct AttachArgs {
 }
 
 #[derive(clap::Args)]
+struct ResumeArgs {
+    session: String,
+}
+
+#[derive(clap::Args)]
 struct CloseArgs {
     session: String,
 }
@@ -111,7 +122,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Serve(args) => cmd_serve(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Run(args) => cmd_run(args).await,
         Cmd::Attach(args) => cmd_attach(args).await,
-        Cmd::List => cmd_list().await.map(|()| ExitCode::SUCCESS),
+        Cmd::Resume(args) => cmd_resume(args).await.map(|()| ExitCode::SUCCESS),
+        Cmd::List => cmd_list(false).await.map(|()| ExitCode::SUCCESS),
+        Cmd::ListArchived => cmd_list(true).await.map(|()| ExitCode::SUCCESS),
         Cmd::Close(args) => cmd_close(args).await.map(|()| ExitCode::SUCCESS),
     }
 }
@@ -367,14 +380,19 @@ async fn cmd_attach(args: AttachArgs) -> anyhow::Result<ExitCode> {
     Ok(exit_code)
 }
 
-async fn cmd_list() -> anyhow::Result<()> {
+async fn cmd_list(archived: bool) -> anyhow::Result<()> {
     let stream = connect().await?;
     let (reader, mut writer) = stream.into_split();
     let mut events = BufReader::new(reader).lines();
 
-    send_cmd(&mut writer, &ClientCommand::List).await?;
+    let cmd = if archived {
+        ClientCommand::ListArchived
+    } else {
+        ClientCommand::List
+    };
+    send_cmd(&mut writer, &cmd).await?;
     match read_event(&mut events).await? {
-        ServerEvent::Listed { sessions } => {
+        ServerEvent::Listed { sessions } | ServerEvent::ListedArchived { sessions } => {
             for s in sessions {
                 println!("{s}");
             }
@@ -382,6 +400,38 @@ async fn cmd_list() -> anyhow::Result<()> {
         other => anyhow::bail!("unexpected response to List: {other:?}"),
     }
     Ok(())
+}
+
+async fn cmd_resume(args: ResumeArgs) -> anyhow::Result<()> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Resume {
+            session: args.session.clone(),
+        },
+    )
+    .await?;
+    match read_event(&mut events).await? {
+        ServerEvent::Resumed {
+            session,
+            resume_cursor,
+        } => {
+            let payload = serde_json::json!({
+                "type": "session",
+                "id": session,
+                "resume_cursor": resume_cursor,
+            });
+            println!("{payload}");
+            Ok(())
+        }
+        ServerEvent::Error { code, message, .. } => {
+            anyhow::bail!("resume failed: {code}: {message}")
+        }
+        other => anyhow::bail!("unexpected response to Resume: {other:?}"),
+    }
 }
 
 async fn cmd_close(args: CloseArgs) -> anyhow::Result<()> {

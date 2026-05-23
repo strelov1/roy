@@ -51,6 +51,11 @@ pub enum ClientCommand {
     /// List session ids whose journals exist on disk but are not in the live
     /// registry (closed sessions, restart survivors).
     ListArchived,
+    /// Resurrect a previously-closed session: rebuilds the engine using
+    /// metadata persisted beside the journal, reuses the same session id and
+    /// journal, and forwards the stored cursor to `Transport::open` for the
+    /// agent-side resume (e.g. ACP `session/load`).
+    Resume { session: String },
 }
 
 /// Events sent from the daemon back to a trigger client. `session` ties an
@@ -83,6 +88,13 @@ pub enum ServerEvent {
     Listed { sessions: Vec<String> },
     /// Response to `ListArchived`.
     ListedArchived { sessions: Vec<String> },
+    /// Response to `Resume`. Same session id as requested; `resume_cursor`
+    /// reflects what the transport reported after resuming.
+    Resumed {
+        session: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_cursor: Option<String>,
+    },
     /// A command failed; if `session` is `Some`, the error pertains to that
     /// session.
     Error {

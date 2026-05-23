@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use crate::control::{ClientCommand, ServerEvent};
-use crate::engine::InputLease;
+use crate::engine::{InputLease, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
 use crate::manager::SessionManager;
 use crate::transport::{AcpConfig, AcpTransport, PermissionPolicy, Transport};
@@ -79,14 +79,12 @@ impl TransportFactory for DefaultTransportFactory {
 /// `serve_ws_connection`, useful in tests).
 pub struct Daemon {
     pub manager: Arc<SessionManager>,
-    pub factory: Arc<dyn TransportFactory>,
 }
 
 impl Daemon {
     pub fn new(journal_dir: PathBuf, factory: Arc<dyn TransportFactory>) -> Self {
         Self {
-            manager: Arc::new(SessionManager::new(journal_dir)),
-            factory,
+            manager: Arc::new(SessionManager::new(journal_dir, factory)),
         }
     }
 
@@ -262,25 +260,16 @@ impl Daemon {
                 permission,
                 resume,
             } => {
-                let transport =
-                    match self
-                        .factory
-                        .build(&agent, model.as_deref(), permission.as_deref())
-                    {
-                        Ok(t) => t,
-                        Err(e) => {
-                            let _ = event_tx.send(ServerEvent::Error {
-                                session: None,
-                                code: "spawn_failed".into(),
-                                message: e.to_string(),
-                            });
-                            return;
-                        }
-                    };
-                let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                });
-                let engine = match self.manager.spawn(transport, cwd, 256, 1024, resume).await {
+                let cfg = SessionSpawnConfig {
+                    agent,
+                    cwd: cwd.map(PathBuf::from).unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    }),
+                    model,
+                    permission,
+                    resume_cursor: resume,
+                };
+                let engine = match self.manager.spawn(cfg, 256, 1024).await {
                     Ok(e) => e,
                     Err(e) => {
                         let _ = event_tx.send(ServerEvent::Error {
@@ -295,6 +284,25 @@ impl Daemon {
                 let resume_cursor = engine.resume_cursor().await;
                 let _ = event_tx.send(ServerEvent::Spawned {
                     session,
+                    resume_cursor,
+                });
+            }
+
+            ClientCommand::Resume { session } => {
+                let engine = match self.manager.resume(&session, 256, 1024).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let _ = event_tx.send(ServerEvent::Error {
+                            session: Some(session),
+                            code: "resume_failed".into(),
+                            message: e.to_string(),
+                        });
+                        return;
+                    }
+                };
+                let resume_cursor = engine.resume_cursor().await;
+                let _ = event_tx.send(ServerEvent::Resumed {
+                    session: engine.id().to_string(),
                     resume_cursor,
                 });
             }
@@ -803,6 +811,185 @@ mod tests {
         }
         assert!(saw_result, "archive replay must include the terminal Result");
 
+        drop(client_wr);
+        drop(events);
+        let _ = serve_handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Full live-session resurrection cycle: spawn → drive a turn → close →
+    /// `ClientCommand::Resume { session }` → drive another turn → attach to
+    /// see the full journal with monotonic seqs across the gap.
+    #[tokio::test]
+    async fn close_then_resume_continues_the_journal() {
+        let dir = tmp_dir();
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let serve_handle = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        // Helper: drive one turn and collect seqs of the resulting frames.
+        async fn drive_turn(
+            client_wr: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
+            events: &mut tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+            session: &str,
+            text: &str,
+        ) -> Vec<u64> {
+            send_cmd_line(
+                client_wr,
+                &ClientCommand::Send {
+                    session: session.into(),
+                    text: text.into(),
+                },
+            )
+            .await;
+            let mut seqs = Vec::new();
+            loop {
+                if let ServerEvent::Frame { entry, .. } = next_event_line(events).await {
+                    seqs.push(entry.seq);
+                    if matches!(entry.event, TurnEvent::Result { .. }) {
+                        break;
+                    }
+                }
+            }
+            seqs
+        }
+
+        // 1. Spawn fresh, attach, acquire, drive turn 1, close.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                cwd: Some(std::env::current_dir().unwrap().to_string_lossy().into()),
+                model: None,
+                permission: None,
+                resume: None,
+            },
+        )
+        .await;
+        let session = match next_event_line(&mut events).await {
+            ServerEvent::Spawned { session, .. } => session,
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Attach {
+                session: session.clone(),
+                from_seq: None,
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut events).await; // Attached
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::AcquireInput {
+                session: session.clone(),
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut events).await; // InputAcquired
+        let turn1_seqs = drive_turn(&mut client_wr, &mut events, &session, "first").await;
+        assert!(!turn1_seqs.is_empty());
+        let last_turn1 = *turn1_seqs.last().unwrap();
+
+        // Detach + release input so close doesn't fight a live lease.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::ReleaseInput {
+                session: session.clone(),
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut events).await;
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Detach {
+                session: session.clone(),
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut events).await;
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Close {
+                session: session.clone(),
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::Closed { .. } => {}
+            other => panic!("expected Closed, got {other:?}"),
+        }
+
+        // 2. Resume.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Resume {
+                session: session.clone(),
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::Resumed {
+                session: resumed_id,
+                ..
+            } => assert_eq!(resumed_id, session, "resume must keep the same session id"),
+            other => panic!("expected Resumed, got {other:?}"),
+        }
+
+        // 3. Attach + acquire + drive turn 2.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Attach {
+                session: session.clone(),
+                from_seq: Some(last_turn1 + 1),
+            },
+        )
+        .await;
+        let attached_seq = match next_event_line(&mut events).await {
+            ServerEvent::Attached { seq_at_attach, .. } => seq_at_attach,
+            other => panic!("expected Attached, got {other:?}"),
+        };
+        // attached_seq should be > last_turn1 — the journal continues, not restarts.
+        assert!(
+            attached_seq >= last_turn1 + 1,
+            "resumed journal must continue past last_turn1={last_turn1}, got attached_seq={attached_seq}"
+        );
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::AcquireInput {
+                session: session.clone(),
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut events).await;
+        let turn2_seqs = drive_turn(&mut client_wr, &mut events, &session, "second").await;
+        assert!(!turn2_seqs.is_empty());
+        // Monotonic across the gap.
+        let first_turn2 = *turn2_seqs.first().unwrap();
+        assert!(
+            first_turn2 > last_turn1,
+            "turn2 seqs must continue past turn1; last_turn1={last_turn1}, first_turn2={first_turn2}"
+        );
+
+        // 4. Cleanup.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Close {
+                session: session.clone(),
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut events).await;
         drop(client_wr);
         drop(events);
         let _ = serve_handle.await;

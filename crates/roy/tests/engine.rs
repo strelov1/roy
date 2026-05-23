@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use roy::engine::{EngineOpts, SessionEngine};
+use roy::engine::{EngineOpts, SessionEngine, SessionSpawnConfig};
 use roy::event::{StopReason, TurnEvent};
 use roy::transport::{AcpConfig, AcpTransport, PermissionPolicy, Transport};
 
@@ -15,6 +15,16 @@ fn fake_acp_transport() -> Arc<dyn Transport> {
         permission_policy: PermissionPolicy::AllowAll,
         open_timeout: Duration::from_secs(5),
     }))
+}
+
+fn test_cfg() -> SessionSpawnConfig {
+    SessionSpawnConfig {
+        agent: "test".into(),
+        cwd: std::env::current_dir().unwrap(),
+        model: None,
+        permission: None,
+        resume_cursor: None,
+    }
 }
 
 static TMPDIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -37,9 +47,8 @@ async fn two_attaches_see_the_same_seq_stream_until_result() {
     let journal_dir = tmp_journal_dir();
     let engine = SessionEngine::spawn(
         fake_acp_transport(),
-        std::env::current_dir().unwrap(),
         opts(journal_dir.clone()),
-        None,
+        test_cfg(),
     )
     .await
     .unwrap();
@@ -98,9 +107,8 @@ async fn input_lease_is_exclusive_and_released_on_drop() {
     let journal_dir = tmp_journal_dir();
     let engine = SessionEngine::spawn(
         fake_acp_transport(),
-        std::env::current_dir().unwrap(),
         opts(journal_dir.clone()),
-        None,
+        test_cfg(),
     )
     .await
     .unwrap();
@@ -125,9 +133,8 @@ async fn late_attach_replays_full_journal() {
     let journal_dir = tmp_journal_dir();
     let engine = SessionEngine::spawn(
         fake_acp_transport(),
-        std::env::current_dir().unwrap(),
         opts(journal_dir.clone()),
-        None,
+        test_cfg(),
     )
     .await
     .unwrap();
