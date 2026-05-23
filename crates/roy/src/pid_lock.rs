@@ -23,11 +23,7 @@ impl PidLock {
             std::fs::create_dir_all(parent).map_err(RoyError::Io)?;
         }
         loop {
-            match OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&path)
-            {
+            match OpenOptions::new().create_new(true).write(true).open(&path) {
                 Ok(mut file) => {
                     write_pid(&mut file, std::process::id())?;
                     return Ok(Self { path });
@@ -97,10 +93,7 @@ mod tests {
 
     fn tmp_path() -> PathBuf {
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        std::env::temp_dir().join(format!(
-            "roy-pidlock-test-{}-{n}.pid",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("roy-pidlock-test-{}-{n}.pid", std::process::id()))
     }
 
     #[test]
@@ -128,10 +121,8 @@ mod tests {
             .spawn()
             .expect("spawn `true`");
         let dead_pid = child.id();
-        let _ = std::process::Command::new("true")
-            .arg("--ignored")
-            .output(); // sync wait via a fresh call is enough for `true` to be reaped
-        // Belt-and-braces: wait the real child too.
+        let _ = std::process::Command::new("true").arg("--ignored").output(); // sync wait via a fresh call is enough for `true` to be reaped
+                                                                              // Belt-and-braces: wait the real child too.
         let mut child = child;
         let _ = child.wait();
 

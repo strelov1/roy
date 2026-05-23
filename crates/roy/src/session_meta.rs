@@ -36,8 +36,7 @@ pub async fn write_metadata(dir: &Path, meta: &SessionMetadata) -> Result<()> {
     tokio::fs::create_dir_all(dir).await.map_err(RoyError::Io)?;
     let final_path = meta_path(dir, &meta.session_id);
     let tmp_path = final_path.with_extension("json.tmp");
-    let json =
-        serde_json::to_vec_pretty(meta).map_err(|e| RoyError::Protocol(e.to_string()))?;
+    let json = serde_json::to_vec_pretty(meta).map_err(|e| RoyError::Protocol(e.to_string()))?;
     tokio::fs::write(&tmp_path, &json)
         .await
         .map_err(RoyError::Io)?;
@@ -62,10 +61,7 @@ mod tests {
 
     fn tmpdir() -> PathBuf {
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        std::env::temp_dir().join(format!(
-            "roy-session-meta-test-{}-{n}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("roy-session-meta-test-{}-{n}", std::process::id()))
     }
 
     #[tokio::test]

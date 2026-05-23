@@ -18,6 +18,6 @@ pub use event::{event_from_json, event_to_json, StopReason, TurnEvent};
 pub use journal::{ArchivedJournal, Journal, JournalEntry, Seq};
 pub use manager::SessionManager;
 pub use pid_lock::PidLock;
-pub use session_meta::SessionMetadata;
 pub use session::Session;
+pub use session_meta::SessionMetadata;
 pub use transport::{AcpConfig, AcpTransport, Handle, PermissionPolicy, Transport};

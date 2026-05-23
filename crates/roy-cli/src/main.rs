@@ -243,7 +243,11 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
             cwd: args
                 .cwd
                 .map(|p| p.to_string_lossy().into_owned())
-                .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned())),
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|p| p.to_string_lossy().into_owned())
+                }),
             model: args.model.clone(),
             permission: args.permission.clone(),
             resume: args.resume.clone(),
@@ -299,7 +303,9 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     .await?;
     match read_event(&mut events).await? {
         ServerEvent::InputAcquired { acquired: true, .. } => {}
-        ServerEvent::InputAcquired { acquired: false, .. } => {
+        ServerEvent::InputAcquired {
+            acquired: false, ..
+        } => {
             anyhow::bail!("input lease already held by another client");
         }
         other => anyhow::bail!("unexpected response to AcquireInput: {other:?}"),
@@ -319,7 +325,10 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         match read_event(&mut events).await? {
             ServerEvent::Frame { entry, .. } => {
                 print_entry(&entry, args.with_seq);
-                if let TurnEvent::Result { ref stop_reason, .. } = entry.event {
+                if let TurnEvent::Result {
+                    ref stop_reason, ..
+                } = entry.event
+                {
                     if stop_reason.is_error() {
                         exit_code = ExitCode::from(1);
                     }
@@ -387,7 +396,10 @@ async fn cmd_attach(args: AttachArgs) -> anyhow::Result<ExitCode> {
         match read_event(&mut events).await? {
             ServerEvent::Frame { entry, .. } => {
                 print_entry(&entry, args.with_seq);
-                if let TurnEvent::Result { ref stop_reason, .. } = entry.event {
+                if let TurnEvent::Result {
+                    ref stop_reason, ..
+                } = entry.event
+                {
                     if stop_reason.is_error() {
                         exit_code = ExitCode::from(1);
                     }
@@ -521,4 +533,3 @@ async fn read_event<R: AsyncBufReadExt + Unpin>(
         .ok_or_else(|| anyhow!("daemon hung up"))?;
     Ok(serde_json::from_str(line.trim())?)
 }
-

@@ -34,11 +34,7 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
         let req: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                let resp = error_response(
-                    Value::Null,
-                    -32700,
-                    &format!("parse error: {e}"),
-                );
+                let resp = error_response(Value::Null, -32700, &format!("parse error: {e}"));
                 write_line(&mut stdout, &resp).await?;
                 continue;
             }
@@ -321,9 +317,7 @@ async fn tool_close(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     .await?;
     match next_event(&mut lines).await? {
         ServerEvent::Closed { .. } => Ok(format!("closed {session}")),
-        ServerEvent::Error { code, message, .. } => {
-            Err(anyhow!("close failed: {code}: {message}"))
-        }
+        ServerEvent::Error { code, message, .. } => Err(anyhow!("close failed: {code}: {message}")),
         other => Err(anyhow!("unexpected response: {other:?}")),
     }
 }
@@ -387,7 +381,9 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     .await?;
     match next_event(&mut lines).await? {
         ServerEvent::InputAcquired { acquired: true, .. } => {}
-        ServerEvent::InputAcquired { acquired: false, .. } => {
+        ServerEvent::InputAcquired {
+            acquired: false, ..
+        } => {
             return Err(anyhow!("input lease already held"));
         }
         other => return Err(anyhow!("unexpected response: {other:?}")),
@@ -408,7 +404,9 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         match next_event(&mut lines).await? {
             ServerEvent::Frame { entry, .. } => match entry.event {
                 TurnEvent::AssistantText { text: chunk } => text.push_str(&chunk),
-                TurnEvent::Result { stop_reason: sr, .. } => {
+                TurnEvent::Result {
+                    stop_reason: sr, ..
+                } => {
                     break sr.as_wire().to_string();
                 }
                 _ => {}
@@ -434,23 +432,14 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
 }
 
 async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<String> {
-    let agent = args
-        .get("agent")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing 'agent'"))?
-        .to_string();
-    let task = args
-        .get("task")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing 'task'"))?
-        .to_string();
-    let cwd = args.get("cwd").and_then(Value::as_str).map(|s| s.to_string());
-    let model = args.get("model").and_then(Value::as_str).map(|s| s.to_string());
-    let permission = args
-        .get("permission")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string());
-    let resume = args.get("resume").and_then(Value::as_str).map(|s| s.to_string());
+    let SpawnArgs {
+        agent,
+        task,
+        cwd,
+        model,
+        permission,
+        resume,
+    } = parse_spawn_args(&args)?;
 
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
 
@@ -486,9 +475,9 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
     .await?;
     match next_event(&mut lines).await? {
         ServerEvent::InputAcquired { acquired: true, .. } => {}
-        ServerEvent::InputAcquired { acquired: false, .. } => {
-            return Err(anyhow!("input lease already held"))
-        }
+        ServerEvent::InputAcquired {
+            acquired: false, ..
+        } => return Err(anyhow!("input lease already held")),
         other => return Err(anyhow!("unexpected response: {other:?}")),
     }
     send_cmd(
@@ -554,11 +543,7 @@ async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<St
                         rendered.push(format!("[{}] system: {subtype}", entry.seq));
                     }
                     TurnEvent::Result { stop_reason, .. } => {
-                        rendered.push(format!(
-                            "[{}] result: {}",
-                            entry.seq,
-                            stop_reason.as_wire()
-                        ));
+                        rendered.push(format!("[{}] result: {}", entry.seq, stop_reason.as_wire()));
                         terminal = Some(stop_reason.as_wire().to_string());
                     }
                     TurnEvent::Raw(_) => {
@@ -579,9 +564,7 @@ async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<St
                 format!("{body}{footer}")
             })
         }
-        ServerEvent::Error { code, message, .. } => {
-            Err(anyhow!("read failed: {code}: {message}"))
-        }
+        ServerEvent::Error { code, message, .. } => Err(anyhow!("read failed: {code}: {message}")),
         other => Err(anyhow!("unexpected response: {other:?}")),
     }
 }

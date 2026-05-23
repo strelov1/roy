@@ -45,13 +45,9 @@ fn opts(journal_dir: PathBuf) -> EngineOpts {
 #[tokio::test]
 async fn two_attaches_see_the_same_seq_stream_until_result() {
     let journal_dir = tmp_journal_dir();
-    let engine = SessionEngine::spawn(
-        fake_acp_transport(),
-        opts(journal_dir.clone()),
-        test_cfg(),
-    )
-    .await
-    .unwrap();
+    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
+        .await
+        .unwrap();
 
     let attach_a = engine.attach(None).await.unwrap();
     let attach_b = engine.attach(None).await.unwrap();
@@ -105,13 +101,9 @@ async fn two_attaches_see_the_same_seq_stream_until_result() {
 #[tokio::test]
 async fn input_lease_is_exclusive_and_released_on_drop() {
     let journal_dir = tmp_journal_dir();
-    let engine = SessionEngine::spawn(
-        fake_acp_transport(),
-        opts(journal_dir.clone()),
-        test_cfg(),
-    )
-    .await
-    .unwrap();
+    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
+        .await
+        .unwrap();
 
     let lease = engine.try_acquire_input().expect("first acquire");
     assert!(
@@ -131,13 +123,9 @@ async fn input_lease_is_exclusive_and_released_on_drop() {
 #[tokio::test]
 async fn late_attach_replays_full_journal() {
     let journal_dir = tmp_journal_dir();
-    let engine = SessionEngine::spawn(
-        fake_acp_transport(),
-        opts(journal_dir.clone()),
-        test_cfg(),
-    )
-    .await
-    .unwrap();
+    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
+        .await
+        .unwrap();
 
     let lease = engine.try_acquire_input().unwrap();
     lease.send("hi").unwrap();

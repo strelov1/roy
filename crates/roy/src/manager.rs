@@ -40,11 +40,9 @@ impl SessionManager {
         broadcast_capacity: usize,
         mem_capacity: usize,
     ) -> Result<Arc<SessionEngine>> {
-        let transport = self.factory.build(
-            &cfg.agent,
-            cfg.model.as_deref(),
-            cfg.permission.as_deref(),
-        )?;
+        let transport =
+            self.factory
+                .build(&cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
@@ -78,18 +76,15 @@ impl SessionManager {
             permission: meta.permission,
             resume_cursor: meta.resume_cursor,
         };
-        let transport = self.factory.build(
-            &cfg.agent,
-            cfg.model.as_deref(),
-            cfg.permission.as_deref(),
-        )?;
+        let transport =
+            self.factory
+                .build(&cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
             mem_capacity,
         };
-        let engine =
-            SessionEngine::resume(transport, opts, session_id.to_string(), cfg).await?;
+        let engine = SessionEngine::resume(transport, opts, session_id.to_string(), cfg).await?;
         let id = engine.id().to_string();
         self.sessions.write().await.insert(id, Arc::clone(&engine));
         Ok(engine)
@@ -137,11 +132,7 @@ impl SessionManager {
     /// live engine's in-memory window (cheaper, monotonic), fall back to the
     /// on-disk archive if no live engine is registered. Single source of truth
     /// for poll-style readers — both the CLI and MCP tools route through here.
-    pub async fn read_journal(
-        &self,
-        session_id: &str,
-        from_seq: Seq,
-    ) -> Result<Vec<JournalEntry>> {
+    pub async fn read_journal(&self, session_id: &str, from_seq: Seq) -> Result<Vec<JournalEntry>> {
         if let Some(engine) = self.get(session_id).await {
             return engine.snapshot(from_seq).await;
         }
@@ -152,10 +143,7 @@ impl SessionManager {
     /// Open the journal for a session that is not (currently) live. Errors if
     /// either the session IS live (use `get` instead) or no journal file
     /// exists.
-    pub async fn open_archive(
-        &self,
-        session_id: &str,
-    ) -> Result<crate::journal::ArchivedJournal> {
+    pub async fn open_archive(&self, session_id: &str) -> Result<crate::journal::ArchivedJournal> {
         if self.sessions.read().await.contains_key(session_id) {
             return Err(RoyError::Protocol(format!(
                 "session {session_id} is live — use `get` to attach, not `open_archive`"
@@ -179,10 +167,7 @@ impl SessionManager {
         };
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
-            match self
-                .resume(&id, broadcast_capacity, mem_capacity)
-                .await
-            {
+            match self.resume(&id, broadcast_capacity, mem_capacity).await {
                 Ok(_) => out.push((id, None)),
                 Err(e) => out.push((id, Some(e))),
             }
@@ -333,17 +318,13 @@ mod tests {
         assert_eq!(mgr.list().await, vec![id.clone()]);
 
         // Below threshold → nothing closed.
-        let closed = mgr
-            .sweep_idle(std::time::Duration::from_secs(60))
-            .await;
+        let closed = mgr.sweep_idle(std::time::Duration::from_secs(60)).await;
         assert!(closed.is_empty());
         assert_eq!(mgr.list().await, vec![id.clone()]);
 
         // Wait past a small threshold → session is swept.
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        let closed = mgr
-            .sweep_idle(std::time::Duration::from_millis(100))
-            .await;
+        let closed = mgr.sweep_idle(std::time::Duration::from_millis(100)).await;
         assert_eq!(closed, vec![id.clone()]);
         assert!(mgr.list().await.is_empty());
 

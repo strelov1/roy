@@ -35,12 +35,7 @@ type SubsMap = HashMap<String, tokio::task::JoinHandle<()>>;
 type LeasesMap = HashMap<String, InputLease>;
 
 /// Tiny helper to factor away the repetitive error-event send.
-fn send_error(
-    tx: &EventTx,
-    session: Option<String>,
-    code: ErrorCode,
-    message: impl Into<String>,
-) {
+fn send_error(tx: &EventTx, session: Option<String>, code: ErrorCode, message: impl Into<String>) {
     let _ = tx.send(ServerEvent::Error {
         session,
         code,
@@ -143,9 +138,7 @@ impl Daemon {
             tracing::info!(?threshold, ?tick, "idle-sweep enabled");
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tick);
-                interval.set_missed_tick_behavior(
-                    tokio::time::MissedTickBehavior::Delay,
-                );
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     interval.tick().await;
                     let closed = mgr.sweep_idle(threshold).await;
@@ -253,10 +246,7 @@ impl Daemon {
     }
 
     /// Drive one WebSocket client connection.
-    pub async fn serve_ws_connection<S>(
-        self: &Arc<Self>,
-        ws: WebSocketStream<S>,
-    ) -> Result<()>
+    pub async fn serve_ws_connection<S>(self: &Arc<Self>, ws: WebSocketStream<S>) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -345,12 +335,15 @@ impl Daemon {
         self.handle(cmd, event_tx, subs, leases).await;
     }
 
+    /// Thin command dispatcher: every non-trivial branch lives in its own
+    /// `handle_*` method so per-command logic is easy to read in isolation.
+    /// Trivial branches (`List`, `Detach`, `ReleaseInput`) stay inline.
     async fn handle(
         self: &Arc<Self>,
         cmd: ClientCommand,
         event_tx: &EventTx,
-        subs: &mut HashMap<String, tokio::task::JoinHandle<()>>,
-        leases: &mut HashMap<String, InputLease>,
+        subs: &mut SubsMap,
+        leases: &mut LeasesMap,
     ) {
         match cmd {
             ClientCommand::Spawn {
@@ -360,229 +353,329 @@ impl Daemon {
                 permission,
                 resume,
             } => {
-                let cfg = SessionSpawnConfig {
-                    agent,
-                    cwd: cwd.map(PathBuf::from).unwrap_or_else(|| {
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                    }),
-                    model,
-                    permission,
-                    resume_cursor: resume,
-                };
-                let engine = match self.manager.spawn(cfg, 256, 1024).await {
-                    Ok(e) => e,
-                    Err(e) => {
-                        send_error(event_tx, None, ErrorCode::SpawnFailed, e.to_string());
-                        return;
-                    }
-                };
-                let session = engine.id().to_string();
-                let resume_cursor = engine.resume_cursor();
-                let _ = event_tx.send(ServerEvent::Spawned {
-                    session,
-                    resume_cursor,
-                });
+                self.handle_spawn(agent, cwd, model, permission, resume, event_tx)
+                    .await
             }
-
-            ClientCommand::Resume { session } => {
-                let engine = match self.manager.resume(&session, 256, 1024).await {
-                    Ok(e) => e,
-                    Err(e) => {
-                        send_error(event_tx, Some(session), ErrorCode::ResumeFailed, e.to_string());
-                        return;
-                    }
-                };
-                let resume_cursor = engine.resume_cursor();
-                let _ = event_tx.send(ServerEvent::Resumed {
-                    session: engine.id().to_string(),
-                    resume_cursor,
-                });
-            }
-
+            ClientCommand::Resume { session } => self.handle_resume(session, event_tx).await,
             ClientCommand::Attach { session, from_seq } => {
-                let engine = match self.manager.get(&session).await {
-                    Some(e) => e,
-                    None => {
-                        // Fall back to a read-only archive replay if the
-                        // journal still exists. No live broadcast — the
-                        // pump task emits the disk snapshot and ends.
-                        match self.manager.open_archive(&session).await {
-                            Ok(archive) => {
-                                let entries =
-                                    match archive.replay_from(from_seq.unwrap_or(0)).await {
-                                        Ok(e) => e,
-                                        Err(e) => {
-                                            send_error(event_tx, Some(session), ErrorCode::ArchiveReadFailed, e.to_string());
-                                            return;
-                                        }
-                                    };
-                                let seq_at_attach = entries
-                                    .last()
-                                    .map(|e| e.seq + 1)
-                                    .unwrap_or_else(|| from_seq.unwrap_or(0));
-                                let _ = event_tx.send(ServerEvent::Attached {
-                                    session: session.clone(),
-                                    seq_at_attach,
-                                });
-                                let tx = event_tx.clone();
-                                let sid = session.clone();
-                                let handle = tokio::spawn(async move {
-                                    for entry in entries {
-                                        if tx
-                                            .send(ServerEvent::Frame {
-                                                session: sid.clone(),
-                                                entry,
-                                            })
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                });
-                                if let Some(prev) = subs.remove(&session) {
-                                    prev.abort();
-                                }
-                                subs.insert(session, handle);
-                            }
-                            Err(_) => {
-                                send_error(event_tx, Some(session), ErrorCode::NoSession, "no such session (live or archived)");
-                            }
-                        }
-                        return;
-                    }
-                };
-                let attach = match engine.attach(from_seq).await {
-                    Ok(a) => a,
-                    Err(e) => {
-                        send_error(event_tx, Some(session), ErrorCode::AttachFailed, e.to_string());
-                        return;
-                    }
-                };
-                let _ = event_tx.send(ServerEvent::Attached {
-                    session: session.clone(),
-                    seq_at_attach: attach.seq_at_attach,
-                });
-                if let Some(prev) = subs.remove(&session) {
-                    prev.abort();
-                }
-                let event_tx_for_pump = event_tx.clone();
-                let session_for_pump = session.clone();
-                let mut stream = attach.stream;
-                let handle = tokio::spawn(async move {
-                    while let Some(entry) = stream.next().await {
-                        if event_tx_for_pump
-                            .send(ServerEvent::Frame {
-                                session: session_for_pump.clone(),
-                                entry,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                });
-                subs.insert(session, handle);
+                self.handle_attach(session, from_seq, event_tx, subs).await
             }
-
             ClientCommand::AcquireInput { session } => {
-                let engine = match self.manager.get(&session).await {
-                    Some(e) => e,
-                    None => {
-                        send_error(event_tx, Some(session), ErrorCode::NoSession, "no such session");
-                        return;
-                    }
-                };
-                let acquired = match engine.try_acquire_input() {
-                    Some(lease) => {
-                        leases.insert(session.clone(), lease);
-                        true
-                    }
-                    None => false,
-                };
-                let _ = event_tx.send(ServerEvent::InputAcquired { session, acquired });
+                self.handle_acquire_input(session, event_tx, leases).await
             }
-
             ClientCommand::Send { session, text } => {
-                let Some(lease) = leases.get(&session) else {
-                    send_error(event_tx, Some(session), ErrorCode::NoLease, "input lease not held by this connection");
-                    return;
-                };
-                if let Err(e) = lease.send(text) {
-                    send_error(event_tx, Some(session), ErrorCode::SendFailed, e.to_string());
-                }
+                Self::handle_send(session, text, event_tx, leases)
             }
-
             ClientCommand::ReleaseInput { session } => {
                 leases.remove(&session);
                 let _ = event_tx.send(ServerEvent::InputReleased { session });
             }
-
             ClientCommand::Detach { session } => {
                 if let Some(h) = subs.remove(&session) {
                     h.abort();
                 }
                 let _ = event_tx.send(ServerEvent::Detached { session });
             }
-
             ClientCommand::Close { session } => {
-                leases.remove(&session);
-                if let Some(h) = subs.remove(&session) {
-                    h.abort();
-                }
-                if let Err(e) = self.manager.close(&session).await {
-                    send_error(event_tx, Some(session), ErrorCode::CloseFailed, e.to_string());
-                } else {
-                    let _ = event_tx.send(ServerEvent::Closed { session });
-                }
+                self.handle_close(session, event_tx, subs, leases).await
             }
-
             ClientCommand::List => {
                 let sessions = self.manager.list().await;
                 let _ = event_tx.send(ServerEvent::Listed { sessions });
             }
-
             ClientCommand::ReadJournal {
                 session,
                 from_seq,
                 max_entries,
             } => {
-                let from = from_seq.unwrap_or(0);
-                match self.manager.read_journal(&session, from).await {
-                    Ok(mut entries) => {
-                        let has_more = if let Some(n) = max_entries {
-                            let more = entries.len() > n;
-                            entries.truncate(n);
-                            more
-                        } else {
-                            false
-                        };
-                        let next_seq =
-                            entries.last().map(|e| e.seq + 1).unwrap_or(from);
-                        let _ = event_tx.send(ServerEvent::JournalRead {
-                            session,
-                            entries,
-                            next_seq,
-                            has_more,
-                        });
-                    }
-                    Err(e) => {
-                        send_error(event_tx, Some(session), ErrorCode::ReadJournalFailed, e.to_string());
-                    }
-                }
+                self.handle_read_journal(session, from_seq, max_entries, event_tx)
+                    .await
             }
-
-            ClientCommand::ListArchived => {
-                match self.manager.list_archived().await {
-                    Ok(sessions) => {
-                        let _ = event_tx.send(ServerEvent::ListedArchived { sessions });
-                    }
-                    Err(e) => {
-                        send_error(event_tx, None, ErrorCode::ListArchivedFailed, e.to_string());
-                    }
-                }
-            }
+            ClientCommand::ListArchived => self.handle_list_archived(event_tx).await,
         }
     }
+
+    async fn handle_spawn(
+        self: &Arc<Self>,
+        agent: String,
+        cwd: Option<String>,
+        model: Option<String>,
+        permission: Option<String>,
+        resume: Option<String>,
+        event_tx: &EventTx,
+    ) {
+        let cfg = SessionSpawnConfig {
+            agent,
+            cwd: cwd
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+            model,
+            permission,
+            resume_cursor: resume,
+        };
+        match self.manager.spawn(cfg, 256, 1024).await {
+            Ok(engine) => {
+                let _ = event_tx.send(ServerEvent::Spawned {
+                    session: engine.id().to_string(),
+                    resume_cursor: engine.resume_cursor(),
+                });
+            }
+            Err(e) => send_error(event_tx, None, ErrorCode::SpawnFailed, e.to_string()),
+        }
+    }
+
+    async fn handle_resume(self: &Arc<Self>, session: String, event_tx: &EventTx) {
+        match self.manager.resume(&session, 256, 1024).await {
+            Ok(engine) => {
+                let _ = event_tx.send(ServerEvent::Resumed {
+                    session: engine.id().to_string(),
+                    resume_cursor: engine.resume_cursor(),
+                });
+            }
+            Err(e) => send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::ResumeFailed,
+                e.to_string(),
+            ),
+        }
+    }
+
+    /// Live engine → subscribe to its broadcast; otherwise fall back to a
+    /// read-only archive replay so closed sessions remain inspectable.
+    async fn handle_attach(
+        self: &Arc<Self>,
+        session: String,
+        from_seq: Option<crate::journal::Seq>,
+        event_tx: &EventTx,
+        subs: &mut SubsMap,
+    ) {
+        if let Some(engine) = self.manager.get(&session).await {
+            attach_live(engine, session, from_seq, event_tx, subs).await;
+        } else {
+            self.attach_archive(session, from_seq, event_tx, subs).await;
+        }
+    }
+
+    async fn attach_archive(
+        self: &Arc<Self>,
+        session: String,
+        from_seq: Option<crate::journal::Seq>,
+        event_tx: &EventTx,
+        subs: &mut SubsMap,
+    ) {
+        let archive = match self.manager.open_archive(&session).await {
+            Ok(a) => a,
+            Err(_) => {
+                send_error(
+                    event_tx,
+                    Some(session),
+                    ErrorCode::NoSession,
+                    "no such session (live or archived)",
+                );
+                return;
+            }
+        };
+        let entries = match archive.replay_from(from_seq.unwrap_or(0)).await {
+            Ok(e) => e,
+            Err(e) => {
+                send_error(
+                    event_tx,
+                    Some(session),
+                    ErrorCode::ArchiveReadFailed,
+                    e.to_string(),
+                );
+                return;
+            }
+        };
+        let seq_at_attach = entries
+            .last()
+            .map(|e| e.seq + 1)
+            .unwrap_or_else(|| from_seq.unwrap_or(0));
+        let _ = event_tx.send(ServerEvent::Attached {
+            session: session.clone(),
+            seq_at_attach,
+        });
+        if let Some(prev) = subs.remove(&session) {
+            prev.abort();
+        }
+        let tx = event_tx.clone();
+        let sid = session.clone();
+        let handle = tokio::spawn(async move {
+            for entry in entries {
+                if tx
+                    .send(ServerEvent::Frame {
+                        session: sid.clone(),
+                        entry,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        subs.insert(session, handle);
+    }
+
+    async fn handle_acquire_input(
+        self: &Arc<Self>,
+        session: String,
+        event_tx: &EventTx,
+        leases: &mut LeasesMap,
+    ) {
+        let Some(engine) = self.manager.get(&session).await else {
+            send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::NoSession,
+                "no such session",
+            );
+            return;
+        };
+        let acquired = engine
+            .try_acquire_input()
+            .map(|lease| {
+                leases.insert(session.clone(), lease);
+                true
+            })
+            .unwrap_or(false);
+        let _ = event_tx.send(ServerEvent::InputAcquired { session, acquired });
+    }
+
+    fn handle_send(session: String, text: String, event_tx: &EventTx, leases: &LeasesMap) {
+        let Some(lease) = leases.get(&session) else {
+            send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::NoLease,
+                "input lease not held by this connection",
+            );
+            return;
+        };
+        if let Err(e) = lease.send(text) {
+            send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::SendFailed,
+                e.to_string(),
+            );
+        }
+    }
+
+    async fn handle_close(
+        self: &Arc<Self>,
+        session: String,
+        event_tx: &EventTx,
+        subs: &mut SubsMap,
+        leases: &mut LeasesMap,
+    ) {
+        leases.remove(&session);
+        if let Some(h) = subs.remove(&session) {
+            h.abort();
+        }
+        match self.manager.close(&session).await {
+            Ok(()) => {
+                let _ = event_tx.send(ServerEvent::Closed { session });
+            }
+            Err(e) => send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::CloseFailed,
+                e.to_string(),
+            ),
+        }
+    }
+
+    async fn handle_read_journal(
+        self: &Arc<Self>,
+        session: String,
+        from_seq: Option<crate::journal::Seq>,
+        max_entries: Option<usize>,
+        event_tx: &EventTx,
+    ) {
+        let from = from_seq.unwrap_or(0);
+        match self.manager.read_journal(&session, from).await {
+            Ok(mut entries) => {
+                let has_more = if let Some(n) = max_entries {
+                    let more = entries.len() > n;
+                    entries.truncate(n);
+                    more
+                } else {
+                    false
+                };
+                let next_seq = entries.last().map(|e| e.seq + 1).unwrap_or(from);
+                let _ = event_tx.send(ServerEvent::JournalRead {
+                    session,
+                    entries,
+                    next_seq,
+                    has_more,
+                });
+            }
+            Err(e) => send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::ReadJournalFailed,
+                e.to_string(),
+            ),
+        }
+    }
+
+    async fn handle_list_archived(self: &Arc<Self>, event_tx: &EventTx) {
+        match self.manager.list_archived().await {
+            Ok(sessions) => {
+                let _ = event_tx.send(ServerEvent::ListedArchived { sessions });
+            }
+            Err(e) => send_error(event_tx, None, ErrorCode::ListArchivedFailed, e.to_string()),
+        }
+    }
+}
+
+/// Free function (not a method) — once the live engine is fished out of the
+/// manager, the rest of attach is plain channel plumbing that doesn't need
+/// access to `self.manager`. Keeps the call site symmetric with `attach_archive`.
+async fn attach_live(
+    engine: Arc<crate::engine::SessionEngine>,
+    session: String,
+    from_seq: Option<crate::journal::Seq>,
+    event_tx: &EventTx,
+    subs: &mut SubsMap,
+) {
+    let attach = match engine.attach(from_seq).await {
+        Ok(a) => a,
+        Err(e) => {
+            send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::AttachFailed,
+                e.to_string(),
+            );
+            return;
+        }
+    };
+    let _ = event_tx.send(ServerEvent::Attached {
+        session: session.clone(),
+        seq_at_attach: attach.seq_at_attach,
+    });
+    if let Some(prev) = subs.remove(&session) {
+        prev.abort();
+    }
+    let tx = event_tx.clone();
+    let sid = session.clone();
+    let mut stream = attach.stream;
+    let handle = tokio::spawn(async move {
+        while let Some(entry) = stream.next().await {
+            if tx
+                .send(ServerEvent::Frame {
+                    session: sid.clone(),
+                    entry,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    subs.insert(session, handle);
 }
 
 async fn line_writer_loop<W>(mut writer: W, mut rx: mpsc::UnboundedReceiver<ServerEvent>)
@@ -868,7 +961,10 @@ mod tests {
         send_cmd_line(&mut client_wr, &ClientCommand::ListArchived).await;
         match next_event_line(&mut events).await {
             ServerEvent::ListedArchived { sessions } => {
-                assert!(sessions.contains(&session), "archive list missing closed session");
+                assert!(
+                    sessions.contains(&session),
+                    "archive list missing closed session"
+                );
             }
             other => panic!("expected ListedArchived, got {other:?}"),
         }
@@ -899,7 +995,10 @@ mod tests {
                 other => panic!("expected Frame, got {other:?}"),
             }
         }
-        assert!(saw_result, "archive replay must include the terminal Result");
+        assert!(
+            saw_result,
+            "archive replay must include the terminal Result"
+        );
 
         drop(client_wr);
         drop(events);

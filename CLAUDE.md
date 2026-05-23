@@ -12,75 +12,86 @@ Non-negotiable expectations for any change in this repo:
 
 ## What this is
 
-`roy` is a library (no `[[bin]]`) that drives coding-agent CLIs (`claude`, `gemini`, `opencode`) as child processes over stdio and exposes each turn as a stream of normalized `TurnEvent`s. It spawns the CLI; it does not install it. The CLI must be on `PATH`.
+A Cargo workspace with two crates:
+
+- **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting metadata so sessions survive across daemon restarts.
+- **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket / WebSocket) plus an MCP server (`roy mcp`) that exposes the daemon to MCP-aware AI clients.
+
+Roy spawns agent CLIs; it does not install them. Each preset (`claude_agent`, `gemini`, `opencode`, `codex`) maps to a CLI that must be on `PATH` and pre-authenticated.
 
 ## Commands
 
 ```bash
 cargo build --all-targets
-cargo fmt                 # config in rustfmt.toml (edition 2021, max_width 100)
-cargo test                # unit + integration; uses fake agents, no real CLI needed
+cargo fmt                # config in rustfmt.toml (edition 2021, max_width 100)
+cargo test --workspace   # unit + integration; uses a python fake ACP agent, no real CLI needed
 
-cargo test parses_tool_use                    # single test by name
-cargo test --test acp_transport               # one integration test file
-cargo test send_streams_until_turn_end -- --nocapture
+cargo test --test acp_transport                              # one integration test file
+cargo test open_send_streams_until_result -- --nocapture     # single test by name
 ```
 
 `clippy` is not installed in the toolchain by default (`rustup component add clippy` if needed).
 
 ### Real-CLI smoke tests (ignored by default)
 
-Three tests hit real binaries and are `#[ignore]`d. They self-skip if the dependency is absent, so running them without setup is a no-op pass:
+Four tests hit real agent binaries and are `#[ignore]`d. They self-skip if the dependency is absent, so running them without setup is a no-op pass:
 
 ```bash
-cargo test -- --ignored real_claude                       # needs CLAUDE_CODE_OAUTH_TOKEN
-cargo test --test acp_transport -- --ignored real_gemini  # needs `gemini` on PATH, logged in
-cargo test --test acp_transport -- --ignored real_opencode
+cargo test --test acp_transport -- --ignored real_claude_agent   # needs `claude-code-acp` on PATH, logged in
+cargo test --test acp_transport -- --ignored real_gemini         # needs `gemini` on PATH, logged in
+cargo test --test acp_transport -- --ignored real_opencode       # needs `opencode` on PATH
+cargo test --test acp_transport -- --ignored real_codex          # needs `codex-acp` on PATH
 ```
 
 ### Running the demos
 
-Each example drives one agent through a two-turn conversation (requires that agent's CLI installed):
+Each example drives one agent through a two-turn conversation (requires that agent's CLI installed and authenticated):
 
 ```bash
-cargo run --example demo           # claude via PrintTransport
-cargo run --example demo_gemini    # gemini via AcpTransport
-cargo run --example demo_opencode  # opencode via AcpTransport
+cargo run --example demo_claude_agent
+cargo run --example demo_gemini
+cargo run --example demo_opencode
+cargo run --example demo_codex
+cargo run --example engine_two_attach     # SessionEngine + two concurrent attaches against the fake agent
 ```
 
 ## Architecture
 
-Three decoupled layers. The key design goal is that the **transport stays agent-agnostic** and new agents drop in without touching session/streaming logic.
+A short pipeline. Triggers (CLI, MCP, WebSocket) talk to a single `Daemon`; `Daemon` owns a `SessionManager`; `SessionManager` owns `SessionEngine` actors; each engine drives one ACP `Transport`. Bytes only cross trait boundaries at `Transport`, so adding a new agent is a new `AcpConfig` preset, not new session/journal/protocol code.
 
-1. **`Session`** (`src/session.rs`) — a multi-turn conversation with one agent. Holds an `id`, an opaque `resume_cursor`, and lazily opens a live process on the first `send`. Subsequent `send`s reuse the same process (multi-turn). `resume` / `resume_with_cursor` re-open a prior conversation (e.g. after a host-app restart).
+1. **`Daemon`** (`src/daemon.rs`) — accepts Unix-socket and WebSocket connections, parses `ClientCommand`s, dispatches to per-command `handle_*` methods, and pumps `ServerEvent`s back. Single-instance guard via `PidLock` (`src/pid_lock.rs`). Optional idle-GC + resume-all on startup via `ServeOpts`.
 
-2. **`Transport`** (`src/transport/mod.rs`) — how bytes move to/from the process. `open()` spawns and returns a `Handle`; `Handle::send()` writes one user turn and returns a `TurnStream` (`Pin<Box<dyn Stream<Item = TurnEvent>>>`) that ends after the turn's terminal event. Two implementations:
-   - **`PrintTransport`** (`print.rs`) — for claude. Spawns the CLI in `stream-json` mode, reads stdout line-by-line, delegates parsing to a `Provider`.
-   - **`AcpTransport`** (`acp/`) — for gemini/opencode. Speaks JSON-RPC 2.0 (the Agent Client Protocol) over stdio.
+2. **`SessionManager`** (`src/manager.rs`) — in-process registry of live `SessionEngine`s keyed by session id, plus on-disk archive operations: `list_archived`, `open_archive`, `read_journal` (unified live-or-archive read), `resume_all`, `sweep_idle`.
 
-3. **`Provider`** (`src/provider.rs`) — *only used by `PrintTransport`*. Pure logic, no I/O: one CLI's dialect (executable name, spawn args, how to encode a user message, how to parse a stdout line into a `TurnEvent`, what marks turn-end). `ClaudeProvider` is the only impl. This is the extension point for other line-oriented stream-json CLIs.
+3. **`SessionEngine`** (`src/engine.rs`) — long-lived per-session actor. Pipes the agent's events into a `Journal` (persistent JSONL + in-memory ring) and a `broadcast` channel; gates writes via a single `InputLease`; persists `SessionMetadata` so a fresh daemon process can resurrect the session via `ACP session/load`.
+
+4. **`Transport`** (`src/transport/mod.rs`) — single trait, single impl `AcpTransport` (`src/transport/acp/mod.rs`). Spawns the agent as a child, sets up the official `agent-client-protocol` SDK, handles `session/new` / `session/load`, optional `set_mode`, and auto-answers `session/request_permission` per `PermissionPolicy`.
+
+5. **Control protocol** (`src/control.rs`) — wire-level enums (`ClientCommand`, `ServerEvent`, typed `ErrorCode`) shared by every trigger. Same JSON payload over either framing (Unix socket: `\n`-delimited; WebSocket: `Message::Text`).
+
+6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `mcp`. The `mcp` subcommand (`crates/roy-cli/src/mcp.rs`) is an MCP server (JSON-RPC 2.0 over stdio) that exposes six tools (`roy_list_sessions`, `roy_list_archived`, `roy_run`, `roy_run_detached`, `roy_read_session`, `roy_close`).
 
 ### TurnEvent normalization
 
-`TurnEvent` (`src/event.rs`) is the common vocabulary across all dialects: `System`, `AssistantText`, `ToolUse`, `Result { cost_usd, is_error }`, and `Raw(Value)`. **Unknown/unmodeled messages become `Raw` rather than being dropped** — so a new event type from an upgraded CLI surfaces instead of vanishing silently. A turn's stream always terminates with `Result`.
+`TurnEvent` (`src/event.rs`) is the common vocabulary across all agents: `System`, `AssistantText`, `ToolUse`, `Result { cost_usd, stop_reason }`, and `Raw(Value)`. **Unknown/unmodeled messages become `Raw` rather than being dropped** — so a new event type from an upgraded SDK surfaces instead of vanishing silently. A turn's stream always terminates with `Result`. Wire format is a single JSON shape (`event_to_json` / `event_from_json`) used by stdout, the JSONL journal, and the control protocol.
+
+### Journal
+
+`Journal::append` is single-writer-in-practice (the engine actor) but `Mutex`-guarded. Each append:
+1. Writes one JSONL line to disk and `flush`es;
+2. Updates an in-memory `VecDeque` ring of size `mem_capacity`;
+3. Bumps `next_seq`.
+
+`replay_from(from)` returns entries with `seq >= from`, reading from the in-memory window first and falling back to disk for older entries. `ArchivedJournal::replay_from` is the disk-only variant used for closed sessions. `parse_entry_line` is the single source of truth for JSONL → `JournalEntry`.
 
 ### resume_cursor
 
-The opaque token to resume a session on the next `open`. Its meaning differs per transport, which is why `Session` distinguishes the host `id` from the `resume_cursor`:
-- **claude**: the cursor *is* the session id (`--session-id` on new, `--resume <id>` thereafter).
-- **ACP**: the cursor is the agent-issued ACP `sessionId` from `session/new`, distinct from the host session id. Use `Session::resume_with_cursor` to restore this case.
+The opaque token to resume an agent-side session on the next `Transport::open`. Distinct from the roy host session id, which is a UUID kept stable across restarts. For ACP, the cursor is the agent-issued `sessionId` from `session/new`. After a turn that produces a fresh cursor, the engine persists it into `SessionMetadata` so `SessionManager::resume` can hand it back to `Transport::open` and route through ACP `session/load`.
 
-### ACP client internals (`acp/client.rs`)
+### ACP details (`acp/mod.rs`)
 
-`JsonRpcClient` is a JSON-RPC peer over the child's stdio with a single background reader task that routes every incoming line three ways:
-- **responses** to handshake `request()` calls → resolve a per-id `oneshot`;
-- **the terminal `session/prompt` result** (matched by `active_prompt_id`) and **`session/update` notifications** → forwarded into the current turn's `mpsc` channel (installed by `begin_prompt`);
-- **agent→client requests** (notably `session/request_permission`) → answered automatically per `PermissionPolicy` (`AllowAll` selects `allow`; `Deny` cancels).
-
-If the child's stdout closes mid-turn, the reader emits a terminal `Result { is_error: true }` so the stream still terminates. `acp/protocol.rs` maps ACP `session/update` shapes and `session/prompt` results to `TurnEvent`s (a non-`end_turn`/`max_tokens` stop reason is treated as an error).
-
-Per-agent ACP setup lives in `AcpConfig` (`acp/mod.rs`): `AcpConfig::gemini()` uses `yolo` mode + `AllowAll`; `AcpConfig::opencode()` sends no `set_mode` (OpenCode has no ACP modes) and defaults to `Deny`.
+We own the child process directly (not `AcpAgent::from_args`) so we can detect mid-turn process exit and emit a terminal `Result { stop_reason: Error }`. A `watch` channel propagates "child died" into `run_session` / `run_turn`, which would otherwise hang on a never-resolved `send_request`. `update_to_event` maps `session/update` variants to `TurnEvent`; everything we don't model goes through `Raw(Value)`. Per-agent setup is centralized in `AcpConfig::{gemini, opencode, codex, claude_agent}`.
 
 ### Testing approach
 
-Integration tests avoid real CLIs by faking the agent process: `tests/scripts/fake-agent.sh` (stream-json, for `PrintTransport`) and `tests/scripts/fake-acp-agent.py` (JSON-RPC, for `AcpTransport`). The Python fake takes flags (`--permission`, `--exit-mid-turn`, `--no-initialize-reply`, `--jsonrpc-error`, etc.) to exercise error/timeout/permission paths deterministically. `acp/client.rs` unit tests drive the client over in-memory `tokio::io::duplex` pipes.
+Integration tests avoid real CLIs by faking the agent: `tests/scripts/fake-acp-agent.py` speaks JSON-RPC over stdio and takes flags (`--permission`, `--exit-mid-turn`, `--no-initialize-reply`, `--jsonrpc-error`, etc.) to drive error/timeout/permission paths deterministically. Daemon-level tests (`crates/roy/src/daemon.rs` `#[cfg(test)] mod tests`) drive the full Unix-socket and WebSocket paths through `tokio::io::duplex` / real loopback TCP. Real-CLI smoke tests (`#[ignore]`d) live in `crates/roy/tests/acp_transport.rs`.
