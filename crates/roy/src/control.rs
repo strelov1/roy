@@ -48,6 +48,9 @@ pub enum ClientCommand {
     Close { session: String },
     /// List session ids known to the daemon.
     List,
+    /// List session ids whose journals exist on disk but are not in the live
+    /// registry (closed sessions, restart survivors).
+    ListArchived,
 }
 
 /// Events sent from the daemon back to a trigger client. `session` ties an
@@ -78,6 +81,8 @@ pub enum ServerEvent {
     Closed { session: String },
     /// Response to `List`.
     Listed { sessions: Vec<String> },
+    /// Response to `ListArchived`.
+    ListedArchived { sessions: Vec<String> },
     /// A command failed; if `session` is `Some`, the error pertains to that
     /// session.
     Error {

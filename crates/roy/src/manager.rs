@@ -58,6 +58,55 @@ impl SessionManager {
         self.sessions.read().await.get(id).cloned()
     }
 
+    /// Session ids whose journal file exists on disk but whose engine is not
+    /// in the live registry — e.g. closed sessions or survivors of a daemon
+    /// restart. Returned in unspecified order.
+    pub async fn list_archived(&self) -> crate::error::Result<Vec<String>> {
+        use std::collections::HashSet;
+        let live: HashSet<String> = self.sessions.read().await.keys().cloned().collect();
+        let mut archived = Vec::new();
+        if !tokio::fs::try_exists(&self.journal_dir)
+            .await
+            .map_err(crate::error::RoyError::Io)?
+        {
+            return Ok(archived);
+        }
+        let mut entries = tokio::fs::read_dir(&self.journal_dir)
+            .await
+            .map_err(crate::error::RoyError::Io)?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(crate::error::RoyError::Io)?
+        {
+            let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                continue;
+            };
+            let Some(id) = name.strip_suffix(".jsonl") else {
+                continue;
+            };
+            if !live.contains(id) {
+                archived.push(id.to_string());
+            }
+        }
+        Ok(archived)
+    }
+
+    /// Open the journal for a session that is not (currently) live. Errors if
+    /// either the session IS live (use `get` instead) or no journal file
+    /// exists.
+    pub async fn open_archive(
+        &self,
+        session_id: &str,
+    ) -> crate::error::Result<crate::journal::ArchivedJournal> {
+        if self.sessions.read().await.contains_key(session_id) {
+            return Err(crate::error::RoyError::Protocol(format!(
+                "session {session_id} is live — use `get` to attach, not `open_archive`"
+            )));
+        }
+        crate::journal::ArchivedJournal::open(&self.journal_dir, session_id).await
+    }
+
     /// Wind down a session: ask it to close and remove it from the registry.
     /// The journal file stays on disk for inspection.
     pub async fn close(&self, id: &str) -> Result<()> {

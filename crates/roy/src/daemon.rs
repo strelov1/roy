@@ -303,11 +303,59 @@ impl Daemon {
                 let engine = match self.manager.get(&session).await {
                     Some(e) => e,
                     None => {
-                        let _ = event_tx.send(ServerEvent::Error {
-                            session: Some(session),
-                            code: "no_session".into(),
-                            message: "no such session".into(),
-                        });
+                        // Fall back to a read-only archive replay if the
+                        // journal still exists. No live broadcast — the
+                        // pump task emits the disk snapshot and ends.
+                        match self.manager.open_archive(&session).await {
+                            Ok(archive) => {
+                                let entries =
+                                    match archive.replay_from(from_seq.unwrap_or(0)).await {
+                                        Ok(e) => e,
+                                        Err(e) => {
+                                            let _ = event_tx.send(ServerEvent::Error {
+                                                session: Some(session),
+                                                code: "archive_read_failed".into(),
+                                                message: e.to_string(),
+                                            });
+                                            return;
+                                        }
+                                    };
+                                let seq_at_attach = entries
+                                    .last()
+                                    .map(|e| e.seq + 1)
+                                    .unwrap_or_else(|| from_seq.unwrap_or(0));
+                                let _ = event_tx.send(ServerEvent::Attached {
+                                    session: session.clone(),
+                                    seq_at_attach,
+                                });
+                                let tx = event_tx.clone();
+                                let sid = session.clone();
+                                let handle = tokio::spawn(async move {
+                                    for entry in entries {
+                                        if tx
+                                            .send(ServerEvent::Frame {
+                                                session: sid.clone(),
+                                                entry,
+                                            })
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                });
+                                if let Some(prev) = subs.remove(&session) {
+                                    prev.abort();
+                                }
+                                subs.insert(session, handle);
+                            }
+                            Err(_) => {
+                                let _ = event_tx.send(ServerEvent::Error {
+                                    session: Some(session),
+                                    code: "no_session".into(),
+                                    message: "no such session (live or archived)".into(),
+                                });
+                            }
+                        }
                         return;
                     }
                 };
@@ -419,6 +467,21 @@ impl Daemon {
             ClientCommand::List => {
                 let sessions = self.manager.list().await;
                 let _ = event_tx.send(ServerEvent::Listed { sessions });
+            }
+
+            ClientCommand::ListArchived => {
+                match self.manager.list_archived().await {
+                    Ok(sessions) => {
+                        let _ = event_tx.send(ServerEvent::ListedArchived { sessions });
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(ServerEvent::Error {
+                            session: None,
+                            code: "list_archived_failed".into(),
+                            message: e.to_string(),
+                        });
+                    }
+                }
             }
         }
     }
@@ -610,6 +673,135 @@ mod tests {
             ServerEvent::Closed { .. } => {}
             other => panic!("expected Closed, got {other:?}"),
         }
+
+        drop(client_wr);
+        drop(events);
+        let _ = serve_handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// After a session is closed, `Attach` to its id must fall back to the
+    /// on-disk journal (read-only replay), and `ListArchived` must include it
+    /// while live `List` does not.
+    #[tokio::test]
+    async fn closed_session_is_attachable_via_archive_fallback() {
+        let dir = tmp_dir();
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let serve_handle = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        // Spawn → drive one turn → close.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                cwd: Some(std::env::current_dir().unwrap().to_string_lossy().into()),
+                model: None,
+                permission: None,
+                resume: None,
+            },
+        )
+        .await;
+        let session = match next_event_line(&mut events).await {
+            ServerEvent::Spawned { session, .. } => session,
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Attach {
+                session: session.clone(),
+                from_seq: None,
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut events).await; // Attached
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::AcquireInput {
+                session: session.clone(),
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut events).await; // InputAcquired
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Send {
+                session: session.clone(),
+                text: "hello".into(),
+            },
+        )
+        .await;
+        // Drain until Result.
+        loop {
+            if let ServerEvent::Frame { entry, .. } = next_event_line(&mut events).await {
+                if matches!(entry.event, TurnEvent::Result { .. }) {
+                    break;
+                }
+            }
+        }
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Close {
+                session: session.clone(),
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::Closed { .. } => {}
+            other => panic!("expected Closed, got {other:?}"),
+        }
+
+        // Live list is empty; archived list contains the closed session.
+        send_cmd_line(&mut client_wr, &ClientCommand::List).await;
+        match next_event_line(&mut events).await {
+            ServerEvent::Listed { sessions } => assert!(sessions.is_empty()),
+            other => panic!("expected Listed, got {other:?}"),
+        }
+        send_cmd_line(&mut client_wr, &ClientCommand::ListArchived).await;
+        match next_event_line(&mut events).await {
+            ServerEvent::ListedArchived { sessions } => {
+                assert!(sessions.contains(&session), "archive list missing closed session");
+            }
+            other => panic!("expected ListedArchived, got {other:?}"),
+        }
+
+        // Attach to the closed session must fall back to the archive and
+        // replay the journal until the terminal Result.
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Attach {
+                session: session.clone(),
+                from_seq: None,
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::Attached { .. } => {}
+            other => panic!("expected Attached on archive replay, got {other:?}"),
+        }
+        let mut saw_result = false;
+        for _ in 0..32 {
+            match next_event_line(&mut events).await {
+                ServerEvent::Frame { entry, .. } => {
+                    if matches!(entry.event, TurnEvent::Result { .. }) {
+                        saw_result = true;
+                        break;
+                    }
+                }
+                other => panic!("expected Frame, got {other:?}"),
+            }
+        }
+        assert!(saw_result, "archive replay must include the terminal Result");
 
         drop(client_wr);
         drop(events);

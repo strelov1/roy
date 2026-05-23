@@ -144,6 +144,58 @@ impl Journal {
     }
 }
 
+/// Read-only view of an existing journal file. Used to attach to a session
+/// whose live engine is gone but whose journal still exists on disk (e.g.
+/// after a daemon restart, or for inspection of closed sessions).
+pub struct ArchivedJournal {
+    path: PathBuf,
+}
+
+impl ArchivedJournal {
+    /// Open an archive at `<dir>/<session_id>.jsonl`. Errors if the file
+    /// doesn't exist.
+    pub async fn open(dir: &Path, session_id: &str) -> Result<Self> {
+        let path = dir.join(format!("{session_id}.jsonl"));
+        if !tokio::fs::try_exists(&path).await.map_err(RoyError::Io)? {
+            return Err(RoyError::Protocol(format!(
+                "no journal at {}",
+                path.display()
+            )));
+        }
+        Ok(Self { path })
+    }
+
+    /// Replay all entries with `seq >= from_seq` from disk, in seq order.
+    pub async fn replay_from(&self, from_seq: Seq) -> Result<Vec<JournalEntry>> {
+        let file = File::open(&self.path).await.map_err(RoyError::Io)?;
+        let mut lines = BufReader::new(file).lines();
+        let mut out = Vec::new();
+        while let Some(line) = lines.next_line().await.map_err(RoyError::Io)? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: Value =
+                serde_json::from_str(&line).map_err(|e| RoyError::Protocol(e.to_string()))?;
+            let seq = v
+                .get("seq")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| RoyError::Protocol(format!("journal entry missing seq: {line}")))?;
+            if seq < from_seq {
+                continue;
+            }
+            let event = event_from_json(v.get("event").ok_or_else(|| {
+                RoyError::Protocol(format!("journal entry missing event: {line}"))
+            })?)?;
+            out.push(JournalEntry { seq, event });
+        }
+        Ok(out)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +308,34 @@ mod tests {
         let dir = tmpdir();
         let _j = Journal::open(&dir.0, "s5", 10).await.unwrap();
         let err = Journal::open(&dir.0, "s5", 10).await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn archive_reads_existing_journal_in_seq_order() {
+        let dir = tmpdir();
+        {
+            let j = Journal::open(&dir.0, "s6", 10).await.unwrap();
+            for i in 0..3u32 {
+                j.append(TurnEvent::AssistantText {
+                    text: format!("e{i}"),
+                })
+                .await
+                .unwrap();
+            }
+        }
+        let archive = ArchivedJournal::open(&dir.0, "s6").await.unwrap();
+        let entries = archive.replay_from(0).await.unwrap();
+        assert_eq!(entries.len(), 3);
+        for (i, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.seq, i as Seq);
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_open_errors_when_journal_missing() {
+        let dir = tmpdir();
+        let err = ArchivedJournal::open(&dir.0, "no-such-sid").await;
         assert!(err.is_err());
     }
 }
