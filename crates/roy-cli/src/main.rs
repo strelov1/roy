@@ -15,6 +15,8 @@ use roy::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+mod mcp;
+
 #[derive(Parser)]
 #[command(name = "roy", about = "Spawn and orchestrate coding-agent sessions")]
 struct Cli {
@@ -40,6 +42,10 @@ enum Cmd {
     ListArchived,
     /// Ask the daemon to close a session.
     Close(CloseArgs),
+    /// Run an MCP server (stdio JSON-RPC) that exposes roy daemon operations
+    /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
+    /// IDE plugin) which talks to it over stdio.
+    Mcp(McpArgs),
 }
 
 #[derive(clap::Args)]
@@ -94,6 +100,13 @@ struct CloseArgs {
     session: String,
 }
 
+#[derive(clap::Args)]
+struct McpArgs {
+    /// Override the daemon socket the MCP tools connect to.
+    #[arg(long)]
+    socket: Option<PathBuf>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -126,6 +139,10 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::List => cmd_list(false).await.map(|()| ExitCode::SUCCESS),
         Cmd::ListArchived => cmd_list(true).await.map(|()| ExitCode::SUCCESS),
         Cmd::Close(args) => cmd_close(args).await.map(|()| ExitCode::SUCCESS),
+        Cmd::Mcp(args) => {
+            let socket = args.socket.unwrap_or_else(default_socket);
+            mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
+        }
     }
 }
 
