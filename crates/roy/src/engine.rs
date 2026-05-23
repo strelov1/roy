@@ -248,35 +248,45 @@ impl SessionEngine {
         Ok(())
     }
 
-    /// Wait for the next terminal `Result` event. Returns `None` on timeout.
+    /// Wait for the next terminal `Result` event with `seq >= since_seq`.
+    /// Returns `None` only on timeout. Recovers from broadcast `Lagged`
+    /// (capacity overrun) by re-scanning the journal from the last seq we saw.
     pub async fn wait_for_result(
         &self,
         since_seq: Seq,
         timeout: Duration,
     ) -> Result<Option<(Seq, TurnEvent, String)>> {
         let mut rx = self.broadcast_tx.subscribe();
-
-        // 1. Scan existing journal entries.
-        let entries = self.journal.replay_from(since_seq).await?;
+        let mut scan_from = since_seq;
         let mut assistant_text = String::new();
-        for entry in entries {
-            match &entry.event {
-                TurnEvent::AssistantText { text } => assistant_text.push_str(text),
-                TurnEvent::Result { .. } => {
-                    return Ok(Some((entry.seq, entry.event, assistant_text)));
-                }
-                _ => {}
-            }
-        }
 
-        // 2. Wait for new events from the broadcast channel.
         let fut = async {
             loop {
+                // 1. Drain journal from scan_from onward. If we see Result, done.
+                let entries = match self.journal.replay_from(scan_from).await {
+                    Ok(es) => es,
+                    Err(_) => return None,
+                };
+                let mut last_seen = scan_from;
+                for entry in entries {
+                    last_seen = entry.seq + 1;
+                    match &entry.event {
+                        TurnEvent::AssistantText { text } => assistant_text.push_str(text),
+                        TurnEvent::Result { .. } => {
+                            return Some((entry.seq, entry.event, assistant_text));
+                        }
+                        _ => {}
+                    }
+                }
+                scan_from = last_seen;
+
+                // 2. Wait for the next broadcast entry. On Lagged, loop back to (1).
                 match rx.recv().await {
                     Ok(entry) => {
-                        if entry.seq < since_seq {
+                        if entry.seq < scan_from {
                             continue;
                         }
+                        scan_from = entry.seq + 1;
                         match entry.event {
                             TurnEvent::AssistantText { text } => assistant_text.push_str(&text),
                             TurnEvent::Result { .. } => {
@@ -287,10 +297,11 @@ impl SessionEngine {
                     }
                     Err(broadcast::error::RecvError::Closed) => return None,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // If we lagged, we might have missed the Result.
-                        // For simplicity in v1, we just bail; a robust impl
-                        // would re-scan the journal here.
-                        return None;
+                        // Re-subscribe + re-scan journal from where we left off.
+                        rx = self.broadcast_tx.subscribe();
+                        // assistant_text already holds everything < scan_from;
+                        // the next loop iteration replays journal[scan_from..].
+                        continue;
                     }
                 }
             }
@@ -298,7 +309,7 @@ impl SessionEngine {
 
         match tokio::time::timeout(timeout, fut).await {
             Ok(res) => Ok(res),
-            Err(_) => Ok(None), // Timeout
+            Err(_) => Ok(None),
         }
     }
 
