@@ -190,6 +190,10 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     eprintln!("roy serve: listening on {}", socket.display());
     if let Some(port) = args.port {
         eprintln!("roy serve: WebSocket on 127.0.0.1:{port}");
+        eprintln!(
+            "roy serve: WS auth token at {}",
+            socket.with_extension("token").display()
+        );
     }
     let idle_timeout = args
         .idle_timeout
@@ -502,6 +506,63 @@ async fn drain_until_terminal_result<R: AsyncBufReadExt + Unpin>(
             other => {
                 eprintln!("roy: skipping unexpected event: {other:?}");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `RunArgs` with sensible defaults; only override what each test
+    /// case needs to vary.
+    fn args(agent: &str) -> RunArgs {
+        RunArgs {
+            agent: agent.into(),
+            task: "noop".into(),
+            cwd: None,
+            model: None,
+            permission: None,
+            detach: false,
+            resume: None,
+            with_seq: false,
+        }
+    }
+
+    #[test]
+    fn validate_flags_accepts_acp_agents_without_optional_args() {
+        for agent in ["claude", "gemini", "opencode", "codex"] {
+            validate_flags(&args(agent)).unwrap_or_else(|e| panic!("{agent}: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_flags_rejects_model_on_non_claude() {
+        for agent in ["gemini", "opencode", "codex"] {
+            let mut a = args(agent);
+            a.model = Some("gpt-x".into());
+            let err = validate_flags(&a).unwrap_err().to_string();
+            assert!(
+                err.contains("--model"),
+                "{agent}: unexpected error message: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_flags_rejects_unknown_permission_value() {
+        let mut a = args("opencode");
+        a.permission = Some("maybe".into());
+        let err = validate_flags(&a).unwrap_err().to_string();
+        assert!(err.contains("'allow' or 'deny'"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn validate_flags_accepts_allow_and_deny_on_acp_agents() {
+        for value in ["allow", "deny"] {
+            let mut a = args("gemini");
+            a.permission = Some(value.into());
+            validate_flags(&a).unwrap_or_else(|e| panic!("{value}: {e}"));
         }
     }
 }

@@ -5,10 +5,28 @@
 //! -9 leaves the file behind, and the next start detects it as stale).
 
 use std::fs::{File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Result, RoyError};
+
+/// Atomically create `path` with `0600` and write `content` + `\n`, then
+/// fsync. Errors with `ErrorKind::AlreadyExists` if the file is already there.
+/// Used wherever the daemon owns a small ASCII control file (pid, token).
+pub(crate) fn create_owner_only_file(path: &Path, content: &[u8]) -> io::Result<()> {
+    let mut opts = OpenOptions::new();
+    opts.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(content)?;
+    f.write_all(b"\n")?;
+    f.sync_all()?;
+    Ok(())
+}
 
 pub struct PidLock {
     path: PathBuf,
@@ -23,23 +41,11 @@ impl PidLock {
             std::fs::create_dir_all(parent).map_err(RoyError::Io)?;
         }
         loop {
-            // Atomic create with owner-only mode — no window where the file
-            // exists with permissive umask perms before we chmod it.
-            let mut opts = OpenOptions::new();
-            opts.create_new(true).write(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            match opts.open(&path) {
-                Ok(mut file) => {
-                    write_pid(&mut file, std::process::id())?;
-                    return Ok(Self { path });
-                }
+            let pid_bytes = std::process::id().to_string();
+            match create_owner_only_file(&path, pid_bytes.as_bytes()) {
+                Ok(()) => return Ok(Self { path }),
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                    let existing = read_pid(&path)?;
-                    if let Some(pid) = existing {
+                    if let Some(pid) = read_pid(&path)? {
                         if pid_alive(pid) {
                             return Err(RoyError::Protocol(format!(
                                 "daemon already running (pid {pid}); pid file: {}",
@@ -47,9 +53,9 @@ impl PidLock {
                             )));
                         }
                     }
-                    // Stale lock — remove and retry. `remove_file` here is the
-                    // only place that drops a pid file we did not create; it
-                    // is safe because we just confirmed the owner is dead.
+                    // Stale lock — remove and retry. Safe because the owner is
+                    // confirmed dead; this is the only place we delete a pid
+                    // file we did not create.
                     std::fs::remove_file(&path).map_err(RoyError::Io)?;
                 }
                 Err(e) => return Err(RoyError::Io(e)),
@@ -66,14 +72,6 @@ impl Drop for PidLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
-}
-
-fn write_pid(file: &mut File, pid: u32) -> Result<()> {
-    file.write_all(pid.to_string().as_bytes())
-        .map_err(RoyError::Io)?;
-    file.write_all(b"\n").map_err(RoyError::Io)?;
-    file.sync_all().map_err(RoyError::Io)?;
-    Ok(())
 }
 
 fn read_pid(path: &Path) -> Result<Option<i32>> {
@@ -145,10 +143,8 @@ mod tests {
         let _lock = PidLock::acquire(&path).unwrap();
     }
 
-    /// The pid file must be created with `0600` so a sibling user on a shared
-    /// machine can't read which PID owns the daemon (and `kill` it with `kill
-    /// -0` to probe presence). Atomic `OpenOptionsExt::mode` guarantees no
-    /// race-window where the file exists under the umask default.
+    /// Pid file must be created `0600` atomically — no race window where a
+    /// sibling user could open it under the default umask before chmod.
     #[cfg(unix)]
     #[test]
     fn pid_file_is_created_with_owner_only_mode() {

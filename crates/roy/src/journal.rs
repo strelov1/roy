@@ -418,4 +418,42 @@ mod tests {
             other => panic!("expected AssistantText, got {other:?}"),
         }
     }
+
+    /// A single corrupt line must fail `Journal::resume` loudly instead of
+    /// silently truncating the journal at the bad line. Silent truncation would
+    /// hand back a session with the wrong `next_seq`, and subsequent appends
+    /// would overwrite valid entries that follow the corrupt one.
+    #[tokio::test]
+    async fn resume_errors_on_corrupt_jsonl_line() {
+        use std::io::Write;
+        let dir = tmpdir();
+        let session = "s-corrupt";
+        let path = dir.0.join(format!("{session}.jsonl"));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let mut f = std::fs::File::create(&path).unwrap();
+        // Valid → garbage → valid. parse_entry_line must error on line 2.
+        writeln!(
+            f,
+            "{{\"seq\":0,\"event\":{{\"type\":\"assistant_text\",\"text\":\"a\"}}}}"
+        )
+        .unwrap();
+        writeln!(f, "this is not json at all").unwrap();
+        writeln!(
+            f,
+            "{{\"seq\":2,\"event\":{{\"type\":\"assistant_text\",\"text\":\"c\"}}}}"
+        )
+        .unwrap();
+        drop(f);
+
+        match Journal::resume(&dir.0, session, 10).await {
+            Ok(_) => panic!("resume must reject a corrupt journal, not silently truncate"),
+            Err(RoyError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("expected") || msg.contains("json"),
+                    "expected a JSON-parse Protocol error, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
 }

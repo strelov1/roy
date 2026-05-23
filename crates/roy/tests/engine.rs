@@ -8,9 +8,15 @@ use roy::event::{StopReason, TurnEvent};
 use roy::transport::{AcpConfig, AcpTransport, PermissionPolicy, Transport};
 
 fn fake_acp_transport() -> Arc<dyn Transport> {
+    fake_acp_transport_with(&[])
+}
+
+fn fake_acp_transport_with(extra_args: &[&str]) -> Arc<dyn Transport> {
+    let mut args = vec!["tests/scripts/fake-acp-agent.py".to_string()];
+    args.extend(extra_args.iter().map(|s| s.to_string()));
     Arc::new(AcpTransport::new(AcpConfig {
         command: "python3".to_string(),
-        args: vec!["tests/scripts/fake-acp-agent.py".to_string()],
+        args,
         mode_id: Some("yolo".to_string()),
         permission_policy: PermissionPolicy::AllowAll,
         open_timeout: Duration::from_secs(5),
@@ -152,6 +158,70 @@ async fn late_attach_replays_full_journal() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+}
+
+/// `cancel_turn` on an active prompt (held open by `--cancellable` fake) must
+/// flow through `Cmd::Cancel` → transport `session/cancel` → terminal
+/// `Result { Cancelled }` landing in the journal. Without this test the cancel
+/// path added by the actor's mid-turn select arm is unobserved.
+#[tokio::test]
+async fn cancel_turn_yields_cancelled_result() {
+    let journal_dir = tmp_journal_dir();
+    let engine = SessionEngine::spawn(
+        fake_acp_transport_with(&["--cancellable"]),
+        opts(journal_dir.clone()),
+        test_cfg(),
+    )
+    .await
+    .unwrap();
+
+    let lease = engine.try_acquire_input().expect("free lease");
+    let attach = engine.attach(None).await.unwrap();
+
+    // Send the prompt; the fake streams one "working" chunk then waits.
+    lease.send("anything").unwrap();
+
+    // Wait until the first chunk lands (proves the turn is active).
+    let mut stream = attach.stream;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut saw_chunk = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(entry)) => {
+                if matches!(entry.event, TurnEvent::AssistantText { .. }) {
+                    saw_chunk = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(saw_chunk, "fake should stream one chunk before cancel");
+
+    // Now fire cancel. Terminal Result must follow with stop_reason: Cancelled.
+    engine.cancel_turn().unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut got_cancelled = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(entry)) => {
+                if let TurnEvent::Result { stop_reason, .. } = &entry.event {
+                    assert!(
+                        matches!(stop_reason, StopReason::Cancelled),
+                        "expected Cancelled, got {stop_reason:?}",
+                    );
+                    got_cancelled = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(got_cancelled, "cancel must produce a terminal Result");
+
+    drop(lease);
+    engine.close().unwrap();
+    let _ = std::fs::remove_dir_all(&journal_dir);
 }
 
 async fn collect_all(

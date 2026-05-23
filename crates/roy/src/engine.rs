@@ -361,21 +361,16 @@ async fn drive_turn(
             return;
         }
     };
-    // The cancel handle lives next to (not inside) the stream. Dropping it on
-    // `Cmd::Cancel` signals the transport's actor → ACP `session/cancel`; the
-    // stream itself stays open and still delivers the terminal `Result` once
-    // the agent winds down, so observers see a clean turn boundary.
+    // Hold the cancel signal in an Option so the Cancel arm can drop it once.
+    // Drop = ACP `session/cancel`; the stream stays open and still yields the
+    // terminal `Result`, so we stay in the loop after a cancel.
     let mut cancel = Some(cancel);
     loop {
         tokio::select! {
             biased;
             cmd = input_rx.recv() => match cmd {
                 Some(Cmd::Cancel) => {
-                    if let Some(tx) = cancel.take() {
-                        drop(tx);
-                    }
-                    // Stay in the loop; the cancelled turn still yields one
-                    // final event.
+                    drop(cancel.take());
                 }
                 Some(Cmd::Prompt(_)) => {
                     tracing::warn!(

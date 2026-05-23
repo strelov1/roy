@@ -16,6 +16,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
@@ -41,6 +43,58 @@ fn default_agent_cwd() -> PathBuf {
         return PathBuf::from(s);
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Browsers can't set arbitrary headers on `new WebSocket(url, [protocols])`,
+/// so the auth token rides the subprotocol slot instead.
+const WS_TOKEN_HEADER: &str = "sec-websocket-protocol";
+
+/// Load the WS auth token from `<socket>.token` or mint a fresh UUID and write
+/// it. File is owner-only (`0600`); see [`crate::pid_lock::create_owner_only_file`].
+pub fn load_or_create_ws_token(token_path: &Path) -> Result<String> {
+    if let Some(parent) = token_path.parent() {
+        std::fs::create_dir_all(parent).map_err(RoyError::Io)?;
+    }
+    match std::fs::read_to_string(token_path) {
+        Ok(s) => Ok(s.trim().to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let token = uuid::Uuid::new_v4().to_string();
+            crate::pid_lock::create_owner_only_file(token_path, token.as_bytes())
+                .map_err(RoyError::Io)?;
+            Ok(token)
+        }
+        Err(e) => Err(RoyError::Io(e)),
+    }
+}
+
+fn ws_auth_callback(
+    expected: Arc<String>,
+) -> impl FnOnce(&Request, Response) -> std::result::Result<Response, ErrorResponse> {
+    move |req, mut resp| {
+        let provided = req
+            .headers()
+            .get(WS_TOKEN_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if provided != expected.as_str() {
+            let body = if provided.is_empty() {
+                "missing roy ws token (set Sec-WebSocket-Protocol)"
+            } else {
+                "invalid roy ws token"
+            };
+            return Err(http::Response::builder()
+                .status(http::StatusCode::UNAUTHORIZED)
+                .body(Some(body.into()))
+                .expect("valid http response"));
+        }
+        // WS spec: when the server selects a subprotocol it must echo it back,
+        // or the browser's handshake fails.
+        resp.headers_mut().insert(
+            WS_TOKEN_HEADER,
+            http::HeaderValue::from_str(provided).expect("token is ascii uuid"),
+        );
+        Ok(resp)
+    }
 }
 
 /// Tiny helper to factor away the repetitive error-event send.
@@ -163,11 +217,18 @@ impl Daemon {
             let path = opts.socket_path.clone();
             tokio::spawn(async move { me.run_unix(&path).await })
         };
-        let ws = opts.ws_port.map(|port| {
+        let ws = if let Some(port) = opts.ws_port {
+            // Load (or create) the shared-secret token clients must present
+            // during the WS handshake. Stored at `<socket>.token`, mode 0600.
+            let token_path = opts.socket_path.with_extension("token");
+            let token = Arc::new(load_or_create_ws_token(&token_path)?);
+            tracing::info!(path = %token_path.display(), "ws auth token");
             let me = Arc::clone(&self);
             let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("valid addr");
-            tokio::spawn(async move { me.run_ws(addr).await })
-        });
+            Some(tokio::spawn(async move { me.run_ws(addr, token).await }))
+        } else {
+            None
+        };
 
         match ws {
             Some(ws_handle) => {
@@ -233,18 +294,21 @@ impl Daemon {
         }
     }
 
-    /// Listen for incoming WebSocket connections on `addr` (e.g. "127.0.0.1:7777").
-    pub async fn run_ws(self: Arc<Self>, addr: SocketAddr) -> Result<()> {
+    /// Accept WS connections on `addr`. Clients must present `token` via
+    /// [`WS_TOKEN_HEADER`]; the upgrade returns HTTP 401 otherwise.
+    pub async fn run_ws(self: Arc<Self>, addr: SocketAddr, token: Arc<String>) -> Result<()> {
         let listener = TcpListener::bind(addr).await.map_err(RoyError::Io)?;
         tracing::info!(%addr, "websocket listener up");
         loop {
             let (stream, peer) = listener.accept().await.map_err(RoyError::Io)?;
             let me = Arc::clone(&self);
+            let token_for_conn = Arc::clone(&token);
             tokio::spawn(async move {
-                let ws = match tokio_tungstenite::accept_async(stream).await {
+                let callback = ws_auth_callback(token_for_conn);
+                let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
                     Ok(ws) => ws,
                     Err(e) => {
-                        tracing::warn!(%peer, error = %e, "ws handshake failed");
+                        tracing::warn!(%peer, error = %e, "ws handshake rejected");
                         return;
                     }
                 };
@@ -266,11 +330,7 @@ impl Daemon {
         let writer_handle = tokio::spawn(line_writer_loop(writer, event_rx));
         let result = self.dispatch_lines(reader, event_tx).await;
         // event_tx dropped → writer_loop sees None → exits cleanly.
-        if let Err(e) = writer_handle.await {
-            if e.is_panic() {
-                tracing::error!(error = %e, "writer task panicked");
-            }
-        }
+        log_writer_join(writer_handle.await);
         result
     }
 
@@ -283,11 +343,7 @@ impl Daemon {
         let (ws_sink, ws_stream) = ws.split();
         let writer_handle = tokio::spawn(ws_writer_loop(ws_sink, event_rx));
         let result = self.dispatch_ws(ws_stream, event_tx).await;
-        if let Err(e) = writer_handle.await {
-            if e.is_panic() {
-                tracing::error!(error = %e, "writer task panicked");
-            }
-        }
+        log_writer_join(writer_handle.await);
         result
     }
 
@@ -771,6 +827,16 @@ async fn attach_live(
     subs.insert(session, handle);
 }
 
+/// Only panics in the writer task are interesting; clean returns and
+/// cancellations stay silent.
+fn log_writer_join(res: std::result::Result<(), tokio::task::JoinError>) {
+    if let Err(e) = res {
+        if e.is_panic() {
+            tracing::error!(error = %e, "writer task panicked");
+        }
+    }
+}
+
 async fn line_writer_loop<W>(mut writer: W, mut rx: mpsc::UnboundedReceiver<ServerEvent>)
 where
     W: AsyncWrite + Unpin,
@@ -856,6 +922,74 @@ mod tests {
     ) -> ServerEvent {
         let line = lines.next_line().await.unwrap().expect("server hung up");
         serde_json::from_str(line.trim()).unwrap()
+    }
+
+    /// `load_or_create_ws_token` creates the file with `0600` on first call and
+    /// returns the same value on subsequent calls.
+    #[cfg(unix)]
+    #[test]
+    fn ws_token_is_persistent_and_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let token_path = dir.join("daemon.token");
+        let t1 = load_or_create_ws_token(&token_path).unwrap();
+        assert!(!t1.is_empty(), "token must not be empty");
+        let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "token file must be 0600, got {mode:o}");
+        let t2 = load_or_create_ws_token(&token_path).unwrap();
+        assert_eq!(t1, t2, "second call must return the persisted token");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Client that omits the token (or sends the wrong one) must be rejected at
+    /// the WS upgrade — `accept_hdr_async` returns an Err and the stream never
+    /// reaches `serve_ws_connection`.
+    #[tokio::test]
+    async fn ws_handshake_rejects_missing_or_wrong_token() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let token = Arc::new("the-real-token".to_string());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let token_for_server = Arc::clone(&token);
+        let server_task = tokio::spawn(async move {
+            // Accept three handshakes; only the third (correct token) succeeds.
+            let mut results = Vec::new();
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let cb = ws_auth_callback(Arc::clone(&token_for_server));
+                let r = tokio_tungstenite::accept_hdr_async(stream, cb).await;
+                results.push(r.is_ok());
+            }
+            results
+        });
+
+        // 1. No token → fail.
+        let url = format!("ws://{addr}");
+        let r1 = tokio_tungstenite::connect_async(&url).await;
+        assert!(r1.is_err(), "handshake without token must be rejected");
+
+        // 2. Wrong token → fail.
+        let mut req = url.as_str().into_client_request().unwrap();
+        req.headers_mut().insert(
+            WS_TOKEN_HEADER,
+            http::HeaderValue::from_static("wrong-token"),
+        );
+        let r2 = tokio_tungstenite::connect_async(req).await;
+        assert!(r2.is_err(), "handshake with wrong token must be rejected");
+
+        // 3. Correct token → success.
+        let mut req = url.as_str().into_client_request().unwrap();
+        req.headers_mut().insert(
+            WS_TOKEN_HEADER,
+            http::HeaderValue::from_str(&token).unwrap(),
+        );
+        let r3 = tokio_tungstenite::connect_async(req).await;
+        assert!(r3.is_ok(), "handshake with correct token must succeed");
+
+        let server_results = server_task.await.unwrap();
+        assert_eq!(server_results, vec![false, false, true]);
     }
 
     /// Unix socket and its parent directory must be created with owner-only
