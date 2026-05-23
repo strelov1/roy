@@ -1,14 +1,16 @@
-# roy — CLI для спауна агентов с заданиями (workspace + roy-cli)
+# roy — CLI: триггер демона `roy serve` (workspace + roy-cli)
 
-Дата: 2026-05-22
+Дата: 2026-05-22 (пивот 2026-05-23 — CLI стал клиентом демона)
 
 ## Цель
 
-Дать тонкий CLI поверх существующей либы `roy`: один запуск = один агент + одна
-задача, события хода стримятся в stdout как JSON Lines (для программного
-потребления родительским процессом, который «спаунит агентов»). Вся логика уже
-в либе — CLI добавляет только разбор аргументов, маппинг имени агента на
-transport и проекцию `TurnEvent` в JSON.
+CLI — это **тонкий триггер** демона `roy serve`, который держит все живые
+сессии в одном `SessionManager` (см. `2026-05-23-session-engine.md`). CLI
+разбирает аргументы, открывает Unix-сокет к демону, отправляет управляющие
+операции и проецирует приходящие `JournalEntry` в stdout как JSON Lines.
+
+`roy run` — primary one-shot путь. `roy serve` — поднять демон. `roy attach`/
+`roy list`/`roy close` — управляющие команды.
 
 ## Структура репозитория (Cargo workspace)
 
@@ -33,55 +35,78 @@ roy/
   относительными (`examples/...`) и продолжают работать.
 - Корневой `Cargo.toml` становится чисто `[workspace]` (`resolver = "2"`).
 - `Cargo.lock` остаётся в корне (workspace-уровень).
+- `roy-cli` содержит **обе** роли — клиент (`run`/`attach`/`list`/`close`) и
+  сервер (`serve`). Один бинарь, подкоманды; отдельный демон-бинарь не нужен.
 
-## Интерфейс CLI
+## Подкоманды
 
 ```
-roy run <agent> <task> [--cwd <path>] [--model <id>]
-                        [--permission allow|deny] [--pretty] [--resume <cursor>]
+roy serve  [--socket <path>] [--port <p>] [--journal-dir <dir>]
+roy run    <agent> <task> [--cwd <path>] [--model <id>]
+                          [--permission allow|deny] [--detach]
+                          [--pretty] [--resume <cursor>]
+roy attach <session> [--from-seq <n>] [--pretty]
+roy list   [--json]
+roy close  <session>
 ```
 
-- `<agent>` ∈ `claude | gemini | opencode | codex | claude-agent`.
-- Парсинг — `clap` (derive). `run` — подкоманда (оставляет место под будущее без
-  ломки совместимости; сейчас единственная).
-- Без `--resume` → `Session::new(transport, cwd)`. С `--resume <cursor>` →
-  `Session::resume_with_cursor(...)`.
+- `<agent>` ∈ `claude | gemini | opencode | codex | claude-agent`. Маппинг
+  имени агента на `Transport` живёт **в демоне** (он владеет `SessionManager`),
+  не в CLI. CLI передаёт только имя.
+- Default Unix-сокет: `~/.roy/daemon.sock`. Переопределить — `--socket` у
+  `roy serve` и `ROY_SOCKET` env для клиентских команд.
+- Парсинг — `clap` (derive).
 
-### Маппинг агента на transport
+### `roy serve`
 
-| `<agent>`      | transport |
-|----------------|-----------|
-| `claude`       | `PrintTransport::new(ClaudeProvider::new(model))` |
-| `gemini`       | `AcpTransport::new(AcpConfig::gemini())` |
-| `opencode`     | `AcpTransport::new(AcpConfig::opencode())` |
-| `codex`        | `AcpTransport::new(AcpConfig::codex())` |
-| `claude-agent` | `AcpTransport::new(AcpConfig::claude_agent())` |
+Поднимает демон с единственным `Arc<SessionManager>`. Всегда слушает Unix-сокет;
+WS-listener включается только при `--port`. PID-файл рядом с сокетом для
+проверки one-instance-per-user (попытка запуска при живом демоне — exit 2 с
+подсказкой).
+
+### `roy run`
+
+One-shot путь через демон:
+
+1. Подключиться к Unix-сокету. Если ответа нет — stderr
+   `no daemon at <path> — start it with \`roy serve\``, exit 2.
+2. Отправить control-операцию `spawn { agent, cwd, model? }` → получить
+   `{session_id, resume_cursor}`. С `--resume <cursor>` — `attach_resume
+   { cursor }` вместо `spawn`.
+3. `acquire_input { session }` → `send { session, text: <task> }`.
+4. Если `--detach` — напечатать
+   `{"type":"session","id":...,"resume_cursor":...}` и выйти 0. Сессия живёт
+   в демоне; позже её достают `roy attach <id>` или WS-клиентом.
+5. Иначе — `attach { session }`, стримить `JournalEntry`-фреймы в stdout
+   (через `event_to_json`). После терминального `Result` напечатать
+   `{"type":"session","resume_cursor":"..."}` и выйти с кодом по `stop_reason`.
+
+### `roy attach`
+
+То же чтение журнала из демона, без `spawn`. `--from-seq N` — реплей с
+указанного seq (опоздавшие/догон после `Lagged` в broadcast). Выходит после
+ближайшего терминального `Result` или по SIGINT.
+
+### `roy list` / `roy close`
+
+Тривиальные обёртки над `list` / `close` операциями control-протокола.
 
 ## Валидация флагов (fail-fast, без тихого игнора)
 
-- `--model` валиден только для `claude`. Для ACP-агентов → ошибка CLI.
-- `--permission allow|deny` валиден только для ACP-агентов; переопределяет
-  `AcpConfig.permission_policy` (`allow`→`AllowAll`, `deny`→`Deny`). Для `claude`
-  → ошибка CLI.
+- `--model` валиден только для `claude` (и `claude-agent` если поддерживается
+  моделью). Для остальных ACP-агентов → ошибка CLI exit 2.
+- `--permission allow|deny` валиден только для ACP-агентов; маппится на
+  `AcpConfig.permission_policy` на стороне демона. Для `claude` → exit 2.
+- `--detach` валиден только в `roy run`.
+- `--from-seq` валиден только в `roy attach`.
 
 Следует code quality bar репо: явная ошибка вместо молча проигнорированного флага.
 
-## Поток выполнения (`main.rs`)
+## JSON wire-формат
 
-1. Распарсить аргументы (clap).
-2. Провалидировать совместимость флагов с выбранным агентом.
-3. Собрать transport по маппингу.
-4. `Session::new` или `Session::resume_with_cursor`.
-5. `session.send(task)` → для каждого `TurnEvent`: вывести строку в stdout
-   (`event_to_json` в JSONL-режиме, либо human-принтер в `--pretty`), флашить.
-6. После завершения стрима — финальная строка с курсором:
-   `{"type":"session","resume_cursor":"..."}` (в `--pretty`: `resume_cursor = ...`).
-7. `session.close()`, выставить exit-code.
-
-## JSON wire-формат (вариант A — живёт в `roy-cli`)
-
-`fn event_to_json(&TurnEvent) -> serde_json::Value`. Либа не получает `Serialize`
-на `TurnEvent` — формат stdout это контракт CLI.
+`fn event_to_json(&TurnEvent) -> serde_json::Value`. Один маппинг — общий для
+CLI stdout, JSONL-журнала, фреймов Unix-сокета и WS. Один контракт = одна точка
+правки.
 
 | TurnEvent | JSON |
 |-----------|------|
@@ -95,24 +120,35 @@ roy run <agent> <task> [--cwd <path>] [--model <id>]
 - `is_error` вычисляется из `stop_reason.is_error()`.
 - `cost_usd` сериализуется как `null`, если `None`.
 
+CLI печатает `event` из приходящего `JournalEntry { seq, event }`. Под флагом
+`--with-seq` префиксует `{"seq":N,"event":...}` для машинного потребления
+(полезно при `roy attach --from-seq` и реассемблинге).
+
 ## Коды выхода
 
-- `0` — терминальный `Result` с не-error `stop_reason` (`EndTurn`/`MaxTokens`).
+- `0` — терминальный `Result` с не-error `stop_reason` (`EndTurn`/`MaxTokens`),
+  или успешное завершение `serve`/`attach`/`list`/`close`.
 - `1` — `Result` с error `stop_reason` (refusal/cancelled/error/...).
-- `2` — ошибка самого CLI (неизвестный агент, провал спавна, плохие аргументы,
-  несовместимые флаги). Сообщение в stderr; stdout остаётся чистым JSONL.
+- `2` — ошибка самого CLI (нет демона, плохие аргументы, несовместимые флаги,
+  неизвестный агент, демон уже запущен при `roy serve`). Сообщение в stderr;
+  stdout остаётся чистым JSONL.
 
 ## Тестирование
 
 - Юнит: `event_to_json` для всех вариантов (включая `Raw` с не-map значением).
-- Юнит: валидация флагов (`--model`+ACP → ошибка; `--permission`+claude → ошибка).
-- Интеграция: запустить собранный бинарь `roy` против существующих fake-агентов
-  (`crates/roy/tests/scripts/fake-agent.sh`, `fake-acp-agent.py`), проверить
-  JSONL-вывод и exit-code. Fake-агенты переиспользуются, новых не добавляем.
+- Юнит: валидация флагов (`--model`+ACP → ошибка; `--permission`+claude →
+  ошибка; `--detach` вне `run` → ошибка; `--from-seq` вне `attach` → ошибка).
+- Интеграция: поднять `roy serve` против fake-агентов
+  (`crates/roy/tests/scripts/fake-agent.sh`, `fake-acp-agent.py`), прогнать
+  `roy run` / `roy run --detach` / `roy attach` / `roy list` / `roy close`,
+  проверить JSONL-вывод, exit-code и реестр. Fake-агенты переиспользуются,
+  новых не добавляем.
 
 ## Вне объёма (YAGNI)
 
-- Интерактивный REPL / многоходовость в одном запуске.
+- Интерактивный REPL / многоходовость в одном `roy run`.
 - Чтение нескольких задач из файла / батч-оркестрация.
-- Параллельный запуск агентов.
+- Параллельный спавн нескольких агентов из одной команды CLI.
+- Auto-boot демона из клиентских команд.
+- TLS на WS-listener.
 - `WireEvent`-тип в либе и derive `Serialize` на `TurnEvent`.
