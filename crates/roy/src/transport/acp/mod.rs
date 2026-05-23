@@ -422,12 +422,15 @@ async fn run_turn(
         _ = dead_rx.changed() => StopReason::Error,
     };
 
+    // Close the notification gate BEFORE emitting the terminal Result so a
+    // late `session/update` (delivered between `prompt_fut` resolving and us
+    // returning) can't slip into `event_tx` after `Result` — `turn_stream`
+    // breaks on the first `Result`, so anything queued after it is dropped.
+    *sink.lock().unwrap() = None;
     let _ = event_tx.send(TurnEvent::Result {
         cost_usd: None,
         stop_reason,
     });
-
-    *sink.lock().unwrap() = None;
     Ok(())
 }
 

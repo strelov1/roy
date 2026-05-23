@@ -375,6 +375,9 @@ impl Daemon {
             ClientCommand::Send { session, text } => {
                 Self::handle_send(session, text, event_tx, leases)
             }
+            ClientCommand::CancelTurn { session } => {
+                self.handle_cancel_turn(session, event_tx, leases).await
+            }
             ClientCommand::ReleaseInput { session } => {
                 leases.remove(&session);
                 let _ = event_tx.send(ServerEvent::InputReleased { session });
@@ -569,6 +572,40 @@ impl Daemon {
             })
             .unwrap_or(false);
         let _ = event_tx.send(ServerEvent::InputAcquired { session, acquired });
+    }
+
+    async fn handle_cancel_turn(
+        self: &Arc<Self>,
+        session: String,
+        event_tx: &EventTx,
+        leases: &LeasesMap,
+    ) {
+        if !leases.contains_key(&session) {
+            send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::NoLease,
+                "input lease not held by this connection",
+            );
+            return;
+        }
+        let Some(engine) = self.manager.get(&session).await else {
+            send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::NoSession,
+                "no such session",
+            );
+            return;
+        };
+        if let Err(e) = engine.cancel_turn() {
+            send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::CancelFailed,
+                e.to_string(),
+            );
+        }
     }
 
     fn handle_send(session: String, text: String, event_tx: &EventTx, leases: &LeasesMap) {

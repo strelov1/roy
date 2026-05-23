@@ -76,6 +76,11 @@ pub struct SessionEngine {
 
 enum Cmd {
     Prompt(String),
+    /// Abort the in-flight turn. No-op if no turn is running. The actor reacts
+    /// by dropping the current `TurnStream`, which makes the transport send
+    /// `session/cancel` to the agent; the synthesised terminal `Result` lands
+    /// in the journal with `stop_reason: Cancelled`.
+    Cancel,
     Close,
 }
 
@@ -141,7 +146,9 @@ impl SessionEngine {
         });
 
         // Persist initial metadata so a daemon restart can find this session.
-        let _ = write_metadata(
+        // Propagate the error: without metadata on disk the session can't be
+        // resumed, so a silent half-spawned state would be worse than failing.
+        write_metadata(
             &opts.journal_dir,
             &SessionMetadata {
                 session_id,
@@ -152,7 +159,7 @@ impl SessionEngine {
                 resume_cursor: initial_cursor,
             },
         )
-        .await;
+        .await?;
 
         let engine_for_actor = Arc::clone(&engine);
         tokio::spawn(run_actor(engine_for_actor, handle, input_rx));
@@ -229,6 +236,16 @@ impl SessionEngine {
             .map_err(|_| RoyError::Protocol("engine actor gone".into()))
     }
 
+    /// Cancel the currently-running turn (if any). No-op when the engine is
+    /// idle. Anyone observing the session sees a terminal `Result` with
+    /// `stop_reason: Cancelled` once the transport finishes shutting the
+    /// agent-side prompt down.
+    pub fn cancel_turn(&self) -> Result<()> {
+        self.input_tx
+            .send(Cmd::Cancel)
+            .map_err(|_| RoyError::Protocol("engine actor gone".into()))
+    }
+
     async fn persist_metadata(&self) {
         let cursor = self.resume_cursor.lock().unwrap().clone();
         let meta = SessionMetadata {
@@ -239,7 +256,16 @@ impl SessionEngine {
             permission: self.permission.clone(),
             resume_cursor: cursor,
         };
-        let _ = write_metadata(&self.journal_dir, &meta).await;
+        // Non-fatal: the session keeps running, but a stale cursor on disk
+        // means a future Resume will reconnect to the wrong agent-side
+        // session. Surface it so operators see the divergence.
+        if let Err(e) = write_metadata(&self.journal_dir, &meta).await {
+            tracing::warn!(
+                session = %self.session_id,
+                error = %e,
+                "failed to persist session metadata after turn"
+            );
+        }
     }
 }
 
@@ -280,37 +306,98 @@ async fn run_actor(
         match cmd {
             Cmd::Prompt(text) => {
                 engine.touch_activity();
-                drive_turn(&engine, handle.as_mut(), &text).await;
+                drive_turn(&engine, handle.as_mut(), &text, &mut input_rx).await;
                 if let Some(cursor) = handle.resume_cursor() {
                     *engine.resume_cursor.lock().unwrap() = Some(cursor);
                     engine.persist_metadata().await;
                 }
             }
+            // Cancel outside an active turn is a no-op; the turn-driving loop
+            // is the only place a cancel actually means something.
+            Cmd::Cancel => {}
             Cmd::Close => break,
         }
     }
     let _ = handle.close().await;
 }
 
-async fn drive_turn(engine: &SessionEngine, handle: &mut dyn Handle, text: &str) {
+async fn drive_turn(
+    engine: &SessionEngine,
+    handle: &mut dyn Handle,
+    text: &str,
+    input_rx: &mut mpsc::UnboundedReceiver<Cmd>,
+) {
     let mut stream = match handle.send(text).await {
         Ok(s) => s,
-        Err(_) => {
+        Err(e) => {
             // The transport refused the turn; synthesise a terminal Result
             // so attach subscribers still see a turn boundary.
-            let _ = publish(
+            tracing::warn!(
+                session = %engine.session_id,
+                error = %e,
+                "transport refused turn; synthesising terminal Result",
+            );
+            if let Err(e) = publish(
                 engine,
                 TurnEvent::Result {
                     cost_usd: None,
                     stop_reason: StopReason::Error,
                 },
             )
-            .await;
+            .await
+            {
+                tracing::error!(
+                    session = %engine.session_id,
+                    error = %e,
+                    "failed to journal synthetic terminal Result",
+                );
+            }
             return;
         }
     };
-    while let Some(event) = stream.next().await {
-        let _ = publish(engine, event).await;
+    // Drive the turn while draining `input_rx` for a Cancel. Dropping the
+    // stream is what fires the transport's cancel_tx → ACP session/cancel,
+    // which yields a terminal `Result { stop_reason: Cancelled }`.
+    loop {
+        tokio::select! {
+            biased;
+            cmd = input_rx.recv() => match cmd {
+                Some(Cmd::Cancel) => {
+                    // Drain the cancelled turn so attach subscribers see the
+                    // terminal Result, then return.
+                    let mut s = stream;
+                    while let Some(event) = s.next().await {
+                        if let Err(e) = publish(engine, event).await {
+                            tracing::error!(
+                                session = %engine.session_id,
+                                error = %e,
+                                "journal append failed during cancel drain",
+                            );
+                        }
+                    }
+                    return;
+                }
+                Some(Cmd::Prompt(_)) => {
+                    tracing::warn!(
+                        session = %engine.session_id,
+                        "ignoring Cmd::Prompt during active turn",
+                    );
+                }
+                Some(Cmd::Close) | None => return,
+            },
+            event = stream.next() => match event {
+                Some(event) => {
+                    if let Err(e) = publish(engine, event).await {
+                        tracing::error!(
+                            session = %engine.session_id,
+                            error = %e,
+                            "journal append failed",
+                        );
+                    }
+                }
+                None => break,
+            },
+        }
     }
 }
 

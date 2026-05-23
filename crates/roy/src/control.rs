@@ -39,6 +39,8 @@ pub enum ErrorCode {
     ReadJournalFailed,
     /// `DeleteArchive` failed (session still live, or IO error).
     DeleteFailed,
+    /// `CancelTurn` failed (no such session, lease not held, etc.).
+    CancelFailed,
     /// Forward-compat: a code emitted by a newer server.
     Other(String),
 }
@@ -58,6 +60,7 @@ impl ErrorCode {
             ErrorCode::ResumeFailed => "resume_failed",
             ErrorCode::ReadJournalFailed => "read_journal_failed",
             ErrorCode::DeleteFailed => "delete_failed",
+            ErrorCode::CancelFailed => "cancel_failed",
             ErrorCode::Other(s) => s.as_str(),
         }
     }
@@ -76,6 +79,7 @@ impl ErrorCode {
             "resume_failed" => ErrorCode::ResumeFailed,
             "read_journal_failed" => ErrorCode::ReadJournalFailed,
             "delete_failed" => ErrorCode::DeleteFailed,
+            "cancel_failed" => ErrorCode::CancelFailed,
             other => ErrorCode::Other(other.to_string()),
         }
     }
@@ -130,6 +134,9 @@ pub enum ClientCommand {
     AcquireInput { session: String },
     /// Queue a prompt; requires holding the input lease for `session`.
     Send { session: String, text: String },
+    /// Cancel the in-flight turn for `session`. Requires holding the input
+    /// lease (only the writer can cancel their own turn).
+    CancelTurn { session: String },
     /// Release the input lease.
     ReleaseInput { session: String },
     /// Cancel only THIS connection's subscription to a session. The session
