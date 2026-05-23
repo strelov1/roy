@@ -1,5 +1,5 @@
-use serde_json::Value;
 use crate::event::TurnEvent;
+use serde_json::Value;
 
 /// One CLI's dialect. Pure logic: no process spawning, no I/O. Lets the
 /// transport stay agent-agnostic and lets codex/gemini drop in later.
@@ -72,7 +72,11 @@ impl Provider for ClaudeProvider {
         let v: Value = serde_json::from_str(line).ok()?;
         match v.get("type").and_then(Value::as_str)? {
             "system" => {
-                let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("").to_string();
+                let subtype = v
+                    .get("subtype")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 Some(TurnEvent::System { subtype })
             }
             "assistant" => {
@@ -82,13 +86,21 @@ impl Provider for ClaudeProvider {
                 // `result` event, so dropping intermediate blocks is fine.
                 for block in content {
                     if block.get("type").and_then(Value::as_str) == Some("text") {
-                        let text = block.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                        let text = block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                         return Some(TurnEvent::AssistantText { text });
                     }
                 }
                 for block in content {
                     if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        let name = block.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                        let name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                         let input = block.get("input").cloned().unwrap_or(Value::Null);
                         return Some(TurnEvent::ToolUse { name, input });
                     }
@@ -123,7 +135,9 @@ mod tests {
         let line = r#"{"type":"system","subtype":"init","session_id":"abc","cwd":"/tmp"}"#;
         assert_eq!(
             p().parse_line(line),
-            Some(TurnEvent::System { subtype: "init".into() })
+            Some(TurnEvent::System {
+                subtype: "init".into()
+            })
         );
     }
 
@@ -132,7 +146,9 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#;
         assert_eq!(
             p().parse_line(line),
-            Some(TurnEvent::AssistantText { text: "hello".into() })
+            Some(TurnEvent::AssistantText {
+                text: "hello".into()
+            })
         );
     }
 
@@ -150,7 +166,8 @@ mod tests {
 
     #[test]
     fn thinking_only_assistant_is_skipped() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
         assert_eq!(p().parse_line(line), None);
     }
 
@@ -158,7 +175,13 @@ mod tests {
     fn parses_result_as_turn_end() {
         let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"hello","total_cost_usd":0.06}"#;
         let ev = p().parse_line(line).unwrap();
-        assert_eq!(ev, TurnEvent::Result { cost_usd: Some(0.06), is_error: false });
+        assert_eq!(
+            ev,
+            TurnEvent::Result {
+                cost_usd: Some(0.06),
+                is_error: false
+            }
+        );
         assert!(p().is_turn_end(&ev));
     }
 
@@ -187,7 +210,9 @@ mod tests {
 
     #[test]
     fn spawn_args_new_vs_resume() {
-        let prov = ClaudeProvider { model: Some("claude-haiku-4-5-20251001".into()) };
+        let prov = ClaudeProvider {
+            model: Some("claude-haiku-4-5-20251001".into()),
+        };
         let new_args = prov.spawn_args("sid-1", None);
         assert!(new_args.contains(&"--session-id".to_string()));
         assert!(new_args.contains(&"sid-1".to_string()));

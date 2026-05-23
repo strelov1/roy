@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::time;
 
 use crate::error::{Result, RoyError};
 use crate::event::TurnEvent;
@@ -13,6 +15,12 @@ use super::protocol::{prompt_result_to_event, update_to_event};
 
 type Writer = Box<dyn AsyncWrite + Send + Unpin>;
 type Reader = Box<dyn AsyncRead + Send + Unpin>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionPolicy {
+    Deny,
+    AllowAll,
+}
 
 struct Shared {
     pending: HashMap<i64, oneshot::Sender<std::result::Result<Value, Value>>>,
@@ -28,10 +36,16 @@ pub struct JsonRpcClient {
     writer: Arc<Mutex<Writer>>,
     shared: Arc<Mutex<Shared>>,
     next_id: AtomicI64,
+    request_timeout: Duration,
 }
 
 impl JsonRpcClient {
-    pub fn new(reader: Reader, writer: Writer) -> Arc<Self> {
+    pub fn new(
+        reader: Reader,
+        writer: Writer,
+        permission_policy: PermissionPolicy,
+        request_timeout: Duration,
+    ) -> Arc<Self> {
         let shared = Arc::new(Mutex::new(Shared {
             pending: HashMap::new(),
             turn_tx: None,
@@ -42,10 +56,12 @@ impl JsonRpcClient {
             writer: Arc::clone(&writer),
             shared: Arc::clone(&shared),
             next_id: AtomicI64::new(1),
+            request_timeout,
         });
 
         let r_shared = Arc::clone(&shared);
         let r_writer = Arc::clone(&writer);
+        let r_permission_policy = permission_policy;
         tokio::spawn(async move {
             let mut lines = BufReader::new(reader).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -57,10 +73,22 @@ impl JsonRpcClient {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                Self::route(&r_shared, &r_writer, msg).await;
+                Self::route(&r_shared, &r_writer, r_permission_policy, msg).await;
             }
             // stdout closed: end any active turn.
             let mut s = r_shared.lock().await;
+            s.pending.clear();
+            if let Some(tx) = s.turn_tx.take() {
+                s.active_prompt_id = None;
+                drop(s);
+                let _ = tx
+                    .send(TurnEvent::Result {
+                        cost_usd: None,
+                        is_error: true,
+                    })
+                    .await;
+                return;
+            }
             s.turn_tx = None;
             s.active_prompt_id = None;
         });
@@ -68,9 +96,17 @@ impl JsonRpcClient {
         client
     }
 
-    async fn route(shared: &Arc<Mutex<Shared>>, writer: &Arc<Mutex<Writer>>, msg: Value) {
+    async fn route(
+        shared: &Arc<Mutex<Shared>>,
+        writer: &Arc<Mutex<Writer>>,
+        permission_policy: PermissionPolicy,
+        msg: Value,
+    ) {
         let id = msg.get("id").and_then(Value::as_i64);
-        let method = msg.get("method").and_then(Value::as_str).map(str::to_string);
+        let method = msg
+            .get("method")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let has_result = msg.get("result").is_some() || msg.get("error").is_some();
 
         // Response to one of our requests.
@@ -78,10 +114,13 @@ impl JsonRpcClient {
             let mut s = shared.lock().await;
             if s.active_prompt_id == Some(id) {
                 s.active_prompt_id = None;
-                let ev = msg
-                    .get("result")
-                    .map(prompt_result_to_event)
-                    .unwrap_or(TurnEvent::Result { cost_usd: None, is_error: true });
+                let ev =
+                    msg.get("result")
+                        .map(prompt_result_to_event)
+                        .unwrap_or(TurnEvent::Result {
+                            cost_usd: None,
+                            is_error: true,
+                        });
                 let tx = s.turn_tx.take();
                 drop(s);
                 if let Some(tx) = tx {
@@ -100,7 +139,14 @@ impl JsonRpcClient {
         // Incoming agent->client request.
         if let (Some(id), Some(method)) = (id, method.clone()) {
             let response = if method.contains("request_permission") {
-                json!({"jsonrpc":"2.0","id":id,"result":{"outcome":{"outcome":"selected","optionId":"allow"}}})
+                match permission_policy {
+                    PermissionPolicy::AllowAll => {
+                        json!({"jsonrpc":"2.0","id":id,"result":{"outcome":{"outcome":"selected","optionId":"allow"}}})
+                    }
+                    PermissionPolicy::Deny => {
+                        json!({"jsonrpc":"2.0","id":id,"result":{"outcome":{"outcome":"cancelled"}}})
+                    }
+                }
             } else {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"method not found"}})
             };
@@ -137,12 +183,21 @@ impl JsonRpcClient {
         {
             self.shared.lock().await.pending.insert(id, tx);
         }
-        self.write_msg(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-            .await?;
-        match rx.await {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => Err(RoyError::Protocol(e.to_string())),
-            Err(_) => Err(RoyError::ProcessExited),
+        if let Err(err) = self
+            .write_msg(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+            .await
+        {
+            self.shared.lock().await.pending.remove(&id);
+            return Err(err);
+        }
+        match time::timeout(self.request_timeout, rx).await {
+            Ok(Ok(Ok(v))) => Ok(v),
+            Ok(Ok(Err(e))) => Err(RoyError::Protocol(e.to_string())),
+            Ok(Err(_)) => Err(RoyError::ProcessExited),
+            Err(_) => {
+                self.shared.lock().await.pending.remove(&id);
+                Err(RoyError::Timeout(self.request_timeout))
+            }
         }
     }
 
@@ -156,8 +211,17 @@ impl JsonRpcClient {
             s.turn_tx = Some(tx);
             s.active_prompt_id = Some(id);
         }
-        self.write_msg(json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":params}))
-            .await?;
+        if let Err(err) = self
+            .write_msg(json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":params}))
+            .await
+        {
+            let mut s = self.shared.lock().await;
+            if s.active_prompt_id == Some(id) {
+                s.active_prompt_id = None;
+                s.turn_tx = None;
+            }
+            return Err(err);
+        }
         Ok(rx)
     }
 }
@@ -173,7 +237,12 @@ mod tests {
         let (client_side, agent_side) = tokio::io::duplex(8192);
         let (agent_read, agent_write) = tokio::io::split(agent_side);
         let (client_read, client_write) = tokio::io::split(client_side);
-        let client = JsonRpcClient::new(Box::new(client_read), Box::new(client_write));
+        let client = JsonRpcClient::new(
+            Box::new(client_read),
+            Box::new(client_write),
+            PermissionPolicy::AllowAll,
+            Duration::from_secs(5),
+        );
 
         // Fake agent: read one request, reply with a result echoing its id.
         tokio::spawn(async move {
@@ -188,7 +257,10 @@ mod tests {
             }
         });
 
-        let res = client.request("initialize", json!({"protocolVersion":1})).await.unwrap();
+        let res = client
+            .request("initialize", json!({"protocolVersion":1}))
+            .await
+            .unwrap();
         assert_eq!(res["ok"], true);
     }
 
@@ -197,7 +269,12 @@ mod tests {
         let (client_side, agent_side) = tokio::io::duplex(8192);
         let (agent_read, agent_write) = tokio::io::split(agent_side);
         let (client_read, client_write) = tokio::io::split(client_side);
-        let client = JsonRpcClient::new(Box::new(client_read), Box::new(client_write));
+        let client = JsonRpcClient::new(
+            Box::new(client_read),
+            Box::new(client_write),
+            PermissionPolicy::AllowAll,
+            Duration::from_secs(5),
+        );
 
         // Fake agent: on the prompt request, emit one update notification then
         // the terminal result with the same id.
@@ -215,7 +292,10 @@ mod tests {
             }
         });
 
-        let mut rx = client.begin_prompt(json!({"sessionId":"s","prompt":[]})).await.unwrap();
+        let mut rx = client
+            .begin_prompt(json!({"sessionId":"s","prompt":[]}))
+            .await
+            .unwrap();
         let mut got = Vec::new();
         while let Some(ev) = rx.recv().await {
             let end = matches!(ev, TurnEvent::Result { .. });
@@ -224,7 +304,15 @@ mod tests {
                 break;
             }
         }
-        assert!(got.iter().any(|e| matches!(e, TurnEvent::AssistantText { text } if text == "ack")));
-        assert!(matches!(got.last(), Some(TurnEvent::Result { is_error: false, .. })));
+        assert!(got
+            .iter()
+            .any(|e| matches!(e, TurnEvent::AssistantText { text } if text == "ack")));
+        assert!(matches!(
+            got.last(),
+            Some(TurnEvent::Result {
+                is_error: false,
+                ..
+            })
+        ));
     }
 }

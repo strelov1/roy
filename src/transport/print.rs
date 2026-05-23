@@ -1,25 +1,34 @@
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::mpsc;
-use tokio_stream::Stream;
 
-use super::{Handle, Transport};
+use super::{borrowed_event_stream, Handle, StderrMode, Transport, TurnStream};
 use crate::error::{Result, RoyError};
 use crate::event::TurnEvent;
 use crate::provider::Provider;
 
 pub struct PrintTransport {
     provider: Arc<dyn Provider>,
+    stderr_mode: StderrMode,
 }
 
 impl PrintTransport {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
-        Self { provider }
+        Self {
+            provider,
+            stderr_mode: StderrMode::Null,
+        }
+    }
+
+    pub fn new_with_stderr(provider: Arc<dyn Provider>, stderr_mode: StderrMode) -> Self {
+        Self {
+            provider,
+            stderr_mode,
+        }
     }
 }
 
@@ -38,11 +47,14 @@ impl Transport for PrintTransport {
         let mut child = tokio::process::Command::new(&cmd_name)
             .args(&args)
             .current_dir(&cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(self.stderr_mode.stdio())
             .spawn()
-            .map_err(|source| RoyError::Spawn { cmd: cmd_name, source })?;
+            .map_err(|source| RoyError::Spawn {
+                cmd: cmd_name,
+                source,
+            })?;
 
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
@@ -80,26 +92,15 @@ pub struct PrintHandle {
 
 #[async_trait]
 impl Handle for PrintHandle {
-    async fn send(
-        &mut self,
-        prompt: &str,
-    ) -> Result<std::pin::Pin<Box<dyn Stream<Item = TurnEvent> + Send + '_>>> {
+    async fn send(&mut self, prompt: &str) -> Result<TurnStream<'_>> {
         let line = self.provider.encode_user_message(prompt);
         self.stdin.write_all(line.as_bytes()).await?;
         self.stdin.flush().await?;
 
         let provider = Arc::clone(&self.provider);
-        let rx = &mut self.rx;
-        let stream = async_stream::stream! {
-            while let Some(ev) = rx.recv().await {
-                let end = provider.is_turn_end(&ev);
-                yield ev;
-                if end {
-                    break;
-                }
-            }
-        };
-        Ok(Box::pin(stream))
+        Ok(borrowed_event_stream(&mut self.rx, move |ev| {
+            provider.is_turn_end(ev)
+        }))
     }
 
     fn resume_cursor(&self) -> Option<String> {
@@ -108,6 +109,7 @@ impl Handle for PrintHandle {
 
     async fn close(&mut self) -> Result<()> {
         let _ = self.child.start_kill();
+        let _ = self.child.wait().await;
         Ok(())
     }
 }

@@ -4,10 +4,20 @@ use serde_json::Value;
 /// model yet so new event types don't get silently dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TurnEvent {
-    System { subtype: String },
-    AssistantText { text: String },
-    ToolUse { name: String, input: Value },
-    Result { cost_usd: Option<f64>, is_error: bool },
+    System {
+        subtype: String,
+    },
+    AssistantText {
+        text: String,
+    },
+    ToolUse {
+        name: String,
+        input: Value,
+    },
+    Result {
+        cost_usd: Option<f64>,
+        is_error: bool,
+    },
     Raw(Value),
 }
 
@@ -26,7 +36,10 @@ mod tests {
 
     #[test]
     fn result_carries_cost_and_error_flag() {
-        let e = TurnEvent::Result { cost_usd: Some(0.5), is_error: false };
+        let e = TurnEvent::Result {
+            cost_usd: Some(0.5),
+            is_error: false,
+        };
         if let TurnEvent::Result { cost_usd, is_error } = e {
             assert_eq!(cost_usd, Some(0.5));
             assert!(!is_error);

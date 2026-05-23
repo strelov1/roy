@@ -16,7 +16,10 @@ async fn main() -> anyhow::Result<()> {
             println!("  {ev:?}");
         }
     }
-    println!("\nresume_cursor (ACP sessionId) = {:?}", session.resume_cursor());
+    println!(
+        "\nresume_cursor (ACP sessionId) = {:?}",
+        session.resume_cursor()
+    );
     session.close().await?;
     Ok(())
 }

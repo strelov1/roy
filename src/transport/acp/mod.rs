@@ -2,19 +2,18 @@ pub mod client;
 pub mod protocol;
 
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::process::Child;
-use tokio_stream::Stream;
 
 use crate::error::{Result, RoyError};
-use crate::event::TurnEvent;
 
-use super::{Handle, Transport};
+use super::{owned_event_stream, Handle, StderrMode, Transport, TurnStream};
 use client::JsonRpcClient;
+pub use client::PermissionPolicy;
 
 /// Launch + behaviour config for an ACP agent.
 pub struct AcpConfig {
@@ -22,6 +21,9 @@ pub struct AcpConfig {
     pub args: Vec<String>,
     /// ACP mode to set after the session opens (e.g. "yolo" to auto-approve).
     pub mode_id: Option<String>,
+    pub permission_policy: PermissionPolicy,
+    pub request_timeout: Duration,
+    pub stderr_mode: StderrMode,
 }
 
 impl AcpConfig {
@@ -31,6 +33,9 @@ impl AcpConfig {
             command: "gemini".to_string(),
             args: vec!["--acp".to_string(), "--skip-trust".to_string()],
             mode_id: Some("yolo".to_string()),
+            permission_policy: PermissionPolicy::AllowAll,
+            request_timeout: Duration::from_secs(30),
+            stderr_mode: StderrMode::Null,
         }
     }
 
@@ -41,6 +46,9 @@ impl AcpConfig {
             command: "opencode".to_string(),
             args: vec!["acp".to_string()],
             mode_id: None,
+            permission_policy: PermissionPolicy::Deny,
+            request_timeout: Duration::from_secs(30),
+            stderr_mode: StderrMode::Null,
         }
     }
 }
@@ -66,9 +74,9 @@ impl Transport for AcpTransport {
         let mut child = tokio::process::Command::new(&self.config.command)
             .args(&self.config.args)
             .current_dir(&cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(self.config.stderr_mode.stdio())
             .spawn()
             .map_err(|source| RoyError::Spawn {
                 cmd: self.config.command.clone(),
@@ -77,38 +85,72 @@ impl Transport for AcpTransport {
 
         let stdin = Box::new(child.stdin.take().expect("stdin piped"));
         let stdout = Box::new(child.stdout.take().expect("stdout piped"));
-        let client = JsonRpcClient::new(stdout, stdin);
+        let client = JsonRpcClient::new(
+            stdout,
+            stdin,
+            self.config.permission_policy,
+            self.config.request_timeout,
+        );
 
-        client
-            .request("initialize", json!({"protocolVersion":1,"clientCapabilities":{}}))
-            .await?;
+        let open_result = async {
+            client
+                .request(
+                    "initialize",
+                    json!({"protocolVersion":1,"clientCapabilities":{}}),
+                )
+                .await?;
 
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let acp_sid = match resume_cursor {
-            Some(sid) => {
+            let cwd_str = cwd.to_string_lossy().to_string();
+            let acp_sid = match resume_cursor {
+                Some(sid) => {
+                    client
+                        .request(
+                            "session/load",
+                            json!({"sessionId":sid,"cwd":cwd_str,"mcpServers":[]}),
+                        )
+                        .await?;
+                    sid.to_string()
+                }
+                None => {
+                    let res = client
+                        .request("session/new", json!({"cwd":cwd_str,"mcpServers":[]}))
+                        .await?;
+                    res.get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            RoyError::Protocol("session/new returned no sessionId".into())
+                        })?
+                }
+            };
+
+            if let Some(mode) = &self.config.mode_id {
                 client
-                    .request("session/load", json!({"sessionId":sid,"cwd":cwd_str,"mcpServers":[]}))
+                    .request(
+                        "session/set_mode",
+                        json!({"sessionId":acp_sid,"modeId":mode}),
+                    )
                     .await?;
-                sid.to_string()
             }
-            None => {
-                let res = client
-                    .request("session/new", json!({"cwd":cwd_str,"mcpServers":[]}))
-                    .await?;
-                res.get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .ok_or_else(|| RoyError::Protocol("session/new returned no sessionId".into()))?
+
+            Ok(acp_sid)
+        }
+        .await;
+
+        let acp_sid = match open_result {
+            Ok(acp_sid) => acp_sid,
+            Err(err) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(err);
             }
         };
 
-        if let Some(mode) = &self.config.mode_id {
-            client
-                .request("session/set_mode", json!({"sessionId":acp_sid,"modeId":mode}))
-                .await?;
-        }
-
-        Ok(Box::new(AcpHandle { child, client, acp_sid }))
+        Ok(Box::new(AcpHandle {
+            child,
+            client,
+            acp_sid,
+        }))
     }
 }
 
@@ -120,25 +162,13 @@ pub struct AcpHandle {
 
 #[async_trait]
 impl Handle for AcpHandle {
-    async fn send(
-        &mut self,
-        prompt: &str,
-    ) -> Result<std::pin::Pin<Box<dyn Stream<Item = TurnEvent> + Send + '_>>> {
+    async fn send(&mut self, prompt: &str) -> Result<TurnStream<'_>> {
         let params = json!({
             "sessionId": self.acp_sid,
             "prompt": [{"type":"text","text":prompt}]
         });
-        let mut rx = self.client.begin_prompt(params).await?;
-        let stream = async_stream::stream! {
-            while let Some(ev) = rx.recv().await {
-                let end = matches!(ev, TurnEvent::Result { .. });
-                yield ev;
-                if end {
-                    break;
-                }
-            }
-        };
-        Ok(Box::pin(stream))
+        let rx = self.client.begin_prompt(params).await?;
+        Ok(owned_event_stream(rx))
     }
 
     fn resume_cursor(&self) -> Option<String> {
@@ -147,6 +177,7 @@ impl Handle for AcpHandle {
 
     async fn close(&mut self) -> Result<()> {
         let _ = self.child.start_kill();
+        let _ = self.child.wait().await;
         Ok(())
     }
 }

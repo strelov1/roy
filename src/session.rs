@@ -35,10 +35,22 @@ impl Session {
     /// restarted). The first `send` will spawn with `--resume <id>` because
     /// `resume_cursor` is pre-seeded.
     pub fn resume(transport: Arc<dyn Transport>, cwd: PathBuf, session_id: String) -> Self {
+        Self::resume_with_cursor(transport, cwd, session_id.clone(), session_id)
+    }
+
+    /// Re-open a session when the caller stores a separate opaque transport
+    /// cursor. For ACP, `id` is the host session id and `resume_cursor` is the
+    /// agent-issued ACP sessionId.
+    pub fn resume_with_cursor(
+        transport: Arc<dyn Transport>,
+        cwd: PathBuf,
+        id: String,
+        resume_cursor: String,
+    ) -> Self {
         Self {
-            id: session_id.clone(),
+            id,
             cwd,
-            resume_cursor: Some(session_id),
+            resume_cursor: Some(resume_cursor),
             transport,
             handle: None,
         }

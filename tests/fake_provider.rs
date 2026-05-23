@@ -53,7 +53,9 @@ async fn send_streams_until_turn_end() {
             events.push(ev);
         }
     }
-    assert!(events.iter().any(|e| matches!(e, TurnEvent::AssistantText { text } if text == "ack")));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TurnEvent::AssistantText { text } if text == "ack")));
     assert!(matches!(events.last(), Some(TurnEvent::Result { .. })));
 
     // Turn 2 on the SAME live process (multi-turn)
@@ -88,7 +90,10 @@ async fn session_send_sets_resume_cursor() {
     }
     assert!(matches!(events.last(), Some(TurnEvent::Result { .. })));
     // After the first turn the session can be resumed by its own id.
-    assert_eq!(session.resume_cursor(), Some(session.id().to_string()).as_deref());
+    assert_eq!(
+        session.resume_cursor(),
+        Some(session.id().to_string()).as_deref()
+    );
 
     session.close().await.unwrap();
 }
@@ -127,8 +132,9 @@ async fn real_claude_spawn_and_turn() {
         eprintln!("skipping: CLAUDE_CODE_OAUTH_TOKEN not set");
         return;
     }
-    let provider: Arc<dyn Provider> =
-        Arc::new(roy::provider::ClaudeProvider::new(Some("claude-haiku-4-5-20251001".into())));
+    let provider: Arc<dyn Provider> = Arc::new(roy::provider::ClaudeProvider::new(Some(
+        "claude-haiku-4-5-20251001".into(),
+    )));
     let transport: Arc<dyn roy::transport::Transport> = Arc::new(PrintTransport::new(provider));
     let mut session = Session::new(transport, std::env::current_dir().unwrap());
 

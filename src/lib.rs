@@ -8,4 +8,6 @@ pub use error::{Result, RoyError};
 pub use event::TurnEvent;
 pub use provider::{ClaudeProvider, Provider};
 pub use session::Session;
-pub use transport::{AcpConfig, AcpTransport, Handle, PrintTransport, Transport};
+pub use transport::{
+    AcpConfig, AcpTransport, Handle, PermissionPolicy, PrintTransport, StderrMode, Transport,
+};
