@@ -9,6 +9,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -19,7 +20,7 @@ use crate::event::{event_from_json, event_to_json, TurnEvent};
 
 pub type Seq = u64;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JournalEntry {
     pub seq: Seq,
     pub event: TurnEvent,

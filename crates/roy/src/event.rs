@@ -1,3 +1,5 @@
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
 
 use crate::error::{Result, RoyError};
@@ -113,6 +115,23 @@ pub fn event_from_json(v: &Value) -> Result<TurnEvent> {
         }),
         "raw" => Ok(TurnEvent::Raw(v.get("value").cloned().unwrap_or(Value::Null))),
         other => Err(RoyError::Protocol(format!("unknown event type '{other}'"))),
+    }
+}
+
+// Serde plumbing for the wire format. `event_to_json`/`event_from_json` remain
+// the canonical mapping; `Serialize`/`Deserialize` are thin delegations so
+// `JournalEntry`, control-protocol frames, and any other consumer can derive
+// serde transparently without duplicating the mapping.
+impl Serialize for TurnEvent {
+    fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
+        event_to_json(self).serialize(ser)
+    }
+}
+
+impl<'de> Deserialize<'de> for TurnEvent {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> std::result::Result<Self, D::Error> {
+        let v = Value::deserialize(de)?;
+        event_from_json(&v).map_err(D::Error::custom)
     }
 }
 
