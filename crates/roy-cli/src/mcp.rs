@@ -175,6 +175,19 @@ fn tools_list() -> Value {
                     "required": ["session"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "roy_set_tags",
+                "description": "Replace the tag map on a live session. Pass an empty `tags` object to clear all tags.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session": {"type": "string"},
+                        "tags": {"type": "object", "additionalProperties": {"type": "string"}}
+                    },
+                    "required": ["session", "tags"],
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -192,6 +205,7 @@ async fn tools_call(id: Value, req: &Value, socket_path: &Path) -> Value {
         "roy_run_detached" => tool_run_detached(socket_path, args).await,
         "roy_read_session" => tool_read_session(socket_path, args).await,
         "roy_close" => tool_close(socket_path, args).await,
+        "roy_set_tags" => tool_set_tags(socket_path, args).await,
         other => Err(anyhow!("unknown tool: {other}")),
     };
 
@@ -324,6 +338,48 @@ async fn tool_close(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     match next_event(&mut lines).await? {
         ServerEvent::Closed { .. } => Ok(format!("closed {session}")),
         ServerEvent::Error { code, message, .. } => Err(anyhow!("close failed: {code}: {message}")),
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
+}
+
+async fn tool_set_tags(socket_path: &Path, args: Value) -> anyhow::Result<String> {
+    let session = args
+        .get("session")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing 'session' argument"))?
+        .to_string();
+    let mut tags = BTreeMap::new();
+    if let Some(obj) = args.get("tags").and_then(Value::as_object) {
+        for (k, v) in obj {
+            let val = v
+                .as_str()
+                .ok_or_else(|| anyhow!("tag values must be strings, got non-string for `{k}`"))?;
+            tags.insert(k.clone(), val.to_string());
+        }
+    } else {
+        return Err(anyhow!("missing 'tags' object"));
+    }
+
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(
+        &mut writer,
+        &ClientCommand::SetTags {
+            session: session.clone(),
+            tags,
+        },
+    )
+    .await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::SessionUpdated {
+            session,
+            tags: Some(t),
+            ..
+        } => Ok(serde_json::to_string(
+            &json!({"session": session, "tags": t}),
+        )?),
+        ServerEvent::Error { code, message, .. } => {
+            Err(anyhow!("set-tags failed: {code}: {message}"))
+        }
         other => Err(anyhow!("unexpected response: {other:?}")),
     }
 }
@@ -612,11 +668,11 @@ async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> anyhow::R
 mod tests {
     use super::*;
 
-    /// `tools/list` must enumerate exactly the six tools the LLM-facing surface
+    /// `tools/list` must enumerate exactly the tools the LLM-facing surface
     /// promises. A drift between this set and the documented API would silently
     /// break MCP clients, so the test pins the list explicitly.
     #[test]
-    fn tools_list_enumerates_the_documented_six_tools() {
+    fn tools_list_enumerates_the_documented_tools() {
         let list = tools_list();
         let names: Vec<&str> = list["tools"]
             .as_array()
@@ -633,6 +689,7 @@ mod tests {
                 "roy_run_detached",
                 "roy_read_session",
                 "roy_close",
+                "roy_set_tags",
             ]
         );
     }
