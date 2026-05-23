@@ -51,6 +51,21 @@ impl AcpConfig {
             stderr_mode: StderrMode::Null,
         }
     }
+
+    /// codex via the Zed `@zed-industries/codex-acp` adapter (expects the
+    /// `codex-acp` binary on PATH: `npm i -g @zed-industries/codex-acp`).
+    /// `full-access` is the adapter's most permissive mode (analogous to
+    /// gemini's yolo); residual permission requests are auto-allowed.
+    pub fn codex() -> Self {
+        Self {
+            command: "codex-acp".to_string(),
+            args: vec![],
+            mode_id: Some("full-access".to_string()),
+            permission_policy: PermissionPolicy::AllowAll,
+            request_timeout: Duration::from_secs(30),
+            stderr_mode: StderrMode::Null,
+        }
+    }
 }
 
 pub struct AcpTransport {

@@ -274,6 +274,36 @@ async fn real_opencode_spawn_and_turn() {
     session.close().await.unwrap();
 }
 
+// Real codex via the codex-acp adapter. Ignored by default: needs the
+// `codex-acp` binary on PATH (npm i -g @zed-industries/codex-acp) and a usable
+// codex auth/quota. Run with: cargo test --test acp_transport -- --ignored real_codex
+#[tokio::test]
+#[ignore]
+async fn real_codex_spawn_and_turn() {
+    if which("codex-acp").is_none() {
+        eprintln!("skipping: codex-acp not on PATH");
+        return;
+    }
+    let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(AcpConfig::codex()));
+    let mut session = Session::new(transport, std::env::current_dir().unwrap());
+
+    let mut answer = String::new();
+    {
+        let mut stream = session
+            .send("reply with exactly the word: hello")
+            .await
+            .unwrap();
+        while let Some(ev) = stream.next().await {
+            if let TurnEvent::AssistantText { text } = ev {
+                answer.push_str(&text);
+            }
+        }
+    }
+    assert!(answer.to_lowercase().contains("hello"), "got: {answer:?}");
+    assert!(session.resume_cursor().is_some());
+    session.close().await.unwrap();
+}
+
 fn which(bin: &str) -> Option<()> {
     std::process::Command::new(bin)
         .arg("--version")

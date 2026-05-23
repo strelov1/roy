@@ -29,3 +29,7 @@ path = "examples/demo_gemini.rs"
 [[example]]
 name = "demo_opencode"
 path = "examples/demo_opencode.rs"
+
+[[example]]
+name = "demo_codex"
+path = "examples/demo_codex.rs"
