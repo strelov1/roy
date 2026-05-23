@@ -305,8 +305,9 @@ async fn real_codex_spawn_and_turn() {
 }
 
 fn which(bin: &str) -> Option<()> {
+    // `--help` rather than `--version`: codex-acp has no --version flag.
     std::process::Command::new(bin)
-        .arg("--version")
+        .arg("--help")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
