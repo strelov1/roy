@@ -45,6 +45,8 @@ enum Cmd {
     Close(CloseArgs),
     /// Replace the tag map on a live session. Empty `--tag` list clears all tags.
     SetTags(SetTagsArgs),
+    /// Long-poll for the next terminal Result on a session.
+    Wait(WaitArgs),
     /// Run an MCP server (stdio JSON-RPC) that exposes roy daemon operations
     /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
     /// IDE plugin) which talks to it over stdio.
@@ -118,6 +120,16 @@ struct SetTagsArgs {
 }
 
 #[derive(clap::Args)]
+struct WaitArgs {
+    session: String,
+    #[arg(long)]
+    since_seq: Option<u64>,
+    /// Default 600_000 (10 min).
+    #[arg(long)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(clap::Args)]
 struct McpArgs {
     /// Override the daemon socket the MCP tools connect to.
     #[arg(long)]
@@ -158,6 +170,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::ListArchived => cmd_list(true).await.map(|()| ExitCode::SUCCESS),
         Cmd::Close(args) => cmd_close(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::SetTags(args) => cmd_set_tags(args).await.map(|()| ExitCode::SUCCESS),
+        Cmd::Wait(args) => cmd_wait(args).await,
         Cmd::Mcp(args) => {
             let socket = args.socket.unwrap_or_else(default_socket);
             mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
@@ -486,6 +499,65 @@ async fn cmd_set_tags(args: SetTagsArgs) -> anyhow::Result<()> {
             anyhow::bail!("set-tags failed: {code}: {message}")
         }
         other => anyhow::bail!("unexpected response to SetTags: {other:?}"),
+    }
+}
+
+async fn cmd_wait(args: WaitArgs) -> anyhow::Result<ExitCode> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    send_cmd(
+        &mut writer,
+        &ClientCommand::WaitForResult {
+            session: args.session.clone(),
+            since_seq: args.since_seq,
+            timeout_ms: args.timeout_ms,
+        },
+    )
+    .await?;
+
+    match read_event(&mut events).await? {
+        ServerEvent::ResultReady {
+            session,
+            seq,
+            result,
+            assistant_text,
+        } => {
+            let TurnEvent::Result {
+                cost_usd,
+                stop_reason,
+            } = &result
+            else {
+                anyhow::bail!("daemon sent non-Result in ResultReady: {result:?}");
+            };
+            let payload = serde_json::json!({
+                "type": "result_ready",
+                "session": session,
+                "seq": seq,
+                "stop_reason": format!("{stop_reason:?}"),
+                "cost_usd": cost_usd,
+                "assistant_text": assistant_text,
+            });
+            println!("{payload}");
+            Ok(if stop_reason.is_error() {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            })
+        }
+        ServerEvent::WaitTimeout { session } => {
+            let payload = serde_json::json!({
+                "type": "wait_timeout",
+                "session": session,
+            });
+            println!("{payload}");
+            Ok(ExitCode::from(2))
+        }
+        ServerEvent::Error { code, message, .. } => {
+            anyhow::bail!("wait failed: {code}: {message}");
+        }
+        other => anyhow::bail!("unexpected response to WaitForResult: {other:?}"),
     }
 }
 
