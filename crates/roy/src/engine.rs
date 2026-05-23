@@ -238,13 +238,11 @@ impl SessionEngine {
         self.tags.lock().unwrap().clone()
     }
 
-    /// Upsert tags, persist them, and notify subscribers.
+    /// Replace the session's tag map, persist it, and notify subscribers.
     pub async fn set_tags(&self, tags: BTreeMap<String, String>) -> Result<()> {
         {
             let mut current = self.tags.lock().unwrap();
-            for (k, v) in tags {
-                current.insert(k, v);
-            }
+            *current = tags;
         }
         self.persist_metadata().await?;
         Ok(())

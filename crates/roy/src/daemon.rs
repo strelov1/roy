@@ -566,8 +566,12 @@ impl Daemon {
     ) {
         match self.manager.resume(&session, 256, 1024).await {
             Ok(engine) => {
-                if let Some(tags) = tags {
-                    if let Err(e) = engine.set_tags(tags).await {
+                if let Some(new_tags) = tags {
+                    let mut merged = engine.tags();
+                    for (k, v) in new_tags {
+                        merged.insert(k, v);
+                    }
+                    if let Err(e) = engine.set_tags(merged).await {
                         tracing::warn!(%session, error = %e, "failed to update tags on resume");
                     }
                 }
@@ -737,7 +741,11 @@ impl Daemon {
                 match self.manager.resume(&session_id, 256, 1024).await {
                     Ok(e) => {
                         if !tags.is_empty() {
-                            let _ = e.set_tags(tags).await;
+                            let mut merged = e.tags();
+                            for (k, v) in tags {
+                                merged.insert(k, v);
+                            }
+                            let _ = e.set_tags(merged).await;
                         }
                         e
                     }
@@ -2248,6 +2256,74 @@ mod tests {
         drop(client_wr);
         drop(events);
         let _ = serve_handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn set_tags_replaces_the_tag_map() {
+        let dir = tmp_dir();
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let _serve = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        // Spawn with two tags.
+        let mut initial = BTreeMap::new();
+        initial.insert("a".to_string(), "1".to_string());
+        initial.insert("b".to_string(), "2".to_string());
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                cwd: None,
+                model: None,
+                permission: None,
+                resume: None,
+                tags: initial,
+            },
+        )
+        .await;
+        let session = match next_event_line(&mut events).await {
+            ServerEvent::Spawned { session, .. } => session,
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+
+        // SetTags with only key "b" — "a" must disappear (REPLACE, not merge).
+        let mut replacement = BTreeMap::new();
+        replacement.insert("b".to_string(), "new".to_string());
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::SetTags {
+                session: session.clone(),
+                tags: replacement.clone(),
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::SessionUpdated { tags: Some(t), .. } => {
+                assert_eq!(t, replacement, "SetTags must replace, not merge");
+            }
+            other => panic!("expected SessionUpdated, got {other:?}"),
+        }
+
+        // Confirm List reports the replaced map too.
+        send_cmd_line(&mut client_wr, &ClientCommand::List).await;
+        match next_event_line(&mut events).await {
+            ServerEvent::Listed { sessions } => {
+                let s = sessions.iter().find(|s| s.session == session).unwrap();
+                assert_eq!(s.tags, replacement);
+            }
+            other => panic!("expected Listed, got {other:?}"),
+        }
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
