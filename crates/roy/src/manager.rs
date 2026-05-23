@@ -75,6 +75,7 @@ impl SessionManager {
             model: meta.model,
             permission: meta.permission,
             resume_cursor: meta.resume_cursor,
+            tags: meta.tags,
         };
         let transport =
             self.factory
@@ -294,6 +295,7 @@ mod tests {
             model: None,
             permission: None,
             resume_cursor: None,
+            tags: std::collections::BTreeMap::default(),
         };
         let e1 = mgr.spawn(cfg("a"), 256, 1024).await.unwrap();
         let e2 = mgr.spawn(cfg("b"), 256, 1024).await.unwrap();
@@ -338,6 +340,7 @@ mod tests {
             model: None,
             permission: None,
             resume_cursor: None,
+            tags: std::collections::BTreeMap::default(),
         };
         let engine = mgr.spawn(cfg, 256, 1024).await.unwrap();
         let id = engine.id().to_string();
@@ -369,6 +372,7 @@ mod tests {
             model: None,
             permission: None,
             resume_cursor: None,
+            tags: std::collections::BTreeMap::default(),
         };
         let engine = mgr.spawn(cfg, 256, 1024).await.unwrap();
         let id = engine.id().to_string();

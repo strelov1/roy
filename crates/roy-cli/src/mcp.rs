@@ -7,6 +7,7 @@
 //!
 //! Spec reference: <https://modelcontextprotocol.io/specification/2024-11-05>.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
@@ -295,7 +296,11 @@ async fn tool_list(socket_path: &Path, archived: bool) -> anyhow::Result<String>
             if sessions.is_empty() {
                 Ok("(no sessions)".to_string())
             } else {
-                Ok(sessions.join("\n"))
+                Ok(sessions
+                    .iter()
+                    .map(|s| s.session.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n"))
             }
         }
         other => Err(anyhow!("unexpected response: {other:?}")),
@@ -344,6 +349,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
             model,
             permission,
             resume,
+            tags: BTreeMap::default(),
         },
     )
     .await?;
@@ -452,6 +458,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
             model,
             permission,
             resume,
+            tags: BTreeMap::default(),
         },
     )
     .await?;
@@ -534,6 +541,9 @@ async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<St
             let mut terminal: Option<String> = None;
             for entry in &entries {
                 match &entry.event {
+                    TurnEvent::UserPrompt { text } => {
+                        rendered.push(format!("[{}] user: {text}", entry.seq));
+                    }
                     TurnEvent::AssistantText { text } => {
                         rendered.push(format!("[{}] assistant: {text}", entry.seq));
                     }

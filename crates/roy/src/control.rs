@@ -5,9 +5,12 @@
 //!
 //! See `docs/architecture.md`.
 
+use std::collections::BTreeMap;
+
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::event::TurnEvent;
 use crate::journal::{JournalEntry, Seq};
 
 /// Typed error codes emitted in `ServerEvent::Error`. Wire form is the
@@ -41,6 +44,8 @@ pub enum ErrorCode {
     DeleteFailed,
     /// `CancelTurn` failed (no such session, lease not held, etc.).
     CancelFailed,
+    /// `SetModel` failed (no such session, metadata write failed).
+    SetModelFailed,
     /// Forward-compat: a code emitted by a newer server.
     Other(String),
 }
@@ -61,6 +66,7 @@ impl ErrorCode {
             ErrorCode::ReadJournalFailed => "read_journal_failed",
             ErrorCode::DeleteFailed => "delete_failed",
             ErrorCode::CancelFailed => "cancel_failed",
+            ErrorCode::SetModelFailed => "set_model_failed",
             ErrorCode::Other(s) => s.as_str(),
         }
     }
@@ -80,6 +86,7 @@ impl ErrorCode {
             "read_journal_failed" => ErrorCode::ReadJournalFailed,
             "delete_failed" => ErrorCode::DeleteFailed,
             "cancel_failed" => ErrorCode::CancelFailed,
+            "set_model_failed" => ErrorCode::SetModelFailed,
             other => ErrorCode::Other(other.to_string()),
         }
     }
@@ -122,6 +129,8 @@ pub enum ClientCommand {
         permission: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        tags: BTreeMap<String, String>,
     },
     /// Subscribe to a session's `JournalEntry` stream. Optional `from_seq` for
     /// replay-from-N (default: from the start).
@@ -142,6 +151,13 @@ pub enum ClientCommand {
     /// Cancel only THIS connection's subscription to a session. The session
     /// keeps running.
     Detach { session: String },
+    /// Update the LLM label recorded in `SessionMetadata.model`. The daemon
+    /// rewrites the on-disk metadata, replies with `ModelChanged`, and
+    /// journals a `System { subtype: "model_changed:<m>" }` entry so every
+    /// attached client sees it through their `Frame` stream. Requires a
+    /// live session — resume an archived one first. Note: roy doesn't
+    /// currently steer the agent from this field — it's a display label.
+    SetModel { session: String, model: String },
     /// Ask the daemon to close a session and remove it from the registry.
     Close { session: String },
     /// Permanently delete an archived session's journal + metadata files.
@@ -156,7 +172,16 @@ pub enum ClientCommand {
     /// metadata persisted beside the journal, reuses the same session id and
     /// journal, and forwards the stored cursor to `Transport::open` for the
     /// agent-side resume (e.g. ACP `session/load`).
-    Resume { session: String },
+    Resume {
+        session: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tags: Option<BTreeMap<String, String>>,
+    },
+    /// Replace the live session's tag map; emits `ServerEvent::SessionUpdated`.
+    SetTags {
+        session: String,
+        tags: BTreeMap<String, String>,
+    },
     /// Snapshot read of a session's journal — works on live AND archived
     /// sessions. Unlike `Attach`, it does not subscribe to the live broadcast;
     /// the daemon returns the current journal slice and the client decides
@@ -167,6 +192,41 @@ pub enum ClientCommand {
         from_seq: Option<Seq>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_entries: Option<usize>,
+    },
+    /// Long-poll for the next terminal `Result` event in `session`. Resolves
+    /// when an entry with `event: Result { .. }` and `seq >= since_seq` lands
+    /// in the journal.
+    WaitForResult {
+        session: String,
+        /// Default 0: "wait for the next Result after now".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_seq: Option<Seq>,
+        /// Default 600_000 (10 min).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
+    /// Composite command: Run (or Resume) + WaitForResult.
+    Fire {
+        target: FireTarget,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        tags: BTreeMap<String, String>,
+        /// Default 600_000 (10 min).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FireTarget {
+    Spawn {
+        preset: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    Resume {
+        session_id: String,
     },
 }
 
@@ -184,10 +244,15 @@ pub enum ServerEvent {
     /// Response to `Attach`. `seq_at_attach` is the next seq after the replay.
     /// `agent` is the preset name the session was spawned with (e.g. `claude`,
     /// `gemini`) — read from the live engine or the on-disk metadata.
+    /// `model` is the LLM label the session was spawned with (e.g.
+    /// `claude-opus-4-7`) — recorded for display only, the daemon does not
+    /// currently steer the agent with it.
     Attached {
         session: String,
         seq_at_attach: Seq,
         agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// One journal entry on a subscribed session.
     Frame {
@@ -200,14 +265,26 @@ pub enum ServerEvent {
     InputReleased { session: String },
     /// Response to `Detach`.
     Detached { session: String },
+    /// Per-connection ack to `SetModel`. Other attached clients learn
+    /// about the change via a `Frame` carrying a
+    /// `System { subtype: "model_changed:<m>" }` journal entry.
+    ModelChanged { session: String, model: String },
     /// Response to `Close`.
     Closed { session: String },
     /// Response to `DeleteArchive`.
     Deleted { session: String },
     /// Response to `List`.
-    Listed { sessions: Vec<String> },
+    Listed { sessions: Vec<SessionInfo> },
     /// Response to `ListArchived`.
-    ListedArchived { sessions: Vec<String> },
+    ListedArchived { sessions: Vec<SessionInfo> },
+    /// A session's metadata (model or tags) was updated.
+    SessionUpdated {
+        session: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tags: Option<BTreeMap<String, String>>,
+    },
     /// Response to `Resume`. Same session id as requested; `resume_cursor`
     /// reflects what the transport reported after resuming.
     Resumed {
@@ -226,6 +303,34 @@ pub enum ServerEvent {
         /// entries are already on disk waiting for a follow-up read.
         has_more: bool,
     },
+    /// Response to `WaitForResult`: the turn finished.
+    ResultReady {
+        session: String,
+        seq: Seq,
+        result: TurnEvent, // terminal Result
+        assistant_text: String,
+    },
+    /// Response to `WaitForResult`: the timeout expired before a Result landed.
+    WaitTimeout { session: String },
+    /// Response to `Fire`: the turn finished.
+    FireDone {
+        session: String,
+        seq_range: (Seq, Seq),
+        result: TurnEvent, // terminal Result
+        assistant_text: String,
+    },
+    /// Response to `Fire`: the timeout expired before a Result landed.
+    FireTimeout {
+        session: String,
+        partial_seq_range: (Seq, Seq),
+    },
+    /// Response to `Fire`: an error occurred during spawn or turn.
+    FireError {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        code: ErrorCode,
+        message: String,
+    },
     /// A command failed; if `session` is `Some`, the error pertains to that
     /// session.
     Error {
@@ -234,6 +339,18 @@ pub enum ServerEvent {
         code: ErrorCode,
         message: String,
     },
+}
+
+/// Rich metadata for a session, used by `List` and `ListArchived`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub session: String,
+    pub agent: String,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, String>,
 }
 
 #[cfg(test)]
@@ -259,6 +376,7 @@ mod tests {
             model: None,
             permission: Some("allow".into()),
             resume: None,
+            tags: BTreeMap::new(),
         });
     }
 

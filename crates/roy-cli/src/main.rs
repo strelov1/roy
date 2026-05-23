@@ -2,6 +2,7 @@
 //!
 //! Subcommands defined per `docs/wire-protocol.md`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -248,6 +249,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
             model: args.model.clone(),
             permission: args.permission.clone(),
             resume: args.resume.clone(),
+            tags: BTreeMap::default(),
         },
     )
     .await?;
@@ -378,7 +380,7 @@ async fn cmd_list(archived: bool) -> anyhow::Result<()> {
     match read_event(&mut events).await? {
         ServerEvent::Listed { sessions } | ServerEvent::ListedArchived { sessions } => {
             for s in sessions {
-                println!("{s}");
+                println!("{}", s.session);
             }
         }
         other => anyhow::bail!("unexpected response to List: {other:?}"),
@@ -395,6 +397,7 @@ async fn cmd_resume(args: ResumeArgs) -> anyhow::Result<()> {
         &mut writer,
         &ClientCommand::Resume {
             session: args.session.clone(),
+            tags: None,
         },
     )
     .await?;

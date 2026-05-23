@@ -4,6 +4,7 @@
 //! to spawn, then hand the stored `resume_cursor` to the transport so the
 //! underlying ACP `session/load` reconnects to the agent-side session.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ pub struct SessionMetadata {
     pub permission: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, String>,
 }
 
 /// Compute the metadata file path for `session_id` in `dir`.
@@ -74,6 +77,7 @@ mod tests {
             model: None,
             permission: Some("allow".to_string()),
             resume_cursor: Some("acp-sid-x".to_string()),
+            tags: BTreeMap::from([("foo".to_string(), "bar".to_string())]),
         };
         write_metadata(&dir, &meta).await.unwrap();
         let back = read_metadata(&dir, "sid-1").await.unwrap();

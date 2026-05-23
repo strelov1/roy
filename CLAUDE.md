@@ -105,7 +105,7 @@ A short pipeline. Triggers (CLI, MCP, WebSocket) talk to a single `Daemon`; `Dae
 
 ### TurnEvent normalization
 
-`TurnEvent` (`src/event.rs`) is the common vocabulary across all agents: `System`, `AssistantText`, `ToolUse`, `Result { cost_usd, stop_reason }`, and `Raw(Value)`. **Unknown/unmodeled messages become `Raw` rather than being dropped** — so a new event type from an upgraded SDK surfaces instead of vanishing silently. A turn's stream always terminates with `Result`. Wire format is a single JSON shape (`event_to_json` / `event_from_json`) used by stdout, the JSONL journal, and the control protocol.
+`TurnEvent` (`src/event.rs`) is the common vocabulary across all agents: `System`, `UserPrompt`, `AssistantText`, `AssistantThought`, `ToolUse`, `Usage`, `Result { cost_usd, stop_reason }`, and `Raw(Value)`. **Unknown/unmodeled messages become `Raw` rather than being dropped** — so a new event type from an upgraded SDK surfaces instead of vanishing silently. `UserPrompt` is journaled by the engine before each prompt is sent to the transport — ACP agents don't echo user input, so this is how the user side of the conversation survives across refreshes / late attaches. A turn's stream always terminates with `Result`. Wire format is a single JSON shape (`event_to_json` / `event_from_json`) used by stdout, the JSONL journal, and the control protocol.
 
 ### Journal
 

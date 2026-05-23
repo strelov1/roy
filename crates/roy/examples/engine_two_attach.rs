@@ -28,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
                 model: None,
                 permission: None,
                 resume_cursor: None,
+                tags: std::collections::BTreeMap::new(),
             },
             256,
             1024,

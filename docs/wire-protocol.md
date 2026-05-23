@@ -19,8 +19,11 @@ is implemented through the single mapping
 ```rust
 enum TurnEvent {
     System { subtype: String },
+    UserPrompt { text: String },
     AssistantText { text: String },
+    AssistantThought { text: String },
     ToolUse { name: String, input: serde_json::Value },
+    Usage { input_tokens: Option<u64>, output_tokens: Option<u64>, cost_usd: Option<f64> },
     Result { cost_usd: Option<f64>, stop_reason: StopReason },
     Raw(serde_json::Value),
 }
@@ -32,12 +35,18 @@ control frame):
 | variant            | JSON shape                                                                                   |
 |--------------------|-----------------------------------------------------------------------------------------------|
 | `System`           | `{"type":"system","subtype":"…"}`                                                            |
+| `UserPrompt`       | `{"type":"user_prompt","text":"…"}`                                                          |
 | `AssistantText`    | `{"type":"assistant_text","text":"…"}`                                                       |
 | `AssistantThought` | `{"type":"assistant_thought","text":"…"}`                                                    |
 | `ToolUse`          | `{"type":"tool_use","name":"…","input":…}`                                                   |
 | `Usage`            | `{"type":"usage","input_tokens":null|123,"output_tokens":null|456,"cost_usd":null|0.01}`     |
 | `Result`           | `{"type":"result","cost_usd":null|0.42,"stop_reason":"end_turn","is_error":false}`           |
 | `Raw`              | `{"type":"raw","value":…}`                                                                   |
+
+`UserPrompt` is journaled by the engine the moment a `send`/`Cmd::Prompt`
+arrives, *before* the prompt is forwarded to the agent. Agents don't
+echo user input over ACP, so without this entry a refresh, a late
+attach, or a second observer would only see the agent side.
 
 Notes:
 
