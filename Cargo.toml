@@ -33,3 +33,7 @@ path = "examples/demo_opencode.rs"
 [[example]]
 name = "demo_codex"
 path = "examples/demo_codex.rs"
+
+[[example]]
+name = "demo_claude_agent"
+path = "examples/demo_claude_agent.rs"

@@ -66,6 +66,24 @@ impl AcpConfig {
             stderr_mode: StderrMode::Null,
         }
     }
+
+    /// Claude Code via the Zed `@zed-industries/claude-code-acp` adapter
+    /// (expects the `claude-code-acp` binary on PATH:
+    /// `npm i -g @zed-industries/claude-code-acp`). The adapter uses the Claude
+    /// Agent SDK, so it authenticates via API credentials from the environment
+    /// (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`) — a separate billing
+    /// pool from the interactive subscription used by the `claude -p`
+    /// PrintTransport. It exposes models, not ACP modes, so no set_mode is sent.
+    pub fn claude_agent() -> Self {
+        Self {
+            command: "claude-code-acp".to_string(),
+            args: vec![],
+            mode_id: None,
+            permission_policy: PermissionPolicy::AllowAll,
+            request_timeout: Duration::from_secs(30),
+            stderr_mode: StderrMode::Null,
+        }
+    }
 }
 
 pub struct AcpTransport {

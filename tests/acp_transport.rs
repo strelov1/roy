@@ -304,6 +304,37 @@ async fn real_codex_spawn_and_turn() {
     session.close().await.unwrap();
 }
 
+// Real Claude Agent via the claude-code-acp adapter. Ignored by default: needs
+// the `claude-code-acp` binary on PATH (npm i -g @zed-industries/claude-code-acp)
+// and API auth (CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY) in the env.
+// Run with: cargo test --test acp_transport -- --ignored real_claude_agent
+#[tokio::test]
+#[ignore]
+async fn real_claude_agent_spawn_and_turn() {
+    if which("claude-code-acp").is_none() {
+        eprintln!("skipping: claude-code-acp not on PATH");
+        return;
+    }
+    let transport: Arc<dyn Transport> = Arc::new(AcpTransport::new(AcpConfig::claude_agent()));
+    let mut session = Session::new(transport, std::env::current_dir().unwrap());
+
+    let mut answer = String::new();
+    {
+        let mut stream = session
+            .send("reply with exactly the word: hello")
+            .await
+            .unwrap();
+        while let Some(ev) = stream.next().await {
+            if let TurnEvent::AssistantText { text } = ev {
+                answer.push_str(&text);
+            }
+        }
+    }
+    assert!(answer.to_lowercase().contains("hello"), "got: {answer:?}");
+    assert!(session.resume_cursor().is_some());
+    session.close().await.unwrap();
+}
+
 fn which(bin: &str) -> Option<()> {
     // `--help` rather than `--version`: codex-acp has no --version flag.
     std::process::Command::new(bin)
