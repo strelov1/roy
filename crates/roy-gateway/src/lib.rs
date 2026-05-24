@@ -8,6 +8,7 @@
 //! See `docs/superpowers/plans/2026-05-23-roy-gateway-telegram.md`.
 
 pub mod binder;
+pub mod cancel;
 pub mod config;
 pub mod daemon;
 pub mod draft_stream;
