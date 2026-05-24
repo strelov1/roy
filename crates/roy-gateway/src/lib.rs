@@ -10,6 +10,7 @@
 pub mod binder;
 pub mod config;
 pub mod daemon;
+pub mod draft_stream;
 pub mod formatting;
 pub mod orchestrator;
 pub mod telegram;
