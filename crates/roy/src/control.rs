@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::event::TurnEvent;
 use crate::journal::{JournalEntry, Seq};
+use crate::project::Project;
 
 /// Typed error codes emitted in `ServerEvent::Error`. Wire form is the
 /// snake_case string returned by `as_wire`; unknown strings parse as
@@ -271,9 +272,14 @@ pub enum FireTarget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ServerEvent {
-    /// Response to `Spawn`.
+    /// Response to `Spawn`. `project_id` is always set (auto-resolved); when
+    /// the spawn auto-created the project, the full record arrives in
+    /// `project: Some(_)`.
     Spawned {
         session: String,
+        project_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<Project>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_cursor: Option<String>,
     },
@@ -375,12 +381,27 @@ pub enum ServerEvent {
         code: ErrorCode,
         message: String,
     },
+    /// Response to `ListProjects`.
+    ProjectsListed { projects: Vec<Project> },
+    /// Response to `CreateProject`.
+    ProjectCreated { project: Project },
+    /// Response to `RenameProject`. Full record so clients can replace their
+    /// row in one shot.
+    ProjectRenamed { project: Project },
+    /// Response to `DeleteProject`. Lists the session ids that were
+    /// cascade-deleted so the client can prune them from its caches
+    /// atomically.
+    ProjectDeleted {
+        project_id: String,
+        deleted_sessions: Vec<String>,
+    },
 }
 
 /// Rich metadata for a session, used by `List` and `ListArchived`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session: String,
+    pub project_id: String,
     pub agent: String,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -536,5 +557,35 @@ mod tests {
         let code: ErrorCode = serde_json::from_str("\"future_event\"").unwrap();
         assert_eq!(code, ErrorCode::Other("future_event".into()));
         assert_eq!(serde_json::to_string(&code).unwrap(), "\"future_event\"");
+    }
+
+    #[test]
+    fn spawned_event_roundtrips_with_project() {
+        use std::path::PathBuf;
+        let p = Project {
+            id: "pid".into(),
+            name: "n".into(),
+            path: PathBuf::from("/tmp/p"),
+            created_at: 1,
+        };
+        roundtrip(&ServerEvent::Spawned {
+            session: "sid".into(),
+            project_id: p.id.clone(),
+            project: Some(p),
+            resume_cursor: None,
+        });
+    }
+
+    #[test]
+    fn project_deleted_event_roundtrips() {
+        roundtrip(&ServerEvent::ProjectDeleted {
+            project_id: "pid".into(),
+            deleted_sessions: vec!["s1".into(), "s2".into()],
+        });
+    }
+
+    #[test]
+    fn projects_listed_event_roundtrips() {
+        roundtrip(&ServerEvent::ProjectsListed { projects: Vec::new() });
     }
 }

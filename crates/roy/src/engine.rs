@@ -196,6 +196,10 @@ impl SessionEngine {
         &self.cwd
     }
 
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
     /// LLM label currently associated with the session (e.g.
     /// `claude-opus-4-7`). Can change mid-session via `set_model`.
     pub fn model(&self) -> Option<String> {

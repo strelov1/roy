@@ -304,6 +304,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         ServerEvent::Spawned {
             session,
             resume_cursor,
+            ..
         } => {
             if args.detach {
                 let payload = serde_json::json!({

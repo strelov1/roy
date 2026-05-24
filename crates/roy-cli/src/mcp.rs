@@ -700,6 +700,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
         ServerEvent::Spawned {
             session,
             resume_cursor,
+            ..
         } => (session, resume_cursor),
         ServerEvent::Error { code, message, .. } => {
             return Err(anyhow!("spawn failed: {code}: {message}"))

@@ -567,6 +567,8 @@ impl Daemon {
             Ok(engine) => {
                 let _ = event_tx.send(ServerEvent::Spawned {
                     session: engine.id().to_string(),
+                    project_id: engine.project_id().to_string(),
+                    project: None,
                     resume_cursor: engine.resume_cursor(),
                 });
             }
@@ -641,6 +643,7 @@ impl Daemon {
             if let Some(engine) = self.manager.get(&id).await {
                 sessions.push(crate::control::SessionInfo {
                     session: id,
+                    project_id: engine.project_id().to_string(),
                     agent: engine.agent().to_string(),
                     cwd: engine.cwd().to_string_lossy().to_string(),
                     model: engine.model(),
@@ -661,6 +664,7 @@ impl Daemon {
                     {
                         sessions.push(crate::control::SessionInfo {
                             session: id,
+                            project_id: meta.project_id,
                             agent: meta.agent,
                             cwd: meta.cwd.to_string_lossy().to_string(),
                             model: meta.model,
