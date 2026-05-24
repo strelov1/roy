@@ -326,7 +326,7 @@ CREATE TABLE agents (
   id                       TEXT PRIMARY KEY,
   name                     TEXT NOT NULL,
   preset                   TEXT NOT NULL,
-  cwd                      TEXT NOT NULL,
+  project_id               TEXT,
   task                     TEXT NOT NULL,
   model                    TEXT,
   persistent               INTEGER NOT NULL DEFAULT 0,
@@ -406,7 +406,7 @@ CREATE TABLE agents (
   id                       TEXT PRIMARY KEY,
   name                     TEXT NOT NULL,
   preset                   TEXT NOT NULL,
-  cwd                      TEXT NOT NULL,
+  project_id               TEXT,
   task                     TEXT NOT NULL,
   model                    TEXT,
   persistent               BOOLEAN NOT NULL DEFAULT FALSE,
@@ -609,7 +609,7 @@ pub struct Agent {
     pub id: String,
     pub name: String,
     pub preset: String,
-    pub cwd: String,
+    pub project_id: Option<String>,
     pub task: String,
     pub model: Option<String>,
     /// SQLite INTEGER 0/1. Use the bool getter `is_persistent()` for clarity.
@@ -818,7 +818,7 @@ use crate::types::Agent;
 pub struct NewAgent {
     pub name: String,
     pub preset: String,
-    pub cwd: String,
+    pub project_id: Option<String>,
     pub task: String,
     pub model: Option<String>,
     pub persistent: bool,
@@ -830,13 +830,13 @@ pub async fn insert(pool: &SqlitePool, new: NewAgent) -> Result<Agent> {
     let persistent_int: i64 = if new.persistent { 1 } else { 0 };
 
     sqlx::query(
-        "INSERT INTO agents (id, name, preset, cwd, task, model, persistent, created_at, updated_at)
+        "INSERT INTO agents (id, name, preset, project_id, task, model, persistent, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&new.name)
     .bind(&new.preset)
-    .bind(&new.cwd)
+    .bind(&new.project_id)
     .bind(&new.task)
     .bind(&new.model)
     .bind(persistent_int)
@@ -904,7 +904,7 @@ mod tests {
         NewAgent {
             name: "daily-digest".into(),
             preset: "claude".into(),
-            cwd: "/tmp/work".into(),
+            project_id: None,
             task: "summarize today".into(),
             model: None,
             persistent: false,
@@ -1178,7 +1178,7 @@ mod tests {
             agents::NewAgent {
                 name: "x".into(),
                 preset: "claude".into(),
-                cwd: "/tmp".into(),
+                project_id: None,
                 task: "do".into(),
                 model: None,
                 persistent: false,
@@ -1497,7 +1497,7 @@ mod tests {
             agents::NewAgent {
                 name: "x".into(),
                 preset: "claude".into(),
-                cwd: "/tmp".into(),
+                project_id: None,
                 task: "do".into(),
                 model: None,
                 persistent: false,
@@ -1793,7 +1793,7 @@ mod tests {
         let agent = agents::insert(
             &pool,
             agents::NewAgent {
-                name: "x".into(), preset: "claude".into(), cwd: "/tmp".into(),
+                name: "x".into(), preset: "claude".into(), project_id: None,
                 task: "do".into(), model: None, persistent: false,
             },
         )
@@ -2315,7 +2315,7 @@ mod tests {
 
         let out = fire(
             &path,
-            FireTarget::Spawn { preset: "claude".into(), cwd: None },
+            FireTarget::Spawn { preset: "claude".into(), project_id: None },
             "p".into(),
             BTreeMap::new(),
             Duration::from_secs(5),
@@ -2347,7 +2347,7 @@ mod tests {
 
         let out = fire(
             &path,
-            FireTarget::Spawn { preset: "claude".into(), cwd: None },
+            FireTarget::Spawn { preset: "claude".into(), project_id: None },
             "p".into(),
             BTreeMap::new(),
             Duration::from_secs(1),
@@ -2373,7 +2373,7 @@ mod tests {
 
         let out = fire(
             &path,
-            FireTarget::Spawn { preset: "claude".into(), cwd: None },
+            FireTarget::Spawn { preset: "claude".into(), project_id: None },
             "p".into(),
             BTreeMap::new(),
             Duration::from_secs(1),
@@ -2389,7 +2389,7 @@ mod tests {
         let path = dir.path().join("missing.sock");
         let r = fire(
             &path,
-            FireTarget::Spawn { preset: "claude".into(), cwd: None },
+            FireTarget::Spawn { preset: "claude".into(), project_id: None },
             "p".into(),
             BTreeMap::new(),
             Duration::from_secs(1),
@@ -3370,7 +3370,7 @@ mod tests {
         let a = agents::insert(
             &pool,
             agents::NewAgent {
-                name: "x".into(), preset: "claude".into(), cwd: "/tmp".into(),
+                name: "x".into(), preset: "claude".into(), project_id: None,
                 task: "t".into(), model: None, persistent: false,
             },
         ).await.unwrap();
@@ -3399,7 +3399,7 @@ mod tests {
         let a = agents::insert(
             &pool,
             agents::NewAgent {
-                name: "x".into(), preset: "claude".into(), cwd: "/tmp".into(),
+                name: "x".into(), preset: "claude".into(), project_id: None,
                 task: "t".into(), model: None, persistent: false,
             },
         ).await.unwrap();
@@ -3428,7 +3428,7 @@ mod tests {
         let a = agents::insert(
             &pool,
             agents::NewAgent {
-                name: "x".into(), preset: "claude".into(), cwd: "/tmp".into(),
+                name: "x".into(), preset: "claude".into(), project_id: None,
                 task: "t".into(), model: None, persistent: false,
             },
         ).await.unwrap();
@@ -3685,7 +3685,7 @@ fn build_target(agent: &Agent) -> roy::FireTarget {
     }
     roy::FireTarget::Spawn {
         preset: agent.preset.clone(),
-        cwd: Some(agent.cwd.clone()),
+        project_id: agent.project_id.clone(),
     }
 }
 ```
@@ -3785,7 +3785,7 @@ Each should print clap-formatted help without panic.
 ```bash
 ROY_SCHEDULER_DB=/tmp/rs-smoke.db ./target/release/roy-scheduler migrate
 ROY_SCHEDULER_DB=/tmp/rs-smoke.db ./target/release/roy-scheduler agents add \
-  --name digest --preset claude --cwd /tmp --task "summarize"
+  --name digest --preset claude --task "summarize"
 ROY_SCHEDULER_DB=/tmp/rs-smoke.db ./target/release/roy-scheduler agents list
 ```
 
@@ -3866,7 +3866,6 @@ fn e2e_fire_completes() {
         "agents", "add",
         "--name", "smoke",
         "--preset", "opencode",
-        "--cwd", "/tmp",
         "--task", "say something",
     ]);
     // Parse agent id from the printed JSON line.
@@ -3976,7 +3975,7 @@ All three must pass. The e2e test in Task 18 is `#[ignore]`d so the default `car
 Add a section to `README.md` (or create `docs/scheduler.md` referenced from README) describing:
 - What roy-scheduler does (one paragraph)
 - Where the DB lives (`~/.local/state/roy-scheduler/state.db`)
-- Example: `roy-scheduler agents add --name digest --preset claude --cwd $HOME --task "summarize today" && roy-scheduler triggers add --agent <id> --cron '0 9 * * *'`
+- Example: `roy-scheduler agents add --name digest --preset claude --task "summarize today" && roy-scheduler triggers add --agent <id> --cron '0 9 * * *'`
 - Reference to the design spec and this plan
 
 - [ ] **Hand off**
