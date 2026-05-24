@@ -29,20 +29,25 @@ pub struct Project {
 /// starting with `.`. Returns `Err` with a human-readable message on failure.
 pub fn validate_project_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(RoyError::Protocol(
-            "project name must not be empty".to_string(),
-        ));
+        return Err(RoyError::InvalidProjectName {
+            name: name.to_string(),
+            reason: "name must not be empty".to_string(),
+        });
     }
     if name.starts_with('.') {
-        return Err(RoyError::Protocol(format!(
-            "project name must not start with '.': {name}"
-        )));
+        return Err(RoyError::InvalidProjectName {
+            name: name.to_string(),
+            reason: "name must not start with '.'".to_string(),
+        });
     }
     for ch in name.chars() {
         if !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' {
-            return Err(RoyError::Protocol(format!(
-                "project name may only contain ASCII letters, digits, '_', '-'; got '{ch}' in {name:?}"
-            )));
+            return Err(RoyError::InvalidProjectName {
+                name: name.to_string(),
+                reason: format!(
+                    "name may only contain ASCII letters, digits, '_', '-'; got '{ch}'"
+                ),
+            });
         }
     }
     Ok(())
@@ -150,9 +155,9 @@ impl ProjectRegistry {
         let path = self.workspace_dir.join(name);
         let mut state = self.inner.lock().expect("registry poisoned");
         if state.projects.iter().any(|p| p.name == name) {
-            return Err(RoyError::Protocol(format!(
-                "project already exists: {name}"
-            )));
+            return Err(RoyError::ProjectExists {
+                name: name.to_string(),
+            });
         }
         std::fs::create_dir_all(&path).map_err(RoyError::Io)?;
         let project = Project {
@@ -382,7 +387,7 @@ mod tests {
         let reg = ProjectRegistry::load(&journal, workspace).unwrap();
         reg.create_project("dup").unwrap();
         let err = reg.create_project("dup").unwrap_err();
-        assert!(matches!(err, RoyError::Protocol(_)));
+        assert!(matches!(err, RoyError::ProjectExists { .. }));
     }
 
     #[test]

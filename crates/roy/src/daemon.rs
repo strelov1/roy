@@ -881,16 +881,18 @@ impl Daemon {
             Ok(project) => {
                 let _ = event_tx.send(ServerEvent::ProjectCreated { project });
             }
-            Err(e) if matches!(e, crate::error::RoyError::Protocol(_)) => {
-                let msg = e.to_string();
-                let code = if msg.contains("already exists") {
-                    ErrorCode::ProjectExists
-                } else {
-                    // name validation error → InvalidProjectName
-                    ErrorCode::InvalidProjectName
-                };
-                send_error(event_tx, None, code, msg);
-            }
+            Err(RoyError::ProjectExists { name }) => send_error(
+                event_tx,
+                None,
+                ErrorCode::ProjectExists,
+                format!("project already exists: {name}"),
+            ),
+            Err(RoyError::InvalidProjectName { name, reason }) => send_error(
+                event_tx,
+                None,
+                ErrorCode::InvalidProjectName,
+                format!("invalid project name `{name}`: {reason}"),
+            ),
             Err(e) => send_error(
                 event_tx,
                 None,
