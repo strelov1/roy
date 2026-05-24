@@ -126,8 +126,6 @@ pub enum SubscriberKind {
     InjectParent,
     Webhook,
     NotifyNative,
-    /// v1 reserved; rejected with `not_implemented` if invoked.
-    ChainAgent,
 }
 
 impl SubscriberKind {
@@ -136,7 +134,6 @@ impl SubscriberKind {
             SubscriberKind::InjectParent => "inject_parent",
             SubscriberKind::Webhook => "webhook",
             SubscriberKind::NotifyNative => "notify_native",
-            SubscriberKind::ChainAgent => "chain_agent",
         }
     }
 
@@ -145,7 +142,6 @@ impl SubscriberKind {
             "inject_parent" => Some(Self::InjectParent),
             "webhook" => Some(Self::Webhook),
             "notify_native" => Some(Self::NotifyNative),
-            "chain_agent" => Some(Self::ChainAgent),
             _ => None,
         }
     }
@@ -194,7 +190,6 @@ mod tests {
             SubscriberKind::InjectParent,
             SubscriberKind::Webhook,
             SubscriberKind::NotifyNative,
-            SubscriberKind::ChainAgent,
         ] {
             assert_eq!(SubscriberKind::parse(kind.as_db()), Some(kind));
         }
