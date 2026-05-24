@@ -205,7 +205,7 @@ fn tools_list() -> Value {
             },
             {
                 "name": "roy_fire",
-                "description": "One-shot: Spawn (or Resume) a session, send a prompt, wait for the terminal Result. Returns assistant_text + stop_reason. Pass `resume` to reuse an existing session id, otherwise pass `agent` (and optional `project_id`).",
+                "description": "One-shot: Spawn (or Resume) a session, send a prompt, wait for the terminal Result. Returns assistant_text + stop_reason. Pass `resume` to reuse an existing session id, otherwise pass `agent` (and optional `project_id`). Pass `parent` to record the caller's session id on the fire as the reserved tag `roy-scheduler:initiated_by_session`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -214,6 +214,7 @@ fn tools_list() -> Value {
                         "resume": {"type": "string", "description": "Existing roy session id to resume into."},
                         "prompt": {"type": "string"},
                         "tags": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "parent": {"type": "string", "description": "Session id of the caller. Recorded on the fire as `roy-scheduler:initiated_by_session` so the UI can link back to the initiator."},
                         "timeout_ms": {"type": "integer", "minimum": 1}
                     },
                     "required": ["prompt"],
@@ -542,6 +543,17 @@ async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
                 .ok_or_else(|| anyhow!("tag value for `{k}` must be string"))?;
             tags.insert(k.clone(), val.to_string());
         }
+    }
+    // `parent` records the caller's session id as the reserved tag
+    // `roy-scheduler:initiated_by_session` (distinct from
+    // `roy-scheduler:parent_session_id`, which the inject_parent subscriber
+    // owns). Inserted unconditionally so callers can't quietly silence the
+    // link by also passing `tags["roy-scheduler:initiated_by_session"]`.
+    if let Some(parent) = args.get("parent").and_then(Value::as_str) {
+        tags.insert(
+            "roy-scheduler:initiated_by_session".to_string(),
+            parent.to_string(),
+        );
     }
 
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
