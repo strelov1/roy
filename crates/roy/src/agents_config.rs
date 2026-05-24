@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const SAMPLE_TOML: &str = include_str!("../templates/agents_sample.toml");
+
 /// Raw config-file shape. Loaded via `toml::from_str`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentsConfig {
@@ -235,5 +237,15 @@ mod tests {
             cfg.validate(),
             Err(AgentsConfigError::Validate(_))
         ));
+    }
+
+    #[test]
+    fn sample_file_parses_to_empty_config() {
+        // The committed sample is fully commented, so it should parse and
+        // validate as an empty config. This guards against typos in the
+        // sample file landing in a release.
+        let cfg = AgentsConfig::parse(SAMPLE_TOML).expect("sample parses");
+        cfg.validate().expect("sample validates");
+        assert!(cfg.agents.is_empty(), "sample must be fully commented out");
     }
 }
