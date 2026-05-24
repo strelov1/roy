@@ -6,4 +6,5 @@
 
 pub mod agents;
 pub mod fires;
+pub mod subscribers;
 pub mod triggers;
