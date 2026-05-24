@@ -133,6 +133,7 @@ The on-disk `workspace_dir/<name>/` directory is **not** removed.
 | kind                | fields                                                                                                  |
 |---------------------|---------------------------------------------------------------------------------------------------------|
 | `spawned`           | `session`, optional `project_id`, optional `resume_cursor`                                              |
+| `spawning`          | `agent`, optional `project_id` — ack emitted at start of `spawn` before agent process launch            |
 | `attached`          | `session`, `seq_at_attach`                                                                              |
 | `frame`             | `session`, `entry` (the `JournalEntry` shape above)                                                     |
 | `input_acquired`    | `session`, `acquired: bool`                                                                             |
@@ -142,6 +143,7 @@ The on-disk `workspace_dir/<name>/` directory is **not** removed.
 | `listed`            | `sessions: [{id, project_id}]`                                                                          |
 | `listed_archived`   | `sessions: [{id, project_id}]`                                                                          |
 | `resumed`           | `session`, optional `resume_cursor`                                                                     |
+| `resuming`          | `session` — ack emitted at start of `resume` before agent process re-launch                             |
 | `journal_read`      | `session`, `entries: [JournalEntry]`, `next_seq`, `has_more: bool`                                       |
 | `projects_listed`   | `projects: [Project]`                                                                                   |
 | `project_created`   | `project: Project`                                                                                      |
@@ -167,6 +169,14 @@ The on-disk `workspace_dir/<name>/` directory is **not** removed.
 
 `spawned.resume_cursor` is the cursor to pass back to a later `spawn`'s
 `resume` field, or to `resume` directly.
+
+For every accepted `spawn` and `resume` command the daemon emits an ack
+event before the terminal one: `spawning → (spawned | error)` and
+`resuming → (resumed | error)`. The ack lets clients render a loading
+indicator during the slow agent-process startup phase and turns silent
+hangs (e.g. an unauthenticated `claude-code-acp` blocking inside ACP
+`initialize`) into a visible "started but never finished" state. Clients
+clear the loading state on any terminal event for that command.
 
 `journal_read.next_seq` is the seq the client should pass to its next
 `read_journal` to continue polling.
