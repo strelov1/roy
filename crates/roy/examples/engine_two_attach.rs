@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let engine = manager
         .spawn(
             SessionSpawnConfig {
-                agent: "opencode".into(),
+                agent: roy::AgentPreset::Opencode,
                 cwd,
                 project_id: None,
                 model: None,

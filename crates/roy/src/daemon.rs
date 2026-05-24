@@ -439,8 +439,17 @@ impl Daemon {
                 resume,
                 tags,
             } => {
-                self.handle_spawn(agent, project_id, model, permission, resume, tags, event_tx)
-                    .await
+                let preset: AgentPreset = match agent.parse() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        send_error(event_tx, None, ErrorCode::SpawnFailed, e);
+                        return;
+                    }
+                };
+                self.handle_spawn(
+                    preset, project_id, model, permission, resume, tags, event_tx,
+                )
+                .await
             }
             ClientCommand::Resume { session, tags } => {
                 self.handle_resume(session, tags, event_tx).await
@@ -552,7 +561,7 @@ impl Daemon {
 
     async fn handle_spawn(
         self: &Arc<Self>,
-        agent: String,
+        agent: AgentPreset,
         project_id: Option<String>,
         model: Option<String>,
         permission: Option<String>,
@@ -753,6 +762,17 @@ impl Daemon {
         // 1. Spawn or Resume
         let engine = match target {
             FireTarget::Spawn { preset, project_id } => {
+                let parsed: AgentPreset = match preset.parse() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = event_tx.send(ServerEvent::FireError {
+                            session: None,
+                            code: ErrorCode::SpawnFailed,
+                            message: e,
+                        });
+                        return;
+                    }
+                };
                 let (cwd, fixed_session_id) = match self.resolve_spawn_cwd(project_id.as_deref()) {
                     Ok(pair) => pair,
                     Err(e) => {
@@ -770,7 +790,7 @@ impl Daemon {
                     }
                 };
                 let cfg = SessionSpawnConfig {
-                    agent: preset,
+                    agent: parsed,
                     cwd,
                     project_id,
                     model: None,

@@ -60,10 +60,9 @@ impl SessionManager {
         broadcast_capacity: usize,
         mem_capacity: usize,
     ) -> Result<Arc<SessionEngine>> {
-        let preset: AgentPreset = cfg.agent.parse().map_err(RoyError::Protocol)?;
         let transport =
             self.factory
-                .build(preset, cfg.model.as_deref(), cfg.permission.as_deref())?;
+                .build(cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
@@ -100,8 +99,9 @@ impl SessionManager {
         if let Some(ref pid) = meta.project_id {
             self.projects.ensure_project(pid)?;
         }
+        let preset: AgentPreset = meta.agent.parse().map_err(RoyError::Protocol)?;
         let cfg = SessionSpawnConfig {
-            agent: meta.agent,
+            agent: preset,
             cwd: meta.cwd,
             project_id: meta.project_id.clone(),
             model: meta.model,
@@ -110,10 +110,9 @@ impl SessionManager {
             fixed_session_id: Some(session_id.to_string()),
             tags: meta.tags,
         };
-        let preset: AgentPreset = cfg.agent.parse().map_err(RoyError::Protocol)?;
         let transport =
             self.factory
-                .build(preset, cfg.model.as_deref(), cfg.permission.as_deref())?;
+                .build(cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
@@ -377,9 +376,9 @@ mod tests {
     }
 
     /// Minimal orphan spawn config for tests.
-    fn orphan_cfg(agent: &str) -> SessionSpawnConfig {
+    fn orphan_cfg(agent: AgentPreset) -> SessionSpawnConfig {
         SessionSpawnConfig {
-            agent: agent.to_string(),
+            agent,
             cwd: std::env::temp_dir(),
             project_id: None,
             model: None,
@@ -396,8 +395,14 @@ mod tests {
         let mgr = new_mgr(&dir);
 
         // Spawn → close two sessions to populate journals + metadata.
-        let e1 = mgr.spawn(orphan_cfg("opencode"), 256, 1024).await.unwrap();
-        let e2 = mgr.spawn(orphan_cfg("claude"), 256, 1024).await.unwrap();
+        let e1 = mgr
+            .spawn(orphan_cfg(AgentPreset::Opencode), 256, 1024)
+            .await
+            .unwrap();
+        let e2 = mgr
+            .spawn(orphan_cfg(AgentPreset::Claude), 256, 1024)
+            .await
+            .unwrap();
         let id1 = e1.id().to_string();
         let id2 = e2.id().to_string();
         mgr.close(&id1).await.unwrap();
@@ -433,7 +438,10 @@ mod tests {
         let dir = tmp_dir();
         let mgr = new_mgr(&dir);
 
-        let engine = mgr.spawn(orphan_cfg("opencode"), 256, 1024).await.unwrap();
+        let engine = mgr
+            .spawn(orphan_cfg(AgentPreset::Opencode), 256, 1024)
+            .await
+            .unwrap();
         let id = engine.id().to_string();
         assert_eq!(mgr.list().await, vec![id.clone()]);
 
@@ -457,7 +465,10 @@ mod tests {
         let mgr = new_mgr(&dir);
         assert!(mgr.list().await.is_empty());
 
-        let engine = mgr.spawn(orphan_cfg("opencode"), 256, 1024).await.unwrap();
+        let engine = mgr
+            .spawn(orphan_cfg(AgentPreset::Opencode), 256, 1024)
+            .await
+            .unwrap();
         let id = engine.id().to_string();
 
         let ids = mgr.list().await;

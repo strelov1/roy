@@ -26,7 +26,7 @@ fn fake_acp_transport_with(extra_args: &[&str]) -> Arc<dyn Transport> {
 
 fn test_cfg() -> SessionSpawnConfig {
     SessionSpawnConfig {
-        agent: "test".into(),
+        agent: roy::AgentPreset::Opencode,
         cwd: std::env::current_dir().unwrap(),
         project_id: None,
         model: None,
