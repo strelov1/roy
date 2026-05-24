@@ -559,135 +559,38 @@ async fn cmd_fires(cmd: FiresCmd) -> anyhow::Result<()> {
 }
 
 async fn cmd_fire_now(args: FireNowArgs) -> anyhow::Result<ExitCode> {
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use roy_scheduler::roy_client::{self, FireOutcome};
-    use roy_scheduler::store::fires::{self, NewFire, TerminalUpdate};
-    use roy_scheduler::types::FireStatus;
+    use roy_scheduler::driver;
 
     let pool = open_pool().await?;
     let socket = default_socket();
-
-    let agent = store::agents::get_by_id(&pool, &args.agent_id)
-        .await?
-        .with_context(|| format!("agent {} not found", args.agent_id))?;
-
-    let fire_id = fires::insert_running(
-        &pool,
-        NewFire {
-            agent_id: agent.id.clone(),
-            trigger_id: None,
-        },
-    )
-    .await?;
-
-    let mut tags: BTreeMap<String, String> = BTreeMap::new();
-    tags.insert("roy-scheduler:agent_id".into(), agent.id.clone());
-    tags.insert("roy-scheduler:fire_id".into(), fire_id.clone());
-    tags.insert("roy-scheduler:kind".into(), "fire_now".into());
-
-    // build_target mirrors driver::build_target — kept inline to avoid
-    // exporting it for one caller. Persistent agents resume their session.
-    let target = if agent.is_persistent() {
-        if let Some(sid) = agent.persistent_session_id.as_ref() {
-            roy::FireTarget::Resume {
-                session_id: sid.clone(),
-            }
-        } else {
-            roy::FireTarget::Spawn {
-                preset: agent.preset.clone(),
-                project_id: agent.project_id.clone(),
-            }
-        }
-    } else {
-        roy::FireTarget::Spawn {
-            preset: agent.preset.clone(),
-            project_id: agent.project_id.clone(),
-        }
-    };
-
     let timeout = Duration::from_secs(args.fire_timeout.unwrap_or(600));
-    let outcome = roy_client::fire(&socket, target, agent.task.clone(), tags, timeout).await;
 
-    let (terminal, exit) = match outcome {
-        Ok(FireOutcome::Done(s)) => {
-            // Stop reason is rendered via Debug in FireSuccess.stop_reason
-            // (see roy_client.rs). roy::StopReason::Error renders as
-            // "Error(..)" — match the prefix to set exit code 1.
-            let is_err = s.stop_reason.starts_with("Error");
-            let exit = if is_err {
-                ExitCode::from(1)
+    let fire = driver::fire_agent_ad_hoc(&pool, &socket, &args.agent_id, timeout).await?;
+
+    // Map terminal status to exit code. The "ok" / "error" / "timeout"
+    // strings come from FireStatus's column representation.
+    let exit = match fire.status.as_str() {
+        "ok" => ExitCode::SUCCESS,
+        // A transport-level failure (no daemon, hang-up) surfaces here
+        // as an "error" row with the `roy_client:` prefix in
+        // error_message — exit 2 in that case, exit 1 for genuine
+        // agent-side errors and timeouts.
+        "error" => {
+            if fire
+                .error_message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("roy_client:"))
+            {
+                ExitCode::from(2)
             } else {
-                ExitCode::SUCCESS
-            };
-            (
-                TerminalUpdate {
-                    status: if is_err {
-                        FireStatus::Error
-                    } else {
-                        FireStatus::Ok
-                    },
-                    session_id: Some(s.session_id.clone()),
-                    seq_range: Some((s.seq_range.0 as i64, s.seq_range.1 as i64)),
-                    assistant_text: Some(s.assistant_text.clone()),
-                    cost_usd: s.cost_usd,
-                    stop_reason: Some(s.stop_reason.clone()),
-                    error_message: None,
-                },
-                exit,
-            )
+                ExitCode::from(1)
+            }
         }
-        Ok(FireOutcome::Timeout {
-            session_id,
-            partial_seq_range,
-        }) => (
-            TerminalUpdate {
-                status: FireStatus::Timeout,
-                session_id: Some(session_id),
-                seq_range: Some((partial_seq_range.0 as i64, partial_seq_range.1 as i64)),
-                assistant_text: None,
-                cost_usd: None,
-                stop_reason: None,
-                error_message: Some("fire timed out".into()),
-            },
-            ExitCode::from(1),
-        ),
-        Ok(FireOutcome::Error {
-            session_id,
-            code,
-            message,
-        }) => (
-            TerminalUpdate {
-                status: FireStatus::Error,
-                session_id,
-                seq_range: None,
-                assistant_text: None,
-                cost_usd: None,
-                stop_reason: None,
-                error_message: Some(format!("{code}: {message}")),
-            },
-            ExitCode::from(1),
-        ),
-        Err(e) => (
-            TerminalUpdate {
-                status: FireStatus::Error,
-                session_id: None,
-                seq_range: None,
-                assistant_text: None,
-                cost_usd: None,
-                stop_reason: None,
-                error_message: Some(format!("roy_client: {e:#}")),
-            },
-            // Transport / CLI error → exit 2.
-            ExitCode::from(2),
-        ),
+        _ => ExitCode::from(1),
     };
 
-    fires::update_terminal(&pool, &fire_id, terminal).await?;
-    let fire = fires::get_by_id(&pool, &fire_id)
-        .await?
-        .expect("fire row just inserted");
     print_json(&fire)?;
     Ok(exit)
 }
