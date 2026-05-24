@@ -1,413 +1,259 @@
 # Project entity — design
 
-Status: draft, awaiting user review.
+> **v2 (workspace-model) — current**. The original draft assumed `project.path`
+> was a user-chosen filesystem directory. That model was replaced before
+> implementation; the current code (branch `feature/projects`) implements the
+> workspace-model described below. The original v1 design is preserved at the
+> bottom of this document under "Appendix: v1 (superseded)".
+
+Status: implemented on `feature/projects`.
 Date: 2026-05-23.
 Author: brainstorm with `strelov1`.
 
 ## Goal
 
 Add a first-class **Project** entity to roy so sessions can be grouped by
-working directory in the web UI. A project is the unit of organisation
-visible in the sidebar; every session is owned by exactly one project.
-
-Concrete trigger: the user wants to be able to point at
-`/Users/i_strelov/Projects/claude-agent` (and other directories) as
-top-level entities in the sidebar and have all sessions in that
-directory live underneath.
+a named working directory in the web UI. A project is the unit of
+organisation visible in the sidebar; every session either belongs to one
+project or is an **orphan**.
 
 ## Non-goals
 
-- Per-project defaults (default agent / model / permission) — out of
-  scope, may follow.
+- Per-project defaults (default agent / model / permission) — out of scope.
 - Project icons / colours / descriptions — out of scope.
-- Moving a session between projects — out of scope. A session's
-  `project_id` is fixed at spawn.
-- Renaming a project's `path` — out of scope. Renaming `name` is in.
-- Detecting external `rm -rf` of a project directory beyond surfacing
-  the next stat failure to the UI.
+- Moving a session between projects — out of scope.
+- Renaming a project — out of scope in v2. Name is immutable.
+- External `rm -rf` detection beyond surfacing the next stat failure.
 
-## Decisions (resolved during brainstorm)
+## Decisions (v2)
 
 | # | Decision |
 |---|---|
-| 1 | Project = directory. `id` is a UUID; `path` and `name` are attributes. |
-| 2 | A session belongs to exactly one project; `session.cwd == project.path` is an invariant. |
-| 3 | Existing sessions are wiped manually (`rm ~/.roy/journals/*`); no migration code. |
-| 4 | Project fields: minimum — `{id, name, path, created_at}`. No defaults yet. |
-| 5 | CLI/MCP: `Spawn { cwd }` triggers `resolve_or_create` in the registry — no API breakage, auto-create on first use. |
-| 6 | Delete project = cascade (close + erase journals of all its sessions) with explicit user confirmation in UI. |
-| 7 | Persistence: single `~/.roy/projects.json` plus a new `project_id` field on every `SessionMetadata`. No per-project directory layout. |
+| 1 | A **workspace** directory owns all project and orphan-session subdirectories. Default: `~/.roy/workspace/`; override via `ROY_WORKSPACE` or `roy serve --workspace-dir`. |
+| 2 | Project = `{ id: UUID, name: String, path: PathBuf, created_at: u64 }`. `path = workspace_dir/name`. Name is the directory key; immutable after creation. |
+| 3 | Name validated against `^[A-Za-z0-9_-]+$`. |
+| 4 | A session belongs to exactly one project (cwd = `project.path`) OR is an **orphan** (cwd = `workspace_dir/<session_id>/`). |
+| 5 | `SessionMetadata.project_id: Option<String>` — `None` means orphan. |
+| 6 | `Spawn { project_id: Option<String>, … }` — no `cwd` field. `None` → orphan; directory created at spawn. |
+| 7 | `CreateProject { name }` — no `path` argument. Daemon derives `path = workspace_dir/name`. |
+| 8 | Delete project = cascade: removes registry entry + every session's `.jsonl`/`.meta.json`. Does **not** remove `<workspace>/<name>/` on disk. |
+| 9 | Persistence: `<journal_dir>/projects.json` plus `project_id: Option<String>` on `SessionMetadata`. |
+| 10 | No `RenameProject`. No auto-resolve on unknown `project_id` at startup — orphaned meta files are logged as warnings. |
 
 ## Architecture
 
-`ProjectRegistry` is owned by `SessionManager` (not a separate actor):
+`ProjectRegistry` is owned by `SessionManager`:
 
 ```
 Daemon
 └── SessionManager
     ├── engines: HashMap<sid, SessionEngine>
     ├── journal_dir: PathBuf
-    └── projects: ProjectRegistry         (new)
-        ├── file_path: PathBuf            (~/.roy/projects.json)
-        └── inner: std::sync::Mutex<RegistryState>   // not held across .await
+    ├── workspace_dir: PathBuf                     (new)
+    └── projects: ProjectRegistry                  (new)
+        ├── file_path: PathBuf    (<journal_dir>/projects.json)
+        └── inner: Mutex<RegistryState>
             ├── projects: Vec<Project>
-            └── sessions_by_project: HashMap<project_id, BTreeSet<session_id>>  (derived)
+            └── sessions_by_project: HashMap<project_id, BTreeSet<sid>>
 ```
 
-Rationale: project ops are infrequent file-backed mutations with no
-long-lived resources. A Mutex-guarded value is the right shape; an
-actor would add ceremony with no upside.
-
-`sessions_by_project` is rebuilt at daemon start by scanning meta
-files (same scan that already drives `list_archived` / `resume_all`).
+`sessions_by_project` is rebuilt at startup by scanning `.meta.json` files.
+If a meta references an unknown `project_id`, the session is logged as a
+warning and skipped — no auto-create, user must clean up by hand.
 
 ## Data model
 
-### `Project` (`crates/roy/src/project.rs`, new)
+### `Project` (`crates/roy/src/project.rs`)
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
-    pub id: String,        // UUID v4
-    pub name: String,
-    pub path: PathBuf,     // absolute, canonicalised, symlinks resolved
-    pub created_at: u64,   // unix seconds
+    pub id: String,          // UUID v4
+    pub name: String,        // ^[A-Za-z0-9_-]+$; immutable
+    pub path: PathBuf,       // workspace_dir/name
+    pub created_at: u64,     // unix seconds
 }
 ```
 
-### Registry file `~/.roy/projects.json`
+### Registry file `<journal_dir>/projects.json`
 
 ```json
 {
   "version": 1,
   "projects": [
-    {
-      "id": "1f7c…",
-      "name": "claude-agent",
-      "path": "/Users/i_strelov/Projects/claude-agent",
-      "created_at": 1722345600
-    }
+    { "id": "1f7c…", "name": "roy", "path": "/Users/alice/.roy/workspace/roy", "created_at": 1722345600 }
   ]
 }
 ```
 
-Atomic write via tmp + rename, identical pattern to
-`session_meta::write_metadata`. Missing `version` field is read as
-`v1`. Unknown `version` is a hard error (no silent ignore).
+Atomic write: temp file in same directory + `rename`.
+Missing `version` → `v1`. Unknown `version` → hard error.
 
-### `SessionMetadata` change
+### `SessionMetadata` (changed field)
 
-```rust
-pub struct SessionMetadata {
-    pub session_id: String,
-    pub agent: String,
-    pub cwd: PathBuf,
-    pub project_id: String,   // NEW — required, no default
-    // …unchanged: model, permission, resume_cursor, tags
-}
-```
+| field | type | meaning |
+|-------|------|---------|
+| `project_id` | `Option<String>` | UUID of owning project; `null` = orphan |
 
-`project_id` is **required**; deserialising an old meta file without
-it errors out. This is intentional — we already agreed to wipe the
-existing journal directory before deploying the change.
+`cwd` stays on `SessionMetadata` so files remain self-contained.
 
-`cwd` is kept on `SessionMetadata` even though it duplicates
-`project.path`. Trade-off: meta files stay self-contained (no
-registry lookup needed to interpret one). On a system with tens of
-sessions the duplication is negligible.
+## Wire protocol
 
-### Canonicalisation
-
-A single helper handles every path that enters the registry:
+### `ClientCommand`s
 
 ```rust
-fn canonicalize_for_project(p: &Path) -> Result<PathBuf> {
-    let abs = std::fs::canonicalize(p).map_err(RoyError::Io)?;
-    Ok(dunce::simplified(&abs).to_path_buf())
-}
+Spawn { agent, project_id: Option<String>, model, permission, resume }
+CreateProject { name: String }
+DeleteProject { project_id: String }
+ListProjects
 ```
 
-- Symlinks are resolved.
-- Non-existing path → `Io` error (we do not create directories on the
-  user's behalf).
-- Single gate prevents two equivalent paths from spawning two
-  projects.
+`Spawn.project_id = None` → orphan session; daemon creates
+`workspace_dir/<session_id>/` and sets that as `cwd`.
 
-## Wire protocol changes
+`CreateProject` creates `workspace_dir/<name>/` on disk and adds the
+registry entry.
 
-### New `ClientCommand`s
+### `ServerEvent`s (new and changed)
 
 ```rust
-ListProjects,
-CreateProject { path: PathBuf, name: Option<String> },
-RenameProject { project_id: String, name: String },
-DeleteProject { project_id: String },
+Spawned { session: String, project_id: Option<String>, resume_cursor: Option<String> }
+ProjectsListed { projects: Vec<Project> }
+ProjectCreated { project: Project }
+ProjectDeleted { project_id: String, deleted_sessions: Vec<String> }
 ```
 
-- `CreateProject.name == None` → daemon uses `basename(canonical_path)`.
-- `DeleteProject` is cascade and synchronous.
-
-### New `ServerEvent`s
-
-```rust
-ProjectsListed { projects: Vec<Project> },
-ProjectCreated { project: Project },
-ProjectRenamed { project: Project },                              // full object
-ProjectDeleted { project_id: String, deleted_sessions: Vec<String> },
-```
-
-### Changed events
-
-```rust
-Spawned {
-    session: String,
-    project_id: String,
-    project: Option<Project>,        // Some when auto-created in this spawn
-    resume_cursor: Option<String>,
-}
-
-pub struct SessionRef { pub id: String, pub project_id: String }
-
-Listed { sessions: Vec<SessionRef> },
-ListedArchived { sessions: Vec<SessionRef> },
-```
-
-`project_id` next to every session id lets the sidebar group in
-constant time without per-session `read_journal` calls.
+`SessionInfo.project_id: Option<String>` — included in `listed` and
+`listed_archived` payloads.
 
 ### New `ErrorCode`s
 
-```
-NoProject, ProjectExists, CreateProjectFailed, DeleteProjectFailed
-```
-
-### Why no Hello/version handshake
-
-Wire schema is bumped without backward compatibility. The only
-consumer is the web client in the sibling repo `roy-web`, deployed
-in lockstep with the daemon. If outside consumers appear later, a
-`Hello` event with `schema_version` becomes the migration vector.
+`no_project`, `project_exists`, `create_project_failed`,
+`delete_project_failed`, `invalid_project_name`.
 
 ## CLI
 
 ```bash
 roy projects list
-roy projects create <path> [--name NAME]
-roy projects rename <project_id|name> <new_name>
+roy projects create <name>
 roy projects delete <project_id|name> [--yes]
+roy run --project <name>          # project session
+roy run                            # orphan session
+roy serve --workspace-dir <path>
 ```
-
-`roy run --cwd /path` keeps its signature; output now contains
-`project_id` (and optionally a banner when a project was
-auto-created).
 
 ## MCP
 
-Three new tools in `crates/roy-cli/src/mcp.rs`:
+Three new tools:
 
 | Tool | Behaviour |
 |---|---|
 | `roy_list_projects` | wraps `ListProjects` |
-| `roy_create_project` | accepts `path`, optional `name` |
-| `roy_delete_project` | accepts `project_id`, returns deleted session ids |
+| `roy_create_project` | `name` only |
+| `roy_delete_project` | `project_id`; returns deleted session ids |
 
-Existing `roy_run` / `roy_run_detached` are unchanged in their
-parameters; their responses include `project_id`.
+`roy_run`, `roy_run_detached`, `roy_fire` accept `project_id` (no `cwd`).
 
 ## Spawn flow
 
-```rust
-impl ProjectRegistry {
-    pub fn resolve_or_create(&self, cwd: &Path)
-        -> Result<(String, Option<Project>)>
-    {
-        let canonical = canonicalize_for_project(cwd)?;
-        let mut state = self.inner.lock().expect("poisoned");
-        if let Some(p) = state.projects.iter().find(|p| p.path == canonical) {
-            return Ok((p.id.clone(), None));
-        }
-        let project = Project {
-            id: Uuid::new_v4().to_string(),
-            name: basename_or_path(&canonical),
-            path: canonical,
-            created_at: now_unix(),
-        };
-        let id = project.id.clone();
-        state.projects.push(project.clone());
-        self.persist(&state)?;
-        Ok((id, Some(project)))
-    }
-}
-```
+1. Client sends `Spawn { project_id: Some("abc…"), … }`.
+2. Daemon looks up project by id; errors with `no_project` if not found.
+3. `cwd = project.path`. Engine spawns agent there.
+4. `Spawned { session, project_id: Some("abc…"), … }` returned.
 
-- Single Mutex acquisition covers lookup + insert + persist; concurrent
-  `Spawn { cwd: same }` deterministically resolves to one project.
-- `Spawned.project: Some(p)` only when auto-created in this call.
+Orphan path: `project_id = None` → `cwd = workspace_dir/<session_id>/`
+(mkdir at spawn). `Spawned.project_id = None`.
 
 ## Cascade delete
 
-```rust
-pub async fn delete(&self, manager: &SessionManager, id: &str)
-    -> Result<Vec<String>>
-{
-    // Phase 1 — under lock: snapshot session ids, remove project, persist.
-    let session_ids = {
-        let mut state = self.inner.lock().expect("poisoned");
-        let pos = state.projects.iter().position(|p| p.id == id)
-            .ok_or(/* no_project */)?;
-        state.projects.remove(pos);
-        let sids = state.sessions_by_project.remove(id).unwrap_or_default();
-        self.persist(&state)?;
-        sids.into_iter().collect::<Vec<_>>()
-    };
-    // Phase 2 — outside lock: close engines + erase journals.
-    for sid in &session_ids {
-        let _ = manager.close(sid).await;
-        let _ = manager.delete_archive(sid).await;
-    }
-    Ok(session_ids)
-}
-```
+Phase 1 (under Mutex): snapshot session ids, remove project entry from
+`projects`, remove from `sessions_by_project`, persist registry.
 
-Lock is **not** held across IO. Per-session FS failures are
-`warn!`-logged; `ProjectDeleted` still fires — the user-visible state
-is consistent.
+Phase 2 (outside Mutex): for each session id — close live engine, delete
+`.jsonl` and `.meta.json`. Failures are `warn!`-logged; `ProjectDeleted`
+still fires.
 
-Race window between project removal and journal removal: a new spawn
-in the same cwd can auto-create a fresh project before the old
-sessions' files are gone. That is acceptable — new project has a new
-UUID, stale `.jsonl` files are unrelated and will be cleaned up
-imminently.
+On-disk `<workspace>/<name>/` directory is **not** removed — the user may
+have committed work in there. Documented in release notes.
 
 ## UI
 
-### Sidebar layout
-
 ```
-[logo]                       [toggle]
-+ New chat
-
 Projects ⌄
   ⊞ New project
   ▸ claude-agent
   ▾ roy
-    · Переписка с fernando        ← active
+    · Переписка с fernando     ← active
     · Проверка ссылки…
-    · Neia
-  ▸ Mercado
-  ▸ Investment
-
-No archived sessions
 ```
 
-### Behaviour
+- "New project" modal: `name` field only (path derived automatically).
+- Project kebab → Delete (no Rename in v2).
+- "New chat" defaults to last-used project; `None` → orphan.
+- Expansion state in `localStorage["roy:expanded_projects"]`.
 
-- Project row click toggles expansion. Expansion state persisted to
-  `localStorage["roy:expanded_projects"]` keyed by `project_id`.
-  Default: expanded when `currentSession` belongs to it, else
-  collapsed.
-- Session row click → existing `goto(\`/s/\${sid}\`)`.
-- Project row kebab `⋯` → Rename / Delete.
-- "New project" opens a modal with `path` (required) + `name`
-  (defaults to `basename(path)`).
-- "New chat" requires picking a project before spawning (dropdown
-  with last-used pre-selected).
-
-### Routes
-
-- `/` — landing.
-- `/s/<session_id>` — open session (unchanged).
-- `/p/<project_id>` — out of scope for v1.
-
-### Files
-
-| File | Purpose |
-|---|---|
-| `Sidebar.svelte` | hosts the section, existing |
-| `ProjectGroup.svelte` *(new)* | project row + nested session list |
-| `ProjectRow.svelte` *(new)* | header row (caret + icon + name + kebab) |
-| `NewProjectDialog.svelte` *(new)* | create modal |
-| `DeleteProjectDialog.svelte` *(new)* | confirm with "N sessions will be deleted" |
-| `SessionRow.svelte` | unchanged — reused as child |
-| `ChatHeader.svelte` | adds `<project name> / <session title>` breadcrumb |
-
-### State changes (`state.svelte.ts`)
-
-- `projects = $state<Project[]>([])`.
-- `live`/`archived` become `SessionRef[]` instead of `string[]`.
-- `expandedProjects = $state<Record<string, boolean>>(loadFromStorage())`
-  with `$effect` to persist.
-- `sessionsByProject = $derived(...)` — derived index used by sidebar.
-- New methods: `createProject`, `renameProject`, `deleteProject`.
-- `refreshSessions` additionally calls `ListProjects`.
-- On `ProjectDeleted.deleted_sessions`: clear `currentSession` if
-  contained, prune `titles`, `activeSessions`, `bgSubs`.
-
-## Errors and edge cases
+## Errors
 
 | Situation | Behaviour |
 |---|---|
-| `CreateProject` with non-existing path | `Error { code: CreateProjectFailed }` |
-| `CreateProject` with path already used | `Error { code: ProjectExists }`. UI suggests "Use existing '<name>'?" |
-| `Spawn` without cwd, no `ROY_CWD`, falls back to `current_dir` | works; auto-creates project on `current_dir` with warn log |
-| `DeleteProject` with unknown id | `Error { code: NoProject }` |
-| Cascade delete fails on one session's close | warn-logged, others proceed, `ProjectDeleted` still fires |
-| `projects.json` corrupt at startup | log error, init empty registry, rescan meta files to recover; back up bad file as `projects.json.bak` |
-| Meta references `project_id` not in registry (post-corruption) | rebuild a proxy entry: `id` from meta, `path` from meta's `cwd`, `name = basename_or_path(cwd)`, `created_at = now()`. Persisted on next mutation. Never leave a session orphan. |
-| Concurrent rename + delete same project | Mutex serialises; first wins |
-| `roy projects delete <name>` with ambiguous name | error "specify id" |
-| Directory removed externally | sidebar marks "⚠ missing" (icon only). Spawn into it errors; delete still works |
+| `CreateProject { name }` with invalid name | `Error { code: invalid_project_name }` |
+| `CreateProject { name }` already exists | `Error { code: project_exists }` |
+| `CreateProject` mkdir fails | `Error { code: create_project_failed }` |
+| `Spawn { project_id: Some(_) }` unknown id | `Error { code: no_project }` |
+| `DeleteProject` unknown id | `Error { code: no_project }` |
+| Cascade close/erase fails for a session | `warn!`-logged; others proceed |
+| `projects.json` corrupt at startup | log error, init empty registry, back up as `projects.json.bak` |
+| Meta references unknown `project_id` | warning + skip; not added to index |
 
 ## Testing
 
-### Unit — `crates/roy/src/project.rs`
+### Unit
 
-- `canonicalize_for_project` resolves symlinks, errors on missing.
-- `resolve_or_create` idempotent per cwd; distinguishes different cwds.
-- 100 concurrent `resolve_or_create` with the same cwd → exactly one
-  project.
-- `delete` snapshots under lock and does not hold the lock across IO.
-- `persist` is atomic — partial tmp without rename leaves prior file
-  intact.
-- `version: 2` registry → hard error.
+- `CreateProject` with invalid name → error.
+- `CreateProject` twice same name → `project_exists`.
+- `Spawn { project_id: None }` → orphan directory created.
+- `DeleteProject` cascade: meta + journal files gone; workspace dir stays.
+- Restart: `ProjectRegistry` rebuilt from `projects.json`; sessions re-indexed.
+- `projects.json` with unknown `version` → hard error.
 
-### Integration — `crates/roy/tests/projects.rs` (new)
-
-E2E via `tokio::io::duplex` (matches `daemon.rs` test style):
+### Integration (`crates/roy/tests/projects.rs`)
 
 - `CreateProject` + `ListProjects` round-trip.
-- `Spawn` with brand new cwd → `Spawned { project: Some(_) }`.
-- Second `Spawn` into same project → `project: None`, same `project_id`.
-- `DeleteProject` cascade — `Listed` no longer contains those
-  sessions; their `.jsonl` files gone.
-- `RenameProject` — `ListProjects` reflects new name.
-- Restart-and-resume: spawn then re-init `SessionManager` from disk;
-  `ListProjects` returns the same project; sessions still tied.
-- One of the above also runs over the WebSocket framing.
-
-### Regression on real-CLI smoke tests
-
-`real_claude` / `real_gemini` / `real_opencode` / `real_codex`:
-verify `Spawned.project_id` and auto-create flow against real
-directories.
-
-### Web
-
-Manual smoke (no unit harness in `roy-web` yet):
-
-1. Create project at `/Users/i_strelov/Projects/claude-agent`.
-2. Spawn chat — verify project auto-expands with the new session.
-3. Switch sessions across projects.
-4. Rename project.
-5. Delete project — confirm cascade.
+- `Spawn` with project → `Spawned.project_id` set; `cwd` = project path.
+- `Spawn` without project → `Spawned.project_id` null; orphan dir created.
+- `DeleteProject` cascade — sessions gone; `ListProjects` empty.
+- Restart-and-resume: manager rebuilt from disk; project and sessions intact.
+- One test over WebSocket framing.
 
 ## Rollout
 
-1. Wipe `~/.roy/journals/` (manual; documented in `CHANGELOG` /
-   release notes).
-2. Deploy daemon + `roy-web` together. No staged migration.
+1. Wipe `~/.roy/journals/` (manual; documented in release notes).
+2. Set `ROY_WORKSPACE` or `--workspace-dir` if non-default path desired.
+3. Deploy daemon + `roy-web` together. No staged migration.
 
-## Open questions
+---
 
-(None at design time — flagged for the implementation plan if any
-appear during build.)
+## Appendix: v1 (superseded)
+
+Preserved for context; superseded by the v2 model above.
+
+The original v1 design assumed that:
+
+- A project's `path` was a **user-chosen absolute filesystem directory**
+  (e.g. `/Users/alice/Projects/claude-agent`), not a subdirectory of a
+  managed workspace.
+- `CreateProject { path: PathBuf, name: Option<String> }` — name defaulted
+  to `basename(canonical_path)`.
+- `Spawn { cwd: PathBuf, … }` — a spawn would auto-call `resolve_or_create`
+  against the cwd, creating a project automatically on first use.
+- `project_id: String` was **required** on `SessionMetadata`; old meta files
+  without it would error. The journal dir was to be wiped before deploy.
+- `RenameProject { project_id, name }` and `ProjectRenamed` were included.
+- `Spawned` carried `project: Option<Project>` — `Some` when auto-created.
+- Path was canonicalised and deduplicated so two equivalent paths couldn't
+  spawn two projects.
+
+Why v1 was replaced: the workspace-model (v2) removes the dependency on
+the user's existing directory tree, makes `CreateProject` a pure name
+operation, and gives the daemon full control of every project's on-disk
+location. It also eliminates the ambiguous auto-create-on-spawn behaviour
+and the awkward "required project_id" constraint on old meta files.

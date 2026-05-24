@@ -95,7 +95,7 @@ triggers (and, indirectly, of every MCP tool result body).
 
 | op                | fields                                                                                          |
 |-------------------|-------------------------------------------------------------------------------------------------|
-| `spawn`           | `agent`, optional `cwd`, `model`, `permission`, `resume`                                         |
+| `spawn`           | `agent`, optional `project_id`, `model`, `permission`, `resume`                                 |
 | `attach`          | `session`, optional `from_seq`                                                                  |
 | `acquire_input`   | `session`                                                                                       |
 | `send`            | `session`, `text`                                                                               |
@@ -106,9 +106,24 @@ triggers (and, indirectly, of every MCP tool result body).
 | `list_archived`   | —                                                                                               |
 | `resume`          | `session`                                                                                       |
 | `read_journal`    | `session`, optional `from_seq`, optional `max_entries`                                          |
+| `list_projects`   | —                                                                                               |
+| `create_project`  | `name`                                                                                          |
+| `delete_project`  | `project_id`                                                                                    |
 
 `permission` is `"allow"` or `"deny"`. `agent` is one of `claude`,
 `gemini`, `opencode`, `codex` (with the default `TransportFactory`).
+
+`spawn.project_id` is a UUID string referencing an existing project; omit or
+set to `null` for an orphan session. When `project_id` is given, the session's
+`cwd` is the project directory (`workspace_dir/<name>/`). When absent, the
+daemon creates `workspace_dir/<session_id>/` and uses that as `cwd`.
+
+`create_project.name` must match `^[A-Za-z0-9_-]+$`. The daemon derives the
+on-disk path as `workspace_dir/name` and creates the directory.
+
+`delete_project` is a cascade: the project registry entry is removed and every
+session belonging to that project has its `.jsonl` and `.meta.json` deleted.
+The on-disk `workspace_dir/<name>/` directory is **not** removed.
 
 ### ServerEvent (server → client)
 
@@ -116,18 +131,37 @@ triggers (and, indirectly, of every MCP tool result body).
 
 | kind                | fields                                                                                                  |
 |---------------------|---------------------------------------------------------------------------------------------------------|
-| `spawned`           | `session`, optional `resume_cursor`                                                                     |
+| `spawned`           | `session`, optional `project_id`, optional `resume_cursor`                                              |
 | `attached`          | `session`, `seq_at_attach`                                                                              |
 | `frame`             | `session`, `entry` (the `JournalEntry` shape above)                                                     |
 | `input_acquired`    | `session`, `acquired: bool`                                                                             |
 | `input_released`    | `session`                                                                                               |
 | `detached`          | `session`                                                                                               |
 | `closed`            | `session`                                                                                               |
-| `listed`            | `sessions: [string]`                                                                                    |
-| `listed_archived`   | `sessions: [string]`                                                                                    |
+| `listed`            | `sessions: [{id, project_id}]`                                                                          |
+| `listed_archived`   | `sessions: [{id, project_id}]`                                                                          |
 | `resumed`           | `session`, optional `resume_cursor`                                                                     |
 | `journal_read`      | `session`, `entries: [JournalEntry]`, `next_seq`, `has_more: bool`                                       |
+| `projects_listed`   | `projects: [Project]`                                                                                   |
+| `project_created`   | `project: Project`                                                                                      |
+| `project_deleted`   | `project_id: string`, `deleted_sessions: [string]`                                                      |
 | `error`             | optional `session`, typed `code` (see below), `message`                                                 |
+
+`spawned.project_id` is `null` for an orphan session, a UUID string otherwise.
+
+`SessionInfo` shape (used in `listed` / `listed_archived`):
+
+```json
+{"id": "<session_id>", "project_id": "<uuid>" | null}
+```
+
+`project_id: null` indicates an orphan session.
+
+`Project` shape (used in `projects_listed` / `project_created`):
+
+```json
+{"id": "<uuid>", "name": "<name>", "path": "<absolute_path>", "created_at": 1722345600}
+```
 
 `spawned.resume_cursor` is the cursor to pass back to a later `spawn`'s
 `resume` field, or to `resume` directly.
@@ -141,7 +175,9 @@ triggers (and, indirectly, of every MCP tool result body).
 
 `bad_request`, `spawn_failed`, `no_session`, `attach_failed`,
 `archive_read_failed`, `no_lease`, `send_failed`, `close_failed`,
-`list_archived_failed`, `resume_failed`, `read_journal_failed`.
+`list_archived_failed`, `resume_failed`, `read_journal_failed`,
+`no_project`, `project_exists`, `create_project_failed`,
+`delete_project_failed`, `invalid_project_name`.
 
 Forward-compat: any unknown string is preserved in
 `ErrorCode::Other(s)` on parsing and round-trips verbatim — an older
