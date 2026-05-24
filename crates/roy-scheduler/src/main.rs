@@ -343,8 +343,97 @@ async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<()> {
     }
 }
 
-async fn cmd_triggers(_cmd: TriggersCmd) -> anyhow::Result<()> {
-    Ok(())
+async fn cmd_triggers(cmd: TriggersCmd) -> anyhow::Result<()> {
+    let pool = open_pool().await?;
+    match cmd {
+        TriggersCmd::Add(a) => cmd_triggers_add(&pool, a).await,
+        TriggersCmd::List { agent } => {
+            let v = match agent {
+                Some(id) => store::triggers::list_for_agent(&pool, &id).await?,
+                None => {
+                    // store::triggers has no `list_all` helper — do a raw query.
+                    sqlx::query_as::<_, roy_scheduler::types::Trigger>(
+                        "SELECT * FROM triggers ORDER BY created_at DESC",
+                    )
+                    .fetch_all(&pool)
+                    .await?
+                }
+            };
+            print_json(&v)
+        }
+        TriggersCmd::Rm { id } => {
+            let removed = store::triggers::delete(&pool, &id).await?;
+            print_json(serde_json::json!({ "id": id, "removed": removed }))
+        }
+        TriggersCmd::Pause { id } => {
+            store::triggers::pause_outside_txn(&pool, &id).await?;
+            print_json(serde_json::json!({ "id": id, "paused": true }))
+        }
+        TriggersCmd::Resume { id } => {
+            store::triggers::unpause(&pool, &id).await?;
+            print_json(serde_json::json!({ "id": id, "paused": false }))
+        }
+    }
+}
+
+async fn cmd_triggers_add(pool: &SqlitePool, a: TriggerAddArgs) -> anyhow::Result<()> {
+    use chrono::Utc;
+
+    // Validate that the referenced agent exists — clearer error than a
+    // SQLite FK constraint failure at INSERT time.
+    if store::agents::get_by_id(pool, &a.agent).await?.is_none() {
+        anyhow::bail!("agent {} not found", a.agent);
+    }
+
+    let trigger = match (a.cron.as_deref(), a.oneshot.as_deref()) {
+        (Some(expr), None) => {
+            // Parse-time validation. The ArgGroup already enforces XOR; we
+            // additionally verify croner accepts the expression and that the
+            // timezone is a valid IANA name BEFORE inserting the row.
+            croner::Cron::new(expr)
+                .parse()
+                .with_context(|| format!("invalid cron expression: {expr:?}"))?;
+            let tz: chrono_tz::Tz =
+                a.tz.parse()
+                    .with_context(|| format!("invalid timezone: {:?}", a.tz))?;
+            let next = compute_next_cron(expr, &tz)
+                .ok_or_else(|| anyhow::anyhow!("cron expression has no future occurrence"))?;
+            store::triggers::insert_cron(
+                pool,
+                store::triggers::NewCronTrigger {
+                    agent_id: a.agent,
+                    cron_expr: expr.to_string(),
+                    timezone: a.tz,
+                    next_fire_at: next,
+                },
+            )
+            .await?
+        }
+        (None, Some(when)) => {
+            let fire_at = chrono::DateTime::parse_from_rfc3339(when)
+                .with_context(|| format!("invalid RFC-3339 instant: {when:?}"))?
+                .with_timezone(&Utc);
+            store::triggers::insert_oneshot(
+                pool,
+                store::triggers::NewOneshotTrigger {
+                    agent_id: a.agent,
+                    fire_at,
+                },
+            )
+            .await?
+        }
+        // ArgGroup guarantees exactly one of cron/oneshot is set.
+        _ => unreachable!("clap ArgGroup enforces --cron|--oneshot XOR"),
+    };
+    print_json(&trigger)
+}
+
+fn compute_next_cron(expr: &str, tz: &chrono_tz::Tz) -> Option<chrono::DateTime<chrono::Utc>> {
+    let cron = croner::Cron::new(expr).parse().ok()?;
+    let now = chrono::Utc::now().with_timezone(tz);
+    cron.find_next_occurrence(&now, false)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
 }
 
 async fn cmd_subscribers(_cmd: SubscribersCmd) -> anyhow::Result<()> {
