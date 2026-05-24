@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use roy::{
     daemon::{Daemon, DefaultTransportFactory},
     project::Project,
-    ClientCommand, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
+    AgentsConfigStatus, ClientCommand, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -58,6 +58,11 @@ enum Cmd {
     Projects {
         #[command(subcommand)]
         cmd: ProjectsCmd,
+    },
+    /// Inspect configured agents at `~/.config/roy/agents.toml`.
+    Agents {
+        #[command(subcommand)]
+        cmd: AgentsCmd,
     },
 }
 
@@ -170,6 +175,22 @@ struct McpArgs {
 }
 
 #[derive(Subcommand)]
+enum AgentsCmd {
+    /// List configured agents (and optionally their models).
+    List(AgentsListArgs),
+}
+
+#[derive(clap::Args)]
+struct AgentsListArgs {
+    /// One row per (agent, model) instead of summary per agent.
+    #[arg(long)]
+    models: bool,
+    /// Machine-readable JSON output — the full AgentsList event.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
 enum ProjectsCmd {
     /// List projects.
     List,
@@ -225,6 +246,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
             mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
         }
         Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
+        Cmd::Agents { cmd } => cmd_agents(cmd).await,
     }
 }
 
@@ -718,6 +740,78 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
         }
         other => anyhow::bail!("unexpected response to Fire: {other:?}"),
     }
+}
+
+async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<ExitCode> {
+    match cmd {
+        AgentsCmd::List(args) => cmd_agents_list(args).await,
+    }
+}
+
+async fn cmd_agents_list(args: AgentsListArgs) -> anyhow::Result<ExitCode> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    send_cmd(&mut writer, &ClientCommand::ListAgents).await?;
+    let ev = read_event(&mut events).await?;
+    let ServerEvent::AgentsList {
+        agents,
+        config_path,
+        status,
+    } = ev
+    else {
+        anyhow::bail!("unexpected response to ListAgents: {ev:?}");
+    };
+
+    if args.json {
+        let payload = serde_json::json!({
+            "agents": agents,
+            "config_path": config_path,
+            "status": status,
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    match &status {
+        AgentsConfigStatus::Created => {
+            eprintln!("created sample at {}", config_path.display());
+        }
+        AgentsConfigStatus::Invalid { reason } => {
+            eprintln!("config invalid ({}): {reason}", config_path.display());
+            return Ok(ExitCode::from(1));
+        }
+        AgentsConfigStatus::Ok if agents.is_empty() => {
+            eprintln!("no agents configured in {}", config_path.display());
+        }
+        AgentsConfigStatus::Ok => {}
+    }
+
+    if args.models {
+        for a in &agents {
+            for m in &a.models {
+                let mark = if m.default { "*default" } else { "" };
+                println!("{}\t{}\t{}\t{}", a.preset, m.id, m.label, mark);
+            }
+        }
+    } else {
+        for a in &agents {
+            let default = a
+                .models
+                .iter()
+                .find(|m| m.default)
+                .map(|m| m.id.as_str())
+                .unwrap_or("-");
+            println!(
+                "{}\t{} models\t(default: {})",
+                a.preset,
+                a.models.len(),
+                default
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<()> {
