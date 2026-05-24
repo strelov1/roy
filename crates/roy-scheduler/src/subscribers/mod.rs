@@ -20,7 +20,6 @@ pub trait Subscriber: Send + Sync {
 }
 
 pub struct FireCtx<'a> {
-    pub pool: &'a sqlx::SqlitePool,
     pub socket_path: &'a std::path::Path,
     pub fire: &'a crate::types::Fire,
     pub agent_name: &'a str,

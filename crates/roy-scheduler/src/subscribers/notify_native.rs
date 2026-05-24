@@ -22,16 +22,11 @@ pub fn parse_config(json: &str) -> Result<Config> {
     serde_json::from_str(json).context("notify_native config")
 }
 
-pub struct ExecOutcome {
-    pub status: &'static str,
-    pub error_message: Option<String>,
-}
-
 pub async fn execute_with_cfg(
     cfg: &Config,
     agent_name: &str,
     success: &FireSuccess,
-) -> ExecOutcome {
+) -> super::Outcome {
     let title = cfg
         .title
         .clone()
@@ -45,7 +40,7 @@ pub async fn execute_with_cfg(
     // are unchanged.
     tokio::task::spawn_blocking(move || run_blocking(title, body))
         .await
-        .unwrap_or_else(|_| err("spawn_blocking panicked".into()))
+        .unwrap_or_else(|_| super::Outcome::error("spawn_blocking panicked"))
 }
 
 pub fn build(config_json: &str) -> Result<Box<dyn super::Subscriber>> {
@@ -63,18 +58,11 @@ impl super::Subscriber for NotifyNativeSubscriber {
         let Some(success) = ctx.success else {
             return super::Outcome::skipped("notify_native skipped (fire did not succeed)");
         };
-        let exec = execute_with_cfg(&self.cfg, ctx.agent_name, success).await;
-        match exec.status {
-            "ok" => super::Outcome::ok(),
-            _ => super::Outcome::error(
-                exec.error_message
-                    .unwrap_or_else(|| "notify_native failed".into()),
-            ),
-        }
+        execute_with_cfg(&self.cfg, ctx.agent_name, success).await
     }
 }
 
-fn run_blocking(title: String, body: String) -> ExecOutcome {
+fn run_blocking(title: String, body: String) -> super::Outcome {
     #[cfg(target_os = "macos")]
     {
         let script = format!(
@@ -83,9 +71,9 @@ fn run_blocking(title: String, body: String) -> ExecOutcome {
             escape_applescript(&title),
         );
         match Command::new("osascript").arg("-e").arg(script).status() {
-            Ok(s) if s.success() => return ok(),
-            Ok(s) => return err(format!("osascript exited {s}")),
-            Err(e) => return err(format!("osascript spawn: {e}")),
+            Ok(s) if s.success() => return super::Outcome::ok(),
+            Ok(s) => return super::Outcome::error(format!("osascript exited {s}")),
+            Err(e) => return super::Outcome::error(format!("osascript spawn: {e}")),
         }
     }
 
@@ -94,9 +82,9 @@ fn run_blocking(title: String, body: String) -> ExecOutcome {
         let mut cmd = Command::new("notify-send");
         cmd.arg(&title).arg(&body);
         match cmd.status() {
-            Ok(s) if s.success() => return ok(),
-            Ok(s) => return err(format!("notify-send exited {s}")),
-            Err(e) => return err(format!("notify-send spawn: {e}")),
+            Ok(s) if s.success() => return super::Outcome::ok(),
+            Ok(s) => return super::Outcome::error(format!("notify-send exited {s}")),
+            Err(e) => return super::Outcome::error(format!("notify-send spawn: {e}")),
         }
     }
 
@@ -106,21 +94,7 @@ fn run_blocking(title: String, body: String) -> ExecOutcome {
             target = "roy_scheduler::subscribers::notify_native",
             "no native notifier on this platform; title={title} body={body}"
         );
-        ok()
-    }
-}
-
-fn ok() -> ExecOutcome {
-    ExecOutcome {
-        status: "ok",
-        error_message: None,
-    }
-}
-
-fn err(msg: String) -> ExecOutcome {
-    ExecOutcome {
-        status: "error",
-        error_message: Some(msg),
+        super::Outcome::ok()
     }
 }
 

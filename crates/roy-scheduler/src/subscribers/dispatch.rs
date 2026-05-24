@@ -24,7 +24,6 @@ pub async fn dispatch(
     let subs = sub_store::load_for_fire(pool, &fire.agent_id, fire.trigger_id.as_deref()).await?;
 
     let ctx = super::FireCtx {
-        pool,
         socket_path,
         fire,
         agent_name,
