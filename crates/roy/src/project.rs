@@ -73,6 +73,8 @@ struct RegistryState {
     projects: Vec<Project>,
     /// Derived index: not serialised, rebuilt at init from meta files.
     sessions_by_project: HashMap<String, BTreeSet<String>>,
+    /// Reverse index for O(1) `project_of` lookups.
+    session_to_project: HashMap<String, String>,
 }
 
 /// Persistent registry of projects. Mutex-guarded value, **never** held across
@@ -121,6 +123,7 @@ impl ProjectRegistry {
             inner: Mutex::new(RegistryState {
                 projects,
                 sessions_by_project: HashMap::new(),
+                session_to_project: HashMap::new(),
             }),
         })
     }
@@ -214,12 +217,13 @@ impl ProjectRegistry {
             .position(|p| p.id == id)
             .ok_or_else(|| RoyError::Protocol(format!("no_project: {id}")))?;
         state.projects.remove(pos);
-        let sids = state
+        let sids: Vec<String> = state
             .sessions_by_project
             .remove(id)
             .unwrap_or_default()
             .into_iter()
             .collect();
+        state.session_to_project.retain(|_sid, pid| pid != id);
         self.persist(&state)?;
         Ok(sids)
     }
@@ -232,6 +236,9 @@ impl ProjectRegistry {
             .entry(project_id.to_string())
             .or_default()
             .insert(session_id.to_string());
+        state
+            .session_to_project
+            .insert(session_id.to_string(), project_id.to_string());
     }
 
     /// Unregister a session. Idempotent.
@@ -240,6 +247,7 @@ impl ProjectRegistry {
         if let Some(set) = state.sessions_by_project.get_mut(project_id) {
             set.remove(session_id);
         }
+        state.session_to_project.remove(session_id);
     }
 
     /// Snapshot of session ids attached to a project.
@@ -255,14 +263,12 @@ impl ProjectRegistry {
 
     /// Look up the project id (if any) for a session.
     pub fn project_of(&self, session_id: &str) -> Option<String> {
-        let state = self.inner.lock().expect("registry poisoned");
-        state.sessions_by_project.iter().find_map(|(pid, sids)| {
-            if sids.contains(session_id) {
-                Some(pid.clone())
-            } else {
-                None
-            }
-        })
+        self.inner
+            .lock()
+            .expect("registry poisoned")
+            .session_to_project
+            .get(session_id)
+            .cloned()
     }
 }
 
