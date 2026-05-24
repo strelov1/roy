@@ -569,6 +569,10 @@ impl Daemon {
         tags: BTreeMap<String, String>,
         event_tx: &EventTx,
     ) {
+        let _ = event_tx.send(ServerEvent::Spawning {
+            agent: agent.to_string(),
+            project_id: project_id.clone(),
+        });
         let (cwd, fixed_session_id) = match self.resolve_spawn_cwd(project_id.as_deref()) {
             Ok(pair) => pair,
             Err(e) => {
@@ -1555,6 +1559,13 @@ mod tests {
             },
         )
         .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::Spawning { agent, project_id } => {
+                assert_eq!(agent, "opencode");
+                assert_eq!(project_id, None);
+            }
+            other => panic!("expected Spawning ack, got {other:?}"),
+        }
         let session = match next_event_line(&mut events).await {
             ServerEvent::Spawned { session, .. } => session,
             other => panic!("expected Spawned, got {other:?}"),
@@ -1669,6 +1680,7 @@ mod tests {
             },
         )
         .await;
+        let _ = next_event_line(&mut events).await; // Spawning ack
         let session = match next_event_line(&mut events).await {
             ServerEvent::Spawned { session, .. } => session,
             other => panic!("expected Spawned, got {other:?}"),
@@ -1808,6 +1820,7 @@ mod tests {
             },
         )
         .await;
+        let _ = next_event_line(&mut events).await; // Spawning ack
         let session = match next_event_line(&mut events).await {
             ServerEvent::Spawned { session, .. } => session,
             other => panic!("expected Spawned, got {other:?}"),
@@ -1989,6 +2002,7 @@ mod tests {
             },
         )
         .await;
+        let _ = next_event_line(&mut events).await; // Spawning ack
         let session = match next_event_line(&mut events).await {
             ServerEvent::Spawned { session, .. } => session,
             other => panic!("expected Spawned, got {other:?}"),
@@ -2146,6 +2160,7 @@ mod tests {
             },
         )
         .await;
+        let _ = next_event_line(&mut events).await; // Spawning ack
         let fresh_cursor = match next_event_line(&mut events).await {
             ServerEvent::Spawned { resume_cursor, .. } => resume_cursor,
             other => panic!("expected Spawned, got {other:?}"),
@@ -2166,6 +2181,7 @@ mod tests {
             },
         )
         .await;
+        let _ = next_event_line(&mut events).await; // Spawning ack
         let resumed_cursor = match next_event_line(&mut events).await {
             ServerEvent::Spawned { resume_cursor, .. } => resume_cursor,
             other => panic!("expected Spawned, got {other:?}"),
@@ -2236,6 +2252,13 @@ mod tests {
             },
         )
         .await;
+        match ws_recv(&mut ws).await {
+            ServerEvent::Spawning { agent, project_id } => {
+                assert_eq!(agent, "opencode");
+                assert_eq!(project_id, None);
+            }
+            other => panic!("expected Spawning ack, got {other:?}"),
+        }
         let session = match ws_recv(&mut ws).await {
             ServerEvent::Spawned { session, .. } => session,
             other => panic!("expected Spawned, got {other:?}"),
@@ -2354,6 +2377,7 @@ mod tests {
             },
         )
         .await;
+        let _ = next_event_line(&mut events1).await; // Spawning ack
         let session = match next_event_line(&mut events1).await {
             ServerEvent::Spawned { session, .. } => session,
             other => panic!("expected Spawned, got {other:?}"),
@@ -2509,6 +2533,7 @@ mod tests {
             },
         )
         .await;
+        let _ = next_event_line(&mut events).await; // Spawning ack
         let session = match next_event_line(&mut events).await {
             ServerEvent::Spawned { session, .. } => session,
             other => panic!("expected Spawned, got {other:?}"),
@@ -2690,6 +2715,7 @@ mod tests {
             },
         )
         .await;
+        let _ = next_event_line(&mut events).await; // Spawning ack
         let (spawned_pid, session_id) = match next_event_line(&mut events).await {
             ServerEvent::Spawned {
                 project_id,
@@ -2748,6 +2774,7 @@ mod tests {
             },
         )
         .await;
+        let _ = next_event_line(&mut events).await; // Spawning ack
         let (project_id, session_id) = match next_event_line(&mut events).await {
             ServerEvent::Spawned {
                 project_id,
@@ -2819,6 +2846,7 @@ mod tests {
             },
         )
         .await;
+        let _ = next_event_line(&mut events).await; // Spawning ack
         let session_id = match next_event_line(&mut events).await {
             ServerEvent::Spawned { session, .. } => session,
             other => panic!("expected Spawned, got {other:?}"),
