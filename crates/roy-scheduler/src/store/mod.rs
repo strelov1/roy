@@ -5,4 +5,4 @@
 //! `DateTime<Utc>` — sqlx serializes them as ISO-8601 TEXT.
 
 pub mod agents;
-// More modules added by subsequent tasks: triggers, fires, subscribers.
+pub mod triggers;
