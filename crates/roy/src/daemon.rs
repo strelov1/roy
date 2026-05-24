@@ -532,6 +532,25 @@ impl Daemon {
         }
     }
 
+    /// Resolve `(cwd, fixed_session_id)` for spawn. `project_id = Some(id)` →
+    /// look up the project, use its `path`, no fixed session id (engine mints
+    /// its own). `None` → mint a new UUID, mkdir `<workspace>/<uuid>/`, return
+    /// that as cwd with the same UUID as `fixed_session_id` so the engine
+    /// reuses it.
+    fn resolve_spawn_cwd(&self, project_id: Option<&str>) -> Result<(PathBuf, Option<String>)> {
+        match project_id {
+            Some(pid) => {
+                let path = self.manager.projects().project_path(pid)?;
+                Ok((path, None))
+            }
+            None => {
+                let sid = uuid::Uuid::new_v4().to_string();
+                let path = self.manager.projects().allocate_orphan_session_dir(&sid)?;
+                Ok((path, Some(sid)))
+            }
+        }
+    }
+
     async fn handle_spawn(
         self: &Arc<Self>,
         agent: String,
@@ -542,27 +561,16 @@ impl Daemon {
         tags: BTreeMap<String, String>,
         event_tx: &EventTx,
     ) {
-        let (cwd, fixed_session_id) = match project_id.as_deref() {
-            Some(pid) => {
-                // Use the project's path as cwd.
-                match self.manager.projects().project_path(pid) {
-                    Ok(p) => (p, None),
-                    Err(e) => {
-                        send_error(event_tx, None, ErrorCode::NoProject, e.to_string());
-                        return;
-                    }
-                }
-            }
-            None => {
-                // Orphan: allocate workspace dir named after the new session UUID.
-                let sid = uuid::Uuid::new_v4().to_string();
-                match self.manager.projects().allocate_orphan_session_dir(&sid) {
-                    Ok(p) => (p, Some(sid)),
-                    Err(e) => {
-                        send_error(event_tx, None, ErrorCode::SpawnFailed, e.to_string());
-                        return;
-                    }
-                }
+        let (cwd, fixed_session_id) = match self.resolve_spawn_cwd(project_id.as_deref()) {
+            Ok(pair) => pair,
+            Err(e) => {
+                let code = if project_id.is_some() {
+                    ErrorCode::NoProject
+                } else {
+                    ErrorCode::SpawnFailed
+                };
+                send_error(event_tx, None, code, e.to_string());
+                return;
             }
         };
         let cfg = SessionSpawnConfig {
@@ -746,31 +754,20 @@ impl Daemon {
         // 1. Spawn or Resume
         let engine = match target {
             FireTarget::Spawn { preset, project_id } => {
-                let (cwd, fixed_session_id) = match project_id.as_deref() {
-                    Some(pid) => match self.manager.projects().project_path(pid) {
-                        Ok(p) => (p, None),
-                        Err(e) => {
-                            let _ = event_tx.send(ServerEvent::FireError {
-                                session: None,
-                                code: ErrorCode::NoProject,
-                                message: e.to_string(),
-                            });
-                            return;
-                        }
-                    },
-                    None => {
-                        let sid = uuid::Uuid::new_v4().to_string();
-                        match self.manager.projects().allocate_orphan_session_dir(&sid) {
-                            Ok(p) => (p, Some(sid)),
-                            Err(e) => {
-                                let _ = event_tx.send(ServerEvent::FireError {
-                                    session: None,
-                                    code: ErrorCode::SpawnFailed,
-                                    message: e.to_string(),
-                                });
-                                return;
-                            }
-                        }
+                let (cwd, fixed_session_id) = match self.resolve_spawn_cwd(project_id.as_deref()) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        let code = if project_id.is_some() {
+                            ErrorCode::NoProject
+                        } else {
+                            ErrorCode::SpawnFailed
+                        };
+                        let _ = event_tx.send(ServerEvent::FireError {
+                            session: None,
+                            code,
+                            message: e.to_string(),
+                        });
+                        return;
                     }
                 };
                 let cfg = SessionSpawnConfig {
