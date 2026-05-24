@@ -271,4 +271,110 @@ mod tests {
         assert!(matches!(out, FireOutcome::Done { session, assistant_text }
             if session == "abc" && assistant_text == "resumed reply"));
     }
+
+    #[tokio::test]
+    async fn fire_error_is_returned_verbatim() {
+        let (client, server) = tokio::io::duplex(8192);
+        tokio::spawn(fake_daemon(
+            server,
+            ServerEvent::FireError {
+                session: Some("sid".into()),
+                code: ErrorCode::SpawnFailed,
+                message: "agent crashed".into(),
+            },
+            |_| {},
+        ));
+        let out = fire_via_stream(
+            client,
+            FireTarget::Spawn {
+                preset: "claude".into(),
+                project_id: None,
+            },
+            "x".into(),
+            BTreeMap::new(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        match out {
+            FireOutcome::Error {
+                session,
+                code,
+                message,
+            } => {
+                assert_eq!(session.as_deref(), Some("sid"));
+                assert_eq!(code, ErrorCode::SpawnFailed);
+                assert_eq!(message, "agent crashed");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fire_timeout_is_mapped() {
+        let (client, server) = tokio::io::duplex(8192);
+        tokio::spawn(fake_daemon(
+            server,
+            ServerEvent::FireTimeout {
+                session: "sid".into(),
+                partial_seq_range: (0, 0),
+            },
+            |_| {},
+        ));
+        let out = fire_via_stream(
+            client,
+            FireTarget::Resume {
+                session_id: "sid".into(),
+            },
+            "x".into(),
+            BTreeMap::new(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        match out {
+            FireOutcome::Timeout { session } => {
+                assert_eq!(session.as_deref(), Some("sid"));
+            }
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_error_event_is_mapped() {
+        let (client, server) = tokio::io::duplex(8192);
+        tokio::spawn(fake_daemon(
+            server,
+            ServerEvent::Error {
+                session: None,
+                code: ErrorCode::BadRequest,
+                message: "nope".into(),
+            },
+            |_| {},
+        ));
+        let out = fire_via_stream(
+            client,
+            FireTarget::Spawn {
+                preset: "claude".into(),
+                project_id: None,
+            },
+            "x".into(),
+            BTreeMap::new(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        match out {
+            FireOutcome::Error {
+                session,
+                code,
+                message,
+            } => {
+                assert!(session.is_none());
+                assert_eq!(code, ErrorCode::BadRequest);
+                assert_eq!(message, "nope");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
 }
