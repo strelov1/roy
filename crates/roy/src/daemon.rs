@@ -22,6 +22,7 @@ use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
+use crate::agents_config::AgentPreset;
 use crate::control::{ClientCommand, ErrorCode, FireTarget, ServerEvent};
 use crate::engine::{InputLease, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
@@ -99,12 +100,12 @@ fn send_error(tx: &EventTx, session: Option<String>, code: ErrorCode, message: i
     });
 }
 
-/// How the daemon builds a `Transport` from an agent name. Pluggable so the
+/// How the daemon builds a `Transport` from an agent preset. Pluggable so the
 /// daemon can be tested against fake agents without touching global state.
 pub trait TransportFactory: Send + Sync {
     fn build(
         &self,
-        agent: &str,
+        agent: AgentPreset,
         model: Option<&str>,
         permission: Option<&str>,
     ) -> Result<Arc<dyn Transport>>;
@@ -116,18 +117,15 @@ pub struct DefaultTransportFactory;
 impl TransportFactory for DefaultTransportFactory {
     fn build(
         &self,
-        agent: &str,
+        agent: AgentPreset,
         _model: Option<&str>,
         permission: Option<&str>,
     ) -> Result<Arc<dyn Transport>> {
         let mut config = match agent {
-            "claude" => AcpConfig::claude(),
-            "gemini" => AcpConfig::gemini(),
-            "opencode" => AcpConfig::opencode(),
-            "codex" => AcpConfig::codex(),
-            other => {
-                return Err(RoyError::Protocol(format!("unknown agent: {other}")));
-            }
+            AgentPreset::Claude => AcpConfig::claude(),
+            AgentPreset::Gemini => AcpConfig::gemini(),
+            AgentPreset::Opencode => AcpConfig::opencode(),
+            AgentPreset::Codex => AcpConfig::codex(),
         };
         if let Some(p) = permission {
             config.permission_policy = match p {
@@ -1352,7 +1350,7 @@ mod tests {
     impl TransportFactory for FakeAcpFactory {
         fn build(
             &self,
-            _agent: &str,
+            _agent: AgentPreset,
             _model: Option<&str>,
             _permission: Option<&str>,
         ) -> Result<Arc<dyn Transport>> {

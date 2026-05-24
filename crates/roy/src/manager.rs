@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use crate::agents_config::AgentPreset;
 use crate::daemon::TransportFactory;
 use crate::engine::{EngineOpts, SessionEngine, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
@@ -59,9 +60,10 @@ impl SessionManager {
         broadcast_capacity: usize,
         mem_capacity: usize,
     ) -> Result<Arc<SessionEngine>> {
+        let preset: AgentPreset = cfg.agent.parse().map_err(RoyError::Protocol)?;
         let transport =
             self.factory
-                .build(&cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
+                .build(preset, cfg.model.as_deref(), cfg.permission.as_deref())?;
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
@@ -108,9 +110,10 @@ impl SessionManager {
             fixed_session_id: Some(session_id.to_string()),
             tags: meta.tags,
         };
+        let preset: AgentPreset = cfg.agent.parse().map_err(RoyError::Protocol)?;
         let transport =
             self.factory
-                .build(&cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
+                .build(preset, cfg.model.as_deref(), cfg.permission.as_deref())?;
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
@@ -341,12 +344,12 @@ mod tests {
     use std::time::Duration;
 
     /// Test factory that always builds the fake ACP agent regardless of the
-    /// requested agent name.
+    /// requested agent preset.
     struct FakeFactory;
     impl TransportFactory for FakeFactory {
         fn build(
             &self,
-            _agent: &str,
+            _agent: AgentPreset,
             _model: Option<&str>,
             _permission: Option<&str>,
         ) -> Result<Arc<dyn Transport>> {
@@ -393,8 +396,8 @@ mod tests {
         let mgr = new_mgr(&dir);
 
         // Spawn → close two sessions to populate journals + metadata.
-        let e1 = mgr.spawn(orphan_cfg("a"), 256, 1024).await.unwrap();
-        let e2 = mgr.spawn(orphan_cfg("b"), 256, 1024).await.unwrap();
+        let e1 = mgr.spawn(orphan_cfg("opencode"), 256, 1024).await.unwrap();
+        let e2 = mgr.spawn(orphan_cfg("claude"), 256, 1024).await.unwrap();
         let id1 = e1.id().to_string();
         let id2 = e2.id().to_string();
         mgr.close(&id1).await.unwrap();

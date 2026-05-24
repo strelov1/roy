@@ -47,6 +47,20 @@ impl std::fmt::Display for AgentPreset {
     }
 }
 
+impl std::str::FromStr for AgentPreset {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "claude" => Ok(AgentPreset::Claude),
+            "gemini" => Ok(AgentPreset::Gemini),
+            "opencode" => Ok(AgentPreset::Opencode),
+            "codex" => Ok(AgentPreset::Codex),
+            other => Err(format!("unknown agent: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntry {
     pub id: String,
