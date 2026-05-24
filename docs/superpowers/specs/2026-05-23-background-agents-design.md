@@ -141,6 +141,7 @@ Wire surface:
 | `roy-scheduler:trigger_id`             | trigger ulid (omitted on ad-hoc fires) |
 | `roy-scheduler:fire_id`                | fire ulid                   |
 | `roy-scheduler:parent_session_id`      | parent roy session id (omitted if no `inject_parent` subscriber) |
+| `roy-scheduler:initiated_by_session`   | session id of the caller that issued `fire-now` (omitted for cron / oneshot fires) |
 | `roy-scheduler:kind`                   | `background_fire`           |
 
 Other layers pick their own prefixes; there is no central registry.
