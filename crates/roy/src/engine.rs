@@ -4,10 +4,11 @@
 //!
 //! See `docs/architecture.md` for the design.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::{Stream, StreamExt};
@@ -43,16 +44,27 @@ impl EngineOpts {
 /// Inputs that uniquely identify a session at spawn (or resume) time. Stored
 /// as `SessionMetadata` beside the journal so the daemon can resurrect a live
 /// session after a restart.
+///
+/// `project_id = None` means the session is orphan (lives at
+/// `<workspace>/<session_id>/`). `fixed_session_id` pins the UUID when the
+/// daemon needs to know it before the engine mints one — required for orphan
+/// sessions where the dir is pre-created as `<workspace>/<session_id>/`.
 #[derive(Debug, Clone)]
 pub struct SessionSpawnConfig {
     pub agent: String,
     pub cwd: PathBuf,
+    pub project_id: Option<String>,
     pub model: Option<String>,
     pub permission: Option<String>,
     /// Forwarded to `Transport::open` so the agent side resumes via its
     /// native mechanism (e.g. ACP `session/load`). The roy-side session id
     /// and journal are still freshly minted on `spawn`.
     pub resume_cursor: Option<String>,
+    /// When set, the engine uses this value as the session UUID instead of
+    /// minting a fresh one. Used by orphan spawn so the daemon can name the
+    /// workspace dir after the session id before the engine is constructed.
+    pub fixed_session_id: Option<String>,
+    pub tags: BTreeMap<String, String>,
 }
 
 /// Owned by `SessionManager` (or directly by callers in single-session use).
@@ -61,9 +73,13 @@ pub struct SessionEngine {
     journal_dir: PathBuf,
     agent: String,
     cwd: PathBuf,
-    model: Option<String>,
+    project_id: Option<String>,
+    /// Display label only; the daemon doesn't feed it back into the
+    /// transport. `set_model` mutates it and rewrites on-disk metadata.
+    model: StdMutex<Option<String>>,
     permission: Option<String>,
     resume_cursor: StdMutex<Option<String>>,
+    tags: StdMutex<BTreeMap<String, String>>,
     journal: Arc<Journal>,
     broadcast_tx: broadcast::Sender<JournalEntry>,
     input_tx: mpsc::UnboundedSender<Cmd>,
@@ -94,7 +110,10 @@ impl SessionEngine {
         opts: EngineOpts,
         cfg: SessionSpawnConfig,
     ) -> Result<Arc<Self>> {
-        let session_id = Uuid::new_v4().to_string();
+        let session_id = cfg
+            .fixed_session_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let journal =
             Arc::new(Journal::open(&opts.journal_dir, &session_id, opts.mem_capacity).await?);
         Self::start(transport, opts, session_id, journal, cfg).await
@@ -135,9 +154,11 @@ impl SessionEngine {
             journal_dir: opts.journal_dir.clone(),
             agent: cfg.agent.clone(),
             cwd: cfg.cwd.clone(),
-            model: cfg.model.clone(),
+            project_id: cfg.project_id.clone(),
+            model: StdMutex::new(cfg.model.clone()),
             permission: cfg.permission.clone(),
             resume_cursor: StdMutex::new(initial_cursor.clone()),
+            tags: StdMutex::new(cfg.tags.clone()),
             journal,
             broadcast_tx,
             input_tx,
@@ -154,9 +175,11 @@ impl SessionEngine {
                 session_id,
                 agent: cfg.agent,
                 cwd: cfg.cwd,
+                project_id: cfg.project_id, // Option<String> — None = orphan
                 model: cfg.model,
                 permission: cfg.permission,
                 resume_cursor: initial_cursor,
+                tags: cfg.tags,
             },
         )
         .await?;
@@ -181,6 +204,39 @@ impl SessionEngine {
         &self.agent
     }
 
+    pub fn cwd(&self) -> &PathBuf {
+        &self.cwd
+    }
+
+    pub fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
+
+    /// LLM label currently associated with the session (e.g.
+    /// `claude-opus-4-7`). Can change mid-session via `set_model`.
+    pub fn model(&self) -> Option<String> {
+        self.model.lock().unwrap().clone()
+    }
+
+    /// Update the model label, persist it, and broadcast the change so
+    /// every attached subscriber sees it through their Frame stream.
+    /// Returns the new value so callers can echo it on the wire reply.
+    pub async fn set_model(&self, model: String) -> Result<String> {
+        *self.model.lock().unwrap() = Some(model.clone());
+        self.persist_metadata().await?;
+        // Per-connection `ServerEvent::ModelChanged` is only the ack to
+        // the requester; this is what reaches every other attached
+        // client in lock-step via `ServerEvent::Frame`.
+        publish(
+            self,
+            TurnEvent::System {
+                subtype: format!("model_changed:{model}"),
+            },
+        )
+        .await?;
+        Ok(model)
+    }
+
     /// Most recent activity timestamp. Used by `SessionManager::sweep_idle`.
     pub fn last_activity(&self) -> Instant {
         *self.last_activity.lock().unwrap()
@@ -192,6 +248,89 @@ impl SessionEngine {
 
     pub fn resume_cursor(&self) -> Option<String> {
         self.resume_cursor.lock().unwrap().clone()
+    }
+
+    pub async fn next_seq(&self) -> Seq {
+        self.journal.next_seq().await
+    }
+
+    pub fn tags(&self) -> BTreeMap<String, String> {
+        self.tags.lock().unwrap().clone()
+    }
+
+    /// Replace the session's tag map and persist it.
+    pub async fn set_tags(&self, tags: BTreeMap<String, String>) -> Result<()> {
+        {
+            let mut current = self.tags.lock().unwrap();
+            *current = tags;
+        }
+        self.persist_metadata().await?;
+        Ok(())
+    }
+
+    /// Wait for the next terminal `Result` event with `seq >= since_seq`.
+    /// Returns `None` only on timeout. Recovers from broadcast `Lagged`
+    /// (capacity overrun) by re-scanning the journal from the last seq we saw.
+    pub async fn wait_for_result(
+        &self,
+        since_seq: Seq,
+        timeout: Duration,
+    ) -> Result<Option<(Seq, TurnEvent, String)>> {
+        let mut rx = self.broadcast_tx.subscribe();
+        let mut scan_from = since_seq;
+        let mut assistant_text = String::new();
+
+        let fut = async {
+            loop {
+                // 1. Drain journal from scan_from onward. If we see Result, done.
+                let entries = match self.journal.replay_from(scan_from).await {
+                    Ok(es) => es,
+                    Err(_) => return None,
+                };
+                let mut last_seen = scan_from;
+                for entry in entries {
+                    last_seen = entry.seq + 1;
+                    match &entry.event {
+                        TurnEvent::AssistantText { text } => assistant_text.push_str(text),
+                        TurnEvent::Result { .. } => {
+                            return Some((entry.seq, entry.event, assistant_text));
+                        }
+                        _ => {}
+                    }
+                }
+                scan_from = last_seen;
+
+                // 2. Wait for the next broadcast entry. On Lagged, loop back to (1).
+                match rx.recv().await {
+                    Ok(entry) => {
+                        if entry.seq < scan_from {
+                            continue;
+                        }
+                        scan_from = entry.seq + 1;
+                        match entry.event {
+                            TurnEvent::AssistantText { text } => assistant_text.push_str(&text),
+                            TurnEvent::Result { .. } => {
+                                return Some((entry.seq, entry.event, assistant_text));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Re-subscribe + re-scan journal from where we left off.
+                        rx = self.broadcast_tx.subscribe();
+                        // assistant_text already holds everything < scan_from;
+                        // the next loop iteration replays journal[scan_from..].
+                        continue;
+                    }
+                }
+            }
+        };
+
+        match tokio::time::timeout(timeout, fut).await {
+            Ok(res) => Ok(res),
+            Err(_) => Ok(None),
+        }
     }
 
     /// Read-only journal snapshot of this live session. Same disk read as
@@ -246,26 +385,21 @@ impl SessionEngine {
             .map_err(|_| RoyError::Protocol("engine actor gone".into()))
     }
 
-    async fn persist_metadata(&self) {
-        let cursor = self.resume_cursor.lock().unwrap().clone();
-        let meta = SessionMetadata {
+    fn metadata_snapshot(&self) -> SessionMetadata {
+        SessionMetadata {
             session_id: self.session_id.clone(),
             agent: self.agent.clone(),
             cwd: self.cwd.clone(),
-            model: self.model.clone(),
+            project_id: self.project_id.clone(), // Option<String> — None = orphan
+            model: self.model.lock().unwrap().clone(),
             permission: self.permission.clone(),
-            resume_cursor: cursor,
-        };
-        // Non-fatal: the session keeps running, but a stale cursor on disk
-        // means a future Resume will reconnect to the wrong agent-side
-        // session. Surface it so operators see the divergence.
-        if let Err(e) = write_metadata(&self.journal_dir, &meta).await {
-            tracing::warn!(
-                session = %self.session_id,
-                error = %e,
-                "failed to persist session metadata after turn"
-            );
+            resume_cursor: self.resume_cursor.lock().unwrap().clone(),
+            tags: self.tags.lock().unwrap().clone(),
         }
+    }
+
+    async fn persist_metadata(&self) -> Result<()> {
+        write_metadata(&self.journal_dir, &self.metadata_snapshot()).await
     }
 }
 
@@ -306,10 +440,31 @@ async fn run_actor(
         match cmd {
             Cmd::Prompt(text) => {
                 engine.touch_activity();
+                // Journal the user's prompt before driving the turn. Agents
+                // don't echo user input over ACP, so without this step a
+                // refresh / late attach can never reconstruct the user side
+                // of the conversation.
+                if let Err(e) = publish(&engine, TurnEvent::UserPrompt { text: text.clone() }).await
+                {
+                    tracing::error!(
+                        session = %engine.session_id,
+                        error = %e,
+                        "failed to journal user prompt; turn still dispatched",
+                    );
+                }
                 drive_turn(&engine, handle.as_mut(), &text, &mut input_rx).await;
                 if let Some(cursor) = handle.resume_cursor() {
                     *engine.resume_cursor.lock().unwrap() = Some(cursor);
-                    engine.persist_metadata().await;
+                    // Non-fatal: session keeps running, but a stale cursor
+                    // on disk means a future Resume reconnects to the wrong
+                    // agent-side session. Surface it.
+                    if let Err(e) = engine.persist_metadata().await {
+                        tracing::warn!(
+                            session = %engine.session_id,
+                            error = %e,
+                            "failed to persist session metadata after turn",
+                        );
+                    }
                 }
             }
             // Cancel outside an active turn is a no-op; the turn-driving loop

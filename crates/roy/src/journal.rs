@@ -147,6 +147,10 @@ impl Journal {
         Ok(seq)
     }
 
+    pub async fn next_seq(&self) -> Seq {
+        self.inner.lock().await.next_seq
+    }
+
     /// Replay entries with `seq >= from_seq`. Reads from the memory ring first;
     /// if `from_seq` is older than what the ring still holds, reads the disk
     /// tail for the missing prefix and concatenates.

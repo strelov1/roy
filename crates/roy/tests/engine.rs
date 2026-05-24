@@ -28,9 +28,12 @@ fn test_cfg() -> SessionSpawnConfig {
     SessionSpawnConfig {
         agent: "test".into(),
         cwd: std::env::current_dir().unwrap(),
+        project_id: None,
         model: None,
         permission: None,
         resume_cursor: None,
+        fixed_session_id: None,
+        tags: std::collections::BTreeMap::new(),
     }
 }
 
@@ -222,6 +225,41 @@ async fn cancel_turn_yields_cancelled_result() {
     drop(lease);
     engine.close().unwrap();
     let _ = std::fs::remove_dir_all(&journal_dir);
+}
+
+#[tokio::test]
+async fn wait_for_result_concatenates_many_chunks_then_result() {
+    let dir = tmp_journal_dir();
+    let mut engine_opts = opts(dir.clone());
+    engine_opts.broadcast_capacity = 2;
+
+    let transport = fake_acp_transport_with(&["--flood", "50"]);
+    let engine = SessionEngine::spawn(transport, engine_opts, test_cfg())
+        .await
+        .unwrap();
+
+    let lease = engine.try_acquire_input().expect("free lease");
+    lease.send("go").unwrap();
+    drop(lease);
+
+    let (seq, result, text) = engine
+        .wait_for_result(0, Duration::from_secs(10))
+        .await
+        .unwrap()
+        .expect("wait_for_result must recover from Lagged via journal re-scan");
+
+    assert!(matches!(result, TurnEvent::Result { .. }));
+    assert!(seq > 0);
+    assert!(
+        text.contains("flood-0"),
+        "assistant_text must include flood prefix"
+    );
+    assert!(
+        text.contains("ack"),
+        "assistant_text must include final chunk"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 async fn collect_all(

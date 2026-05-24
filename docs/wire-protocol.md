@@ -19,8 +19,11 @@ is implemented through the single mapping
 ```rust
 enum TurnEvent {
     System { subtype: String },
+    UserPrompt { text: String },
     AssistantText { text: String },
+    AssistantThought { text: String },
     ToolUse { name: String, input: serde_json::Value },
+    Usage { input_tokens: Option<u64>, output_tokens: Option<u64>, cost_usd: Option<f64> },
     Result { cost_usd: Option<f64>, stop_reason: StopReason },
     Raw(serde_json::Value),
 }
@@ -32,12 +35,18 @@ control frame):
 | variant            | JSON shape                                                                                   |
 |--------------------|-----------------------------------------------------------------------------------------------|
 | `System`           | `{"type":"system","subtype":"…"}`                                                            |
+| `UserPrompt`       | `{"type":"user_prompt","text":"…"}`                                                          |
 | `AssistantText`    | `{"type":"assistant_text","text":"…"}`                                                       |
 | `AssistantThought` | `{"type":"assistant_thought","text":"…"}`                                                    |
 | `ToolUse`          | `{"type":"tool_use","name":"…","input":…}`                                                   |
 | `Usage`            | `{"type":"usage","input_tokens":null|123,"output_tokens":null|456,"cost_usd":null|0.01}`     |
 | `Result`           | `{"type":"result","cost_usd":null|0.42,"stop_reason":"end_turn","is_error":false}`           |
 | `Raw`              | `{"type":"raw","value":…}`                                                                   |
+
+`UserPrompt` is journaled by the engine the moment a `send`/`Cmd::Prompt`
+arrives, *before* the prompt is forwarded to the agent. Agents don't
+echo user input over ACP, so without this entry a refresh, a late
+attach, or a second observer would only see the agent side.
 
 Notes:
 
@@ -86,7 +95,7 @@ triggers (and, indirectly, of every MCP tool result body).
 
 | op                | fields                                                                                          |
 |-------------------|-------------------------------------------------------------------------------------------------|
-| `spawn`           | `agent`, optional `cwd`, `model`, `permission`, `resume`                                         |
+| `spawn`           | `agent`, optional `project_id`, `model`, `permission`, `resume`                                 |
 | `attach`          | `session`, optional `from_seq`                                                                  |
 | `acquire_input`   | `session`                                                                                       |
 | `send`            | `session`, `text`                                                                               |
@@ -97,9 +106,25 @@ triggers (and, indirectly, of every MCP tool result body).
 | `list_archived`   | —                                                                                               |
 | `resume`          | `session`                                                                                       |
 | `read_journal`    | `session`, optional `from_seq`, optional `max_entries`                                          |
+| `list_projects`   | —                                                                                               |
+| `create_project`  | `name`                                                                                          |
+| `delete_project`  | `project_id`                                                                                    |
+| `list_agents`     | —                                                                                               |
 
 `permission` is `"allow"` or `"deny"`. `agent` is one of `claude`,
 `gemini`, `opencode`, `codex` (with the default `TransportFactory`).
+
+`spawn.project_id` is a UUID string referencing an existing project; omit or
+set to `null` for an orphan session. When `project_id` is given, the session's
+`cwd` is the project directory (`workspace_dir/<name>/`). When absent, the
+daemon creates `workspace_dir/<session_id>/` and uses that as `cwd`.
+
+`create_project.name` must match `^[A-Za-z0-9_-]+$`. The daemon derives the
+on-disk path as `workspace_dir/name` and creates the directory.
+
+`delete_project` is a cascade: the project registry entry is removed and every
+session belonging to that project has its `.jsonl` and `.meta.json` deleted.
+The on-disk `workspace_dir/<name>/` directory is **not** removed.
 
 ### ServerEvent (server → client)
 
@@ -107,18 +132,38 @@ triggers (and, indirectly, of every MCP tool result body).
 
 | kind                | fields                                                                                                  |
 |---------------------|---------------------------------------------------------------------------------------------------------|
-| `spawned`           | `session`, optional `resume_cursor`                                                                     |
+| `spawned`           | `session`, optional `project_id`, optional `resume_cursor`                                              |
 | `attached`          | `session`, `seq_at_attach`                                                                              |
 | `frame`             | `session`, `entry` (the `JournalEntry` shape above)                                                     |
 | `input_acquired`    | `session`, `acquired: bool`                                                                             |
 | `input_released`    | `session`                                                                                               |
 | `detached`          | `session`                                                                                               |
 | `closed`            | `session`                                                                                               |
-| `listed`            | `sessions: [string]`                                                                                    |
-| `listed_archived`   | `sessions: [string]`                                                                                    |
+| `listed`            | `sessions: [{id, project_id}]`                                                                          |
+| `listed_archived`   | `sessions: [{id, project_id}]`                                                                          |
 | `resumed`           | `session`, optional `resume_cursor`                                                                     |
 | `journal_read`      | `session`, `entries: [JournalEntry]`, `next_seq`, `has_more: bool`                                       |
+| `projects_listed`   | `projects: [Project]`                                                                                   |
+| `project_created`   | `project: Project`                                                                                      |
+| `project_deleted`   | `project_id: string`, `deleted_sessions: [string]`                                                      |
+| `agents_list`       | `agents: [AgentInfo]`, `config_path: string`, `status: AgentsConfigStatus`                              |
 | `error`             | optional `session`, typed `code` (see below), `message`                                                 |
+
+`spawned.project_id` is `null` for an orphan session, a UUID string otherwise.
+
+`SessionInfo` shape (used in `listed` / `listed_archived`):
+
+```json
+{"id": "<session_id>", "project_id": "<uuid>" | null}
+```
+
+`project_id: null` indicates an orphan session.
+
+`Project` shape (used in `projects_listed` / `project_created`):
+
+```json
+{"id": "<uuid>", "name": "<name>", "path": "<absolute_path>", "created_at": 1722345600}
+```
 
 `spawned.resume_cursor` is the cursor to pass back to a later `spawn`'s
 `resume` field, or to `resume` directly.
@@ -126,13 +171,41 @@ triggers (and, indirectly, of every MCP tool result body).
 `journal_read.next_seq` is the seq the client should pass to its next
 `read_journal` to continue polling.
 
+`AgentInfo` and `ModelInfo` shapes (used in `agents_list.agents[]`):
+
+```json
+{
+  "preset": "claude",
+  "models": [
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "default": true},
+    {"id": "claude-opus-4-7",   "label": "Claude Opus 4.7",   "default": false}
+  ]
+}
+```
+
+`label` is always populated by the daemon (defaults to `id` if the user
+omitted it in `agents.toml`). `default` is `true` for exactly one model
+per agent: the explicitly-marked one, or the first if none was marked.
+
+`AgentsConfigStatus` is a tagged union (`{"kind": "<variant>", …}`):
+
+| kind      | extra fields    | meaning                                                |
+|-----------|-----------------|--------------------------------------------------------|
+| `ok`      | —               | File parsed and validated; `agents` may still be empty |
+| `created` | —               | File was missing; sample was just written              |
+| `invalid` | `reason: string`| Parse or validation failure; `agents` is `[]`          |
+
+See [agents-config.md](./agents-config.md) for the user-facing reference.
+
 ### ErrorCode
 
 `error.code` is a stable snake_case string. Known values:
 
 `bad_request`, `spawn_failed`, `no_session`, `attach_failed`,
 `archive_read_failed`, `no_lease`, `send_failed`, `close_failed`,
-`list_archived_failed`, `resume_failed`, `read_journal_failed`.
+`list_archived_failed`, `resume_failed`, `read_journal_failed`,
+`no_project`, `project_exists`, `create_project_failed`,
+`delete_project_failed`, `invalid_project_name`.
 
 Forward-compat: any unknown string is preserved in
 `ErrorCode::Other(s)` on parsing and round-trips verbatim — an older
