@@ -256,13 +256,7 @@ impl Daemon {
         // PID-file lock first: this is the single-instance gate. If it
         // succeeds, any leftover socket file is necessarily stale (the prior
         // owner is dead by the liveness check inside `PidLock::acquire`).
-        let pid_path = socket_path.with_extension(
-            socket_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| format!("{e}.pid"))
-                .unwrap_or_else(|| "pid".to_string()),
-        );
+        let pid_path = crate::pid_lock::pid_path_for_socket(socket_path);
         let _pid_lock = crate::pid_lock::PidLock::acquire(&pid_path)?;
         let _ = std::fs::remove_file(socket_path);
         let listener = UnixListener::bind(socket_path).map_err(RoyError::Io)?;

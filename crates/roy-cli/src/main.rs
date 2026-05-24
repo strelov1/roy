@@ -20,7 +20,11 @@ use tokio::net::UnixStream;
 mod mcp;
 
 #[derive(Parser)]
-#[command(name = "roy", about = "Spawn and orchestrate coding-agent sessions")]
+#[command(
+    name = "roy",
+    about = "Spawn and orchestrate coding-agent sessions",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -30,6 +34,10 @@ struct Cli {
 enum Cmd {
     /// Run the daemon that owns the SessionManager.
     Serve(ServeArgs),
+    /// Health-probe the daemon. Connects to `$ROY_SOCKET`, prints one JSON
+    /// line and exits 0 if reachable, 2 otherwise. Use this in scripts and
+    /// skills instead of `pgrep`-ing for the binary.
+    Status,
     /// Spawn one session, send one prompt, stream events to stdout.
     Run(RunArgs),
     /// Attach to an existing session and stream its journal to stdout.
@@ -232,6 +240,7 @@ fn main() -> ExitCode {
 async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
         Cmd::Serve(args) => cmd_serve(args).await.map(|()| ExitCode::SUCCESS),
+        Cmd::Status => Ok(cmd_status().await),
         Cmd::Run(args) => cmd_run(args).await,
         Cmd::Attach(args) => cmd_attach(args).await,
         Cmd::Resume(args) => cmd_resume(args).await.map(|()| ExitCode::SUCCESS),
@@ -332,6 +341,29 @@ async fn connect() -> anyhow::Result<UnixStream> {
             path.display()
         )
     })
+}
+
+/// Print a one-line JSON health report and return the matching exit code.
+/// `status` is `"up"` when the socket accepts a connection, `"down"` otherwise.
+/// `pid` is the value in `<socket>.pid` if present — useful for diagnostics
+/// when `status="down"` (a stale pid file means a crashed daemon).
+async fn cmd_status() -> ExitCode {
+    let socket = default_socket();
+    let pid_path = roy::pid_lock::pid_path_for_socket(&socket);
+    let pid = roy::pid_lock::peek_pid(&pid_path);
+    let (status, exit, error) = match UnixStream::connect(&socket).await {
+        Ok(_) => ("up", ExitCode::SUCCESS, None),
+        Err(e) => ("down", ExitCode::from(2), Some(e.to_string())),
+    };
+    let payload = serde_json::json!({
+        "status": status,
+        "socket": socket.display().to_string(),
+        "pid_file": pid_path.display().to_string(),
+        "pid": pid,
+        "error": error,
+    });
+    println!("{payload}");
+    exit
 }
 
 async fn send_cmd<W: AsyncWriteExt + Unpin>(w: &mut W, cmd: &ClientCommand) -> anyhow::Result<()> {
