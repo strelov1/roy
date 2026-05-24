@@ -6,6 +6,7 @@ pub mod event;
 pub mod journal;
 pub mod manager;
 pub mod pid_lock;
+pub mod project;
 pub mod session_meta;
 pub mod transport;
 
@@ -17,5 +18,6 @@ pub use event::{event_from_json, event_to_json, StopReason, TurnEvent};
 pub use journal::{ArchivedJournal, Journal, JournalEntry, Seq};
 pub use manager::SessionManager;
 pub use pid_lock::PidLock;
+pub use project::Project;
 pub use session_meta::SessionMetadata;
 pub use transport::{AcpConfig, AcpTransport, Handle, PermissionPolicy, Transport};
