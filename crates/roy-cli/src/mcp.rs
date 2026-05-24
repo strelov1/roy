@@ -638,12 +638,15 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         },
     )
     .await?;
-    let session = match next_event(&mut lines).await? {
-        ServerEvent::Spawned { session, .. } => session,
-        ServerEvent::Error { code, message, .. } => {
-            return Err(anyhow!("spawn failed: {code}: {message}"))
+    let session = loop {
+        match next_event(&mut lines).await? {
+            ServerEvent::Spawning { .. } => continue,
+            ServerEvent::Spawned { session, .. } => break session,
+            ServerEvent::Error { code, message, .. } => {
+                return Err(anyhow!("spawn failed: {code}: {message}"))
+            }
+            other => return Err(anyhow!("unexpected response: {other:?}")),
         }
-        other => return Err(anyhow!("unexpected response: {other:?}")),
     };
 
     // Attach before send so no frames are missed.
@@ -747,16 +750,19 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
         },
     )
     .await?;
-    let (session, resume_cursor) = match next_event(&mut lines).await? {
-        ServerEvent::Spawned {
-            session,
-            resume_cursor,
-            ..
-        } => (session, resume_cursor),
-        ServerEvent::Error { code, message, .. } => {
-            return Err(anyhow!("spawn failed: {code}: {message}"))
+    let (session, resume_cursor) = loop {
+        match next_event(&mut lines).await? {
+            ServerEvent::Spawning { .. } => continue,
+            ServerEvent::Spawned {
+                session,
+                resume_cursor,
+                ..
+            } => break (session, resume_cursor),
+            ServerEvent::Error { code, message, .. } => {
+                return Err(anyhow!("spawn failed: {code}: {message}"))
+            }
+            other => return Err(anyhow!("unexpected response: {other:?}")),
         }
-        other => return Err(anyhow!("unexpected response: {other:?}")),
     };
 
     // Acquire + send so the prompt is queued before we drop the lease.

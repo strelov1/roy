@@ -362,33 +362,42 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         },
     )
     .await?;
-    let (session, resume_cursor) = match read_event(&mut events).await? {
-        ServerEvent::Spawned {
-            session,
-            project_id,
-            resume_cursor,
-            ..
-        } => {
-            if let Some(pid) = &project_id {
-                eprintln!("roy run: session {session} project {pid}");
-            } else {
-                eprintln!("roy run: session {session} (orphan)");
+    let (session, resume_cursor) = loop {
+        match read_event(&mut events).await? {
+            ServerEvent::Spawning { agent, project_id } => {
+                if let Some(pid) = &project_id {
+                    eprintln!("roy run: spawning {agent} in project {pid}…");
+                } else {
+                    eprintln!("roy run: spawning {agent}…");
+                }
             }
-            if args.detach {
-                let payload = serde_json::json!({
-                    "type": "session",
-                    "id": session,
-                    "resume_cursor": resume_cursor,
-                });
-                println!("{payload}");
-                return Ok(ExitCode::SUCCESS);
+            ServerEvent::Spawned {
+                session,
+                project_id,
+                resume_cursor,
+                ..
+            } => {
+                if let Some(pid) = &project_id {
+                    eprintln!("roy run: session {session} project {pid}");
+                } else {
+                    eprintln!("roy run: session {session} (orphan)");
+                }
+                if args.detach {
+                    let payload = serde_json::json!({
+                        "type": "session",
+                        "id": session,
+                        "resume_cursor": resume_cursor,
+                    });
+                    println!("{payload}");
+                    return Ok(ExitCode::SUCCESS);
+                }
+                break (session, resume_cursor);
             }
-            (session, resume_cursor)
+            ServerEvent::Error { code, message, .. } => {
+                anyhow::bail!("spawn failed: {code}: {message}");
+            }
+            other => anyhow::bail!("unexpected response to Spawn: {other:?}"),
         }
-        ServerEvent::Error { code, message, .. } => {
-            anyhow::bail!("spawn failed: {code}: {message}");
-        }
-        other => anyhow::bail!("unexpected response to Spawn: {other:?}"),
     };
 
     // Attach BEFORE sending so we never miss frames.
