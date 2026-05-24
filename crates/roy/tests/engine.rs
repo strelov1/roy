@@ -28,9 +28,11 @@ fn test_cfg() -> SessionSpawnConfig {
     SessionSpawnConfig {
         agent: "test".into(),
         cwd: std::env::current_dir().unwrap(),
+        project_id: None,
         model: None,
         permission: None,
         resume_cursor: None,
+        fixed_session_id: None,
         tags: std::collections::BTreeMap::new(),
     }
 }

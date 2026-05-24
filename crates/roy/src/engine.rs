@@ -44,16 +44,26 @@ impl EngineOpts {
 /// Inputs that uniquely identify a session at spawn (or resume) time. Stored
 /// as `SessionMetadata` beside the journal so the daemon can resurrect a live
 /// session after a restart.
+///
+/// `project_id = None` means the session is orphan (lives at
+/// `<workspace>/<session_id>/`). `fixed_session_id` pins the UUID when the
+/// daemon needs to know it before the engine mints one — required for orphan
+/// sessions where the dir is pre-created as `<workspace>/<session_id>/`.
 #[derive(Debug, Clone)]
 pub struct SessionSpawnConfig {
     pub agent: String,
     pub cwd: PathBuf,
+    pub project_id: Option<String>,
     pub model: Option<String>,
     pub permission: Option<String>,
     /// Forwarded to `Transport::open` so the agent side resumes via its
     /// native mechanism (e.g. ACP `session/load`). The roy-side session id
     /// and journal are still freshly minted on `spawn`.
     pub resume_cursor: Option<String>,
+    /// When set, the engine uses this value as the session UUID instead of
+    /// minting a fresh one. Used by orphan spawn so the daemon can name the
+    /// workspace dir after the session id before the engine is constructed.
+    pub fixed_session_id: Option<String>,
     pub tags: BTreeMap<String, String>,
 }
 
@@ -63,6 +73,7 @@ pub struct SessionEngine {
     journal_dir: PathBuf,
     agent: String,
     cwd: PathBuf,
+    project_id: Option<String>,
     /// Display label only; the daemon doesn't feed it back into the
     /// transport. `set_model` mutates it and rewrites on-disk metadata.
     model: StdMutex<Option<String>>,
@@ -99,7 +110,10 @@ impl SessionEngine {
         opts: EngineOpts,
         cfg: SessionSpawnConfig,
     ) -> Result<Arc<Self>> {
-        let session_id = Uuid::new_v4().to_string();
+        let session_id = cfg
+            .fixed_session_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let journal =
             Arc::new(Journal::open(&opts.journal_dir, &session_id, opts.mem_capacity).await?);
         Self::start(transport, opts, session_id, journal, cfg).await
@@ -140,6 +154,7 @@ impl SessionEngine {
             journal_dir: opts.journal_dir.clone(),
             agent: cfg.agent.clone(),
             cwd: cfg.cwd.clone(),
+            project_id: cfg.project_id.clone(),
             model: StdMutex::new(cfg.model.clone()),
             permission: cfg.permission.clone(),
             resume_cursor: StdMutex::new(initial_cursor.clone()),
@@ -160,6 +175,7 @@ impl SessionEngine {
                 session_id,
                 agent: cfg.agent,
                 cwd: cfg.cwd,
+                project_id: cfg.project_id, // Option<String> — None = orphan
                 model: cfg.model,
                 permission: cfg.permission,
                 resume_cursor: initial_cursor,
@@ -190,6 +206,10 @@ impl SessionEngine {
 
     pub fn cwd(&self) -> &PathBuf {
         &self.cwd
+    }
+
+    pub fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
     }
 
     /// LLM label currently associated with the session (e.g.
@@ -370,6 +390,7 @@ impl SessionEngine {
             session_id: self.session_id.clone(),
             agent: self.agent.clone(),
             cwd: self.cwd.clone(),
+            project_id: self.project_id.clone(), // Option<String> — None = orphan
             model: self.model.lock().unwrap().clone(),
             permission: self.permission.clone(),
             resume_cursor: self.resume_cursor.lock().unwrap().clone(),

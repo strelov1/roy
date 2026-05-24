@@ -11,6 +11,7 @@ use anyhow::{anyhow, Context};
 use clap::{Parser, Subcommand};
 use roy::{
     daemon::{Daemon, DefaultTransportFactory},
+    project::Project,
     ClientCommand, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -53,6 +54,11 @@ enum Cmd {
     /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
     /// IDE plugin) which talks to it over stdio.
     Mcp(McpArgs),
+    /// Manage projects (list / create / rename / delete).
+    Projects {
+        #[command(subcommand)]
+        cmd: ProjectsCmd,
+    },
 }
 
 #[derive(clap::Args)]
@@ -61,6 +67,10 @@ struct ServeArgs {
     socket: Option<PathBuf>,
     #[arg(long)]
     journal_dir: Option<PathBuf>,
+    /// Root directory where roy creates project and orphan session dirs.
+    /// Defaults to `~/.roy/workspace/` or `ROY_WORKSPACE`.
+    #[arg(long)]
+    workspace_dir: Option<PathBuf>,
     /// Enable WebSocket listener on this port (in addition to the Unix socket).
     #[arg(long)]
     port: Option<u16>,
@@ -77,8 +87,9 @@ struct RunArgs {
     /// claude | gemini | opencode | codex
     agent: String,
     task: String,
+    /// Project name to spawn the session under. Omit to create an orphan session.
     #[arg(long)]
-    cwd: Option<PathBuf>,
+    project: Option<String>,
     #[arg(long)]
     model: Option<String>,
     /// allow | deny (ACP agents only)
@@ -139,9 +150,9 @@ struct FireArgs {
     /// `--resume` is absent.
     #[arg(long, conflicts_with = "resume", required_unless_present = "resume")]
     agent: Option<String>,
-    /// Working directory for a new session. Ignored with --resume.
+    /// Project name for a new session. Ignored with --resume.
     #[arg(long, conflicts_with = "resume")]
-    cwd: Option<PathBuf>,
+    project: Option<String>,
     /// Resume an existing session id instead of spawning a new one.
     #[arg(long)]
     resume: Option<String>,
@@ -156,6 +167,21 @@ struct McpArgs {
     /// Override the daemon socket the MCP tools connect to.
     #[arg(long)]
     socket: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum ProjectsCmd {
+    /// List projects.
+    List,
+    /// Create a new project with the given name. Roy manages the directory at
+    /// `<workspace>/<name>/`.
+    Create { name: String },
+    /// Cascade-delete a project and all its sessions.
+    Delete {
+        id_or_name: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -198,6 +224,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
             let socket = args.socket.unwrap_or_else(default_socket);
             mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
         }
+        Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
     }
 }
 
@@ -231,10 +258,23 @@ fn default_journal_dir() -> PathBuf {
     PathBuf::from(home).join(".roy/journals")
 }
 
+fn default_workspace_dir() -> PathBuf {
+    if let Ok(s) = std::env::var("ROY_WORKSPACE") {
+        return PathBuf::from(s);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".roy/workspace")
+}
+
 async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     let socket = args.socket.unwrap_or_else(default_socket);
     let journal_dir = args.journal_dir.unwrap_or_else(default_journal_dir);
-    let daemon = Arc::new(Daemon::new(journal_dir, Arc::new(DefaultTransportFactory)));
+    let workspace_dir = args.workspace_dir.unwrap_or_else(default_workspace_dir);
+    let daemon = Arc::new(Daemon::new(
+        journal_dir,
+        workspace_dir,
+        Arc::new(DefaultTransportFactory),
+    )?);
     eprintln!("roy serve: listening on {}", socket.display());
     if let Some(port) = args.port {
         eprintln!("roy serve: WebSocket on 127.0.0.1:{port}");
@@ -292,7 +332,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         &mut writer,
         &ClientCommand::Spawn {
             agent: args.agent.clone(),
-            cwd: args.cwd.map(|p| p.to_string_lossy().into_owned()),
+            project_id: args.project.clone(),
             model: args.model.clone(),
             permission: args.permission.clone(),
             resume: args.resume.clone(),
@@ -303,8 +343,15 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     let (session, resume_cursor) = match read_event(&mut events).await? {
         ServerEvent::Spawned {
             session,
+            project_id,
             resume_cursor,
+            ..
         } => {
+            if let Some(pid) = &project_id {
+                eprintln!("roy run: session {session} project {pid}");
+            } else {
+                eprintln!("roy run: session {session} (orphan)");
+            }
             if args.detach {
                 let payload = serde_json::json!({
                     "type": "session",
@@ -590,7 +637,7 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
     let target = match (args.agent, args.resume) {
         (Some(agent), None) => FireTarget::Spawn {
             preset: agent,
-            cwd: args.cwd.map(|p| p.to_string_lossy().into_owned()),
+            project_id: args.project,
         },
         (None, Some(session_id)) => FireTarget::Resume { session_id },
         (Some(_), Some(_)) => anyhow::bail!("--agent conflicts with --resume"),
@@ -670,6 +717,102 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::from(2))
         }
         other => anyhow::bail!("unexpected response to Fire: {other:?}"),
+    }
+}
+
+async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<()> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    match cmd {
+        ProjectsCmd::List => {
+            send_cmd(&mut writer, &ClientCommand::ListProjects).await?;
+            match read_event(&mut events).await? {
+                ServerEvent::ProjectsListed { projects } => {
+                    for p in projects {
+                        println!("{}\t{}\t{}", p.id, p.name, p.path.display());
+                    }
+                    Ok(())
+                }
+                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+                other => Err(anyhow!("unexpected: {other:?}")),
+            }
+        }
+        ProjectsCmd::Create { name } => {
+            send_cmd(&mut writer, &ClientCommand::CreateProject { name }).await?;
+            match read_event(&mut events).await? {
+                ServerEvent::ProjectCreated { project } => {
+                    println!("{}", project.id);
+                    eprintln!(
+                        "created project '{}' at {}",
+                        project.name,
+                        project.path.display()
+                    );
+                    Ok(())
+                }
+                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+                other => Err(anyhow!("unexpected: {other:?}")),
+            }
+        }
+        ProjectsCmd::Delete { id_or_name, yes } => {
+            let project_id = resolve_project_id(&mut writer, &mut events, &id_or_name).await?;
+            if !yes {
+                eprintln!(
+                    "This will delete project {project_id} and all its sessions. Re-run with --yes to confirm."
+                );
+                return Ok(());
+            }
+            send_cmd(
+                &mut writer,
+                &ClientCommand::DeleteProject {
+                    project_id: project_id.clone(),
+                },
+            )
+            .await?;
+            match read_event(&mut events).await? {
+                ServerEvent::ProjectDeleted {
+                    project_id,
+                    deleted_sessions,
+                } => {
+                    eprintln!(
+                        "deleted project {project_id} ({} sessions)",
+                        deleted_sessions.len()
+                    );
+                    Ok(())
+                }
+                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+                other => Err(anyhow!("unexpected: {other:?}")),
+            }
+        }
+    }
+}
+
+/// Resolve a user-supplied id-or-name to a project id by listing projects and
+/// matching first by id (exact), then by unique name.
+async fn resolve_project_id<B: AsyncBufReadExt + Unpin>(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    events: &mut tokio::io::Lines<B>,
+    query: &str,
+) -> anyhow::Result<String> {
+    send_cmd(writer, &ClientCommand::ListProjects).await?;
+    let projects: Vec<Project> = match read_event(events).await? {
+        ServerEvent::ProjectsListed { projects } => projects,
+        ServerEvent::Error { code, message, .. } => {
+            return Err(anyhow!("{code}: {message}"));
+        }
+        other => return Err(anyhow!("unexpected: {other:?}")),
+    };
+    if let Some(p) = projects.iter().find(|p| p.id == query) {
+        return Ok(p.id.clone());
+    }
+    let by_name: Vec<&Project> = projects.iter().filter(|p| p.name == query).collect();
+    match by_name.as_slice() {
+        [p] => Ok(p.id.clone()),
+        [] => Err(anyhow!("no project named or id `{query}`")),
+        _ => Err(anyhow!(
+            "ambiguous name `{query}` — multiple projects match; specify id"
+        )),
     }
 }
 
@@ -766,7 +909,7 @@ mod tests {
         RunArgs {
             agent: agent.into(),
             task: "noop".into(),
-            cwd: None,
+            project: None,
             model: None,
             permission: None,
             detach: false,
@@ -880,11 +1023,12 @@ mod fire_args_tests {
     }
 
     #[test]
-    fn fire_with_cwd_and_resume_rejected() {
-        let cli = Cli::try_parse_from(["roy", "fire", "p", "--resume", "abc", "--cwd", "/tmp"]);
+    fn fire_with_project_and_resume_rejected() {
+        let cli =
+            Cli::try_parse_from(["roy", "fire", "p", "--resume", "abc", "--project", "myproj"]);
         assert!(
             cli.is_err(),
-            "expected error: --cwd conflicts with --resume"
+            "expected error: --project conflicts with --resume"
         );
     }
 }

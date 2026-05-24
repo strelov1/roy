@@ -235,7 +235,7 @@ async fn poll_tick(pool: &Pool<Sqlite>, socket_path: &Path) -> anyhow::Result<()
         let target = match target_type.as_str() {
             "spawn" => FireTarget::Spawn {
                 preset: target_id,
-                cwd: None,
+                project_id: None,
             },
             "resume" => FireTarget::Resume {
                 session_id: target_id,

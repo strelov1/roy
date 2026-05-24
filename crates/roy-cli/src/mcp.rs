@@ -126,7 +126,7 @@ fn tools_list() -> Value {
                     "properties": {
                         "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
                         "task": {"type": "string"},
-                        "cwd": {"type": "string"},
+                        "project_id": {"type": "string", "description": "Roy project id to run the session under. Omit to create an orphan session."},
                         "model": {"type": "string"},
                         "permission": {"type": "string", "enum": ["allow", "deny"]},
                         "resume": {"type": "string", "description": "Agent-side resume cursor (e.g. prior ACP sessionId)."}
@@ -143,7 +143,7 @@ fn tools_list() -> Value {
                     "properties": {
                         "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
                         "task": {"type": "string"},
-                        "cwd": {"type": "string"},
+                        "project_id": {"type": "string", "description": "Roy project id to run the session under. Omit to create an orphan session."},
                         "model": {"type": "string"},
                         "permission": {"type": "string", "enum": ["allow", "deny"]},
                         "resume": {"type": "string"}
@@ -205,18 +205,45 @@ fn tools_list() -> Value {
             },
             {
                 "name": "roy_fire",
-                "description": "One-shot: Spawn (or Resume) a session, send a prompt, wait for the terminal Result. Returns assistant_text + stop_reason. Pass `resume` to reuse an existing session id, otherwise pass `agent` (and optional `cwd`).",
+                "description": "One-shot: Spawn (or Resume) a session, send a prompt, wait for the terminal Result. Returns assistant_text + stop_reason. Pass `resume` to reuse an existing session id, otherwise pass `agent` (and optional `project_id`).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
-                        "cwd": {"type": "string"},
+                        "project_id": {"type": "string", "description": "Roy project id to run the session under. Omit to create an orphan session."},
                         "resume": {"type": "string", "description": "Existing roy session id to resume into."},
                         "prompt": {"type": "string"},
                         "tags": {"type": "object", "additionalProperties": {"type": "string"}},
                         "timeout_ms": {"type": "integer", "minimum": 1}
                     },
                     "required": ["prompt"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "roy_list_projects",
+                "description": "List all projects in the roy registry. Each project has an id (UUID), a display name, the canonical filesystem path, and a created_at timestamp.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+            },
+            {
+                "name": "roy_create_project",
+                "description": "Create a new roy project with the given name. Roy manages the directory at `<workspace>/<name>/`. Returns the new project's id.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Project name: ASCII letters, digits, '_', '-' only; no leading dot."}
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "roy_delete_project",
+                "description": "Cascade-delete a project and every session it owns. Permanently removes journal + metadata files. Returns the list of deleted session ids.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"project_id": {"type": "string"}},
+                    "required": ["project_id"],
                     "additionalProperties": false
                 }
             }
@@ -239,6 +266,9 @@ async fn tools_call(id: Value, req: &Value, socket_path: &Path) -> Value {
         "roy_set_tags" => tool_set_tags(socket_path, args).await,
         "roy_wait_for_result" => tool_wait_for_result(socket_path, args).await,
         "roy_fire" => tool_fire(socket_path, args).await,
+        "roy_list_projects" => tool_list_projects(socket_path).await,
+        "roy_create_project" => tool_create_project(socket_path, args).await,
+        "roy_delete_project" => tool_delete_project(socket_path, args).await,
         other => Err(anyhow!("unknown tool: {other}")),
     };
 
@@ -296,7 +326,7 @@ async fn send_cmd(
 struct SpawnArgs {
     agent: String,
     task: String,
-    cwd: Option<String>,
+    project_id: Option<String>,
     model: Option<String>,
     permission: Option<String>,
     resume: Option<String>,
@@ -313,7 +343,7 @@ fn parse_spawn_args(args: &Value) -> anyhow::Result<SpawnArgs> {
     Ok(SpawnArgs {
         agent: required("agent")?,
         task: required("task")?,
-        cwd: optional("cwd"),
+        project_id: optional("project_id"),
         model: optional("model"),
         permission: optional("permission"),
         resume: optional("resume"),
@@ -479,14 +509,17 @@ async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("missing 'prompt'"))?
         .to_string();
     let agent = args.get("agent").and_then(Value::as_str);
-    let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_string);
+    let project_id = args
+        .get("project_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let resume = args.get("resume").and_then(Value::as_str);
     let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64);
 
     let target = match (agent, resume) {
         (Some(a), None) => FireTarget::Spawn {
             preset: a.to_string(),
-            cwd,
+            project_id,
         },
         (None, Some(sid)) => FireTarget::Resume {
             session_id: sid.to_string(),
@@ -566,7 +599,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     let SpawnArgs {
         agent,
         task,
-        cwd,
+        project_id,
         model,
         permission,
         resume,
@@ -579,7 +612,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         &mut writer,
         &ClientCommand::Spawn {
             agent,
-            cwd,
+            project_id,
             model,
             permission,
             resume,
@@ -676,7 +709,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
     let SpawnArgs {
         agent,
         task,
-        cwd,
+        project_id,
         model,
         permission,
         resume,
@@ -688,7 +721,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
         &mut writer,
         &ClientCommand::Spawn {
             agent,
-            cwd,
+            project_id,
             model,
             permission,
             resume,
@@ -700,6 +733,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
         ServerEvent::Spawned {
             session,
             resume_cursor,
+            ..
         } => (session, resume_cursor),
         ServerEvent::Error { code, message, .. } => {
             return Err(anyhow!("spawn failed: {code}: {message}"))
@@ -834,6 +868,54 @@ async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<St
     }
 }
 
+async fn tool_list_projects(socket_path: &Path) -> anyhow::Result<String> {
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(&mut writer, &ClientCommand::ListProjects).await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::ProjectsListed { projects } => Ok(serde_json::to_string(&projects)?),
+        ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
+}
+
+async fn tool_create_project(socket_path: &Path, args: Value) -> anyhow::Result<String> {
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing required field: name"))?
+        .to_string();
+
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(&mut writer, &ClientCommand::CreateProject { name }).await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::ProjectCreated { project } => Ok(serde_json::to_string(&project)?),
+        ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
+}
+
+async fn tool_delete_project(socket_path: &Path, args: Value) -> anyhow::Result<String> {
+    let project_id = args
+        .get("project_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing required field: project_id"))?
+        .to_string();
+
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(&mut writer, &ClientCommand::DeleteProject { project_id }).await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::ProjectDeleted {
+            project_id,
+            deleted_sessions,
+        } => Ok(serde_json::to_string(&json!({
+            "project_id": project_id,
+            "deleted_sessions": deleted_sessions,
+        }))?),
+        ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
+}
+
 async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> anyhow::Result<()> {
     let line = serde_json::to_string(v)?;
     w.write_all(line.as_bytes()).await?;
@@ -870,6 +952,9 @@ mod tests {
                 "roy_set_tags",
                 "roy_wait_for_result",
                 "roy_fire",
+                "roy_list_projects",
+                "roy_create_project",
+                "roy_delete_project",
             ]
         );
     }
@@ -906,7 +991,7 @@ mod tests {
         let parsed = parse_spawn_args(&json!({
             "agent": "opencode",
             "task": "do it",
-            "cwd": "/tmp",
+            "project_id": "pid-123",
             "model": "gpt-x",
             "permission": "allow",
             "resume": "sid-1"
@@ -914,7 +999,7 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.agent, "opencode");
         assert_eq!(parsed.task, "do it");
-        assert_eq!(parsed.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(parsed.project_id.as_deref(), Some("pid-123"));
         assert_eq!(parsed.model.as_deref(), Some("gpt-x"));
         assert_eq!(parsed.permission.as_deref(), Some("allow"));
         assert_eq!(parsed.resume.as_deref(), Some("sid-1"));
@@ -929,7 +1014,7 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.agent, "gemini");
         assert_eq!(parsed.task, "go");
-        assert!(parsed.cwd.is_none());
+        assert!(parsed.project_id.is_none());
         assert!(parsed.model.is_none());
         assert!(parsed.permission.is_none());
         assert!(parsed.resume.is_none());
