@@ -291,6 +291,16 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_cursor: Option<String>,
     },
+    /// Emitted immediately upon receiving `Spawn`, before the agent process
+    /// is started. Lets clients render a "spawning…" indicator during the
+    /// process launch + ACP `initialize` + `session/new` round-trip. The
+    /// session id is not yet known at this point — clients correlate by
+    /// request order on their own connection.
+    Spawning {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+    },
     /// Response to `Attach`. `seq_at_attach` is the next seq after the replay.
     /// `agent` is the preset name the session was spawned with (e.g. `claude`,
     /// `gemini`) — read from the live engine or the on-disk metadata.
@@ -342,6 +352,10 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_cursor: Option<String>,
     },
+    /// Emitted immediately upon receiving `Resume`, before the agent process
+    /// is re-started. Lets clients render a "resuming…" indicator during the
+    /// process launch + ACP `session/load` round-trip.
+    Resuming { session: String },
     /// Response to `ReadJournal`: the requested slice of the journal.
     /// `next_seq` is the seq the client should pass to its next `ReadJournal`
     /// to continue from where this one stopped.
@@ -584,6 +598,44 @@ mod tests {
             project_id: None,
             resume_cursor: Some("cursor-1".into()),
         });
+    }
+
+    #[test]
+    fn spawning_event_roundtrips() {
+        roundtrip(&ServerEvent::Spawning {
+            agent: "claude".into(),
+            project_id: Some("pid".into()),
+        });
+        roundtrip(&ServerEvent::Spawning {
+            agent: "opencode".into(),
+            project_id: None,
+        });
+    }
+
+    #[test]
+    fn resuming_event_roundtrips() {
+        roundtrip(&ServerEvent::Resuming {
+            session: "sid".into(),
+        });
+    }
+
+    #[test]
+    fn spawning_event_wire_format() {
+        let json = serde_json::to_string(&ServerEvent::Spawning {
+            agent: "claude".into(),
+            project_id: None,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"kind":"spawning","agent":"claude"}"#);
+    }
+
+    #[test]
+    fn resuming_event_wire_format() {
+        let json = serde_json::to_string(&ServerEvent::Resuming {
+            session: "sid".into(),
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"kind":"resuming","session":"sid"}"#);
     }
 
     #[test]
