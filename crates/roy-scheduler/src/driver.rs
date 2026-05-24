@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use croner::Cron;
 use sqlx::SqlitePool;
 
-use crate::plan::{plan_tick, TickPlan};
+use crate::plan::plan_tick;
 use crate::store::triggers;
 use crate::types::Trigger;
 
@@ -52,7 +52,7 @@ use std::path::PathBuf;
 use crate::roy_client::{self, FireOutcome};
 use crate::store::{agents, fires};
 use crate::subscribers;
-use crate::types::{Agent, Fire, FireStatus};
+use crate::types::{Agent, FireStatus};
 
 #[derive(Debug, Clone)]
 pub struct ServeOpts {
