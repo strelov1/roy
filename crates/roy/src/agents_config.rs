@@ -63,6 +63,59 @@ pub enum AgentsConfigError {
 }
 
 impl AgentsConfig {
+    pub fn validate(&self) -> Result<(), AgentsConfigError> {
+        use std::collections::HashSet;
+
+        let mut seen_preset = HashSet::new();
+        for agent in &self.agents {
+            if !seen_preset.insert(agent.preset) {
+                return Err(AgentsConfigError::Validate(format!(
+                    "duplicate preset '{}'",
+                    agent.preset
+                )));
+            }
+
+            let defaults: Vec<&str> = agent
+                .models
+                .iter()
+                .filter(|m| m.default)
+                .map(|m| m.id.as_str())
+                .collect();
+            if defaults.len() > 1 {
+                return Err(AgentsConfigError::Validate(format!(
+                    "agent '{}': two models marked default ({})",
+                    agent.preset,
+                    defaults.join(", ")
+                )));
+            }
+
+            let mut seen_id = HashSet::new();
+            for m in &agent.models {
+                if m.id.trim().is_empty() {
+                    return Err(AgentsConfigError::Validate(format!(
+                        "agent '{}': empty model id",
+                        agent.preset
+                    )));
+                }
+                if !seen_id.insert(m.id.as_str()) {
+                    return Err(AgentsConfigError::Validate(format!(
+                        "agent '{}': duplicate model id '{}'",
+                        agent.preset, m.id
+                    )));
+                }
+                if let Some(label) = &m.label {
+                    if label.trim().is_empty() {
+                        return Err(AgentsConfigError::Validate(format!(
+                            "agent '{}' model '{}': empty label",
+                            agent.preset, m.id
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn parse(text: &str) -> Result<Self, AgentsConfigError> {
         let cfg: AgentsConfig = toml::from_str(text)?;
         Ok(cfg)
@@ -113,5 +166,74 @@ mod tests {
         "#;
         let err = AgentsConfig::parse(text).unwrap_err();
         assert!(matches!(err, AgentsConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn rejects_duplicate_preset() {
+        let text = r#"
+        [[agent]]
+        preset = "claude"
+
+        [[agent]]
+        preset = "claude"
+    "#;
+        let cfg = AgentsConfig::parse(text).unwrap();
+        let err = cfg.validate().unwrap_err();
+        let AgentsConfigError::Validate(msg) = err else {
+            panic!("wrong variant")
+        };
+        assert!(msg.contains("duplicate"), "got: {msg}");
+        assert!(msg.contains("claude"), "got: {msg}");
+    }
+
+    #[test]
+    fn rejects_two_defaults_in_one_agent() {
+        let text = r#"
+        [[agent]]
+        preset = "claude"
+        [[agent.models]]
+        id = "claude-sonnet-4-6"
+        default = true
+        [[agent.models]]
+        id = "claude-opus-4-7"
+        default = true
+    "#;
+        let cfg = AgentsConfig::parse(text).unwrap();
+        let err = cfg.validate().unwrap_err();
+        let AgentsConfigError::Validate(msg) = err else {
+            panic!("wrong variant")
+        };
+        assert!(msg.contains("claude"));
+        assert!(msg.contains("claude-sonnet-4-6") && msg.contains("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn rejects_duplicate_model_id_in_one_agent() {
+        let text = r#"
+        [[agent]]
+        preset = "claude"
+        [[agent.models]]
+        id = "x"
+        [[agent.models]]
+        id = "x"
+    "#;
+        let cfg = AgentsConfig::parse(text).unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, AgentsConfigError::Validate(_)));
+    }
+
+    #[test]
+    fn rejects_empty_id() {
+        let text = r#"
+        [[agent]]
+        preset = "claude"
+        [[agent.models]]
+        id = ""
+    "#;
+        let cfg = AgentsConfig::parse(text).unwrap();
+        assert!(matches!(
+            cfg.validate(),
+            Err(AgentsConfigError::Validate(_))
+        ));
     }
 }
