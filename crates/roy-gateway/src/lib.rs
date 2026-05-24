@@ -1,7 +1,8 @@
 //! Roy → chat-platform gateway. v1 supports a single channel: Telegram.
 //!
 //! Architecture: one long-lived process per gateway, talks to a running
-//! `roy serve` daemon over its Unix socket using `ClientCommand::Fire`.
+//! `roy serve` daemon over its Unix socket. Each turn opens a `TurnConn`
+//! that drives Spawn/Resume → AcquireInput → Send → Frame stream → ReleaseInput.
 //! `(chat_id → roy session_id)` is persisted in a JSON file so chats
 //! survive restarts.
 //!

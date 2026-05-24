@@ -9,8 +9,9 @@ use teloxide::Bot;
 use tracing_subscriber::EnvFilter;
 
 use roy_gateway::binder::SessionBinder;
+use roy_gateway::cancel::CancelRegistry;
 use roy_gateway::config::GatewayConfig;
-use roy_gateway::daemon::DaemonClient;
+use roy_gateway::daemon::RealConnFactory;
 use roy_gateway::orchestrator::OrchestratorConfig;
 use roy_gateway::telegram::{run, BotDeps, TeloxideReplier};
 
@@ -59,12 +60,13 @@ async fn main() -> Result<()> {
             .with_context(|| format!("loading binder {}", binder_path.display()))?,
     );
 
-    let daemon = Arc::new(DaemonClient::new(socket_path));
+    let conn_factory = Arc::new(RealConnFactory::new(socket_path));
 
     let orch_cfg = Arc::new(OrchestratorConfig {
         preset: cfg.telegram.preset.clone(),
         project_id: cfg.telegram.project_id.clone(),
         turn_timeout: Duration::from_secs(cfg.telegram.turn_timeout_secs),
+        typing_interval: Duration::from_secs(4),
     });
 
     let bot = Bot::new(cfg.telegram.token);
@@ -74,8 +76,9 @@ async fn main() -> Result<()> {
     let deps = BotDeps {
         cfg: orch_cfg,
         binder,
-        daemon,
+        conn_factory,
         replier,
+        cancel_registry: CancelRegistry::new(),
         allowed_user_ids: Arc::new(allowed),
     };
 
