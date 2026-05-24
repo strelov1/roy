@@ -15,21 +15,28 @@ use crate::daemon::TransportFactory;
 use crate::engine::{EngineOpts, SessionEngine, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
 use crate::journal::{JournalEntry, Seq};
-use crate::project::{Project, ProjectRegistry};
+use crate::project::ProjectRegistry;
 use crate::session_meta::read_metadata;
 
 pub struct SessionManager {
     journal_dir: PathBuf,
+    workspace_dir: PathBuf,
     sessions: RwLock<HashMap<String, Arc<SessionEngine>>>,
     factory: Arc<dyn TransportFactory>,
     projects: Arc<ProjectRegistry>,
 }
 
 impl SessionManager {
-    pub fn new(journal_dir: PathBuf, factory: Arc<dyn TransportFactory>) -> Result<Self> {
-        let projects = Arc::new(ProjectRegistry::load(&journal_dir)?);
+    pub fn new(
+        journal_dir: PathBuf,
+        workspace_dir: PathBuf,
+        factory: Arc<dyn TransportFactory>,
+    ) -> Result<Self> {
+        std::fs::create_dir_all(&workspace_dir).map_err(RoyError::Io)?;
+        let projects = Arc::new(ProjectRegistry::load(&journal_dir, workspace_dir.clone())?);
         Ok(Self {
             journal_dir,
+            workspace_dir,
             sessions: RwLock::new(HashMap::new()),
             factory,
             projects,
@@ -39,19 +46,19 @@ impl SessionManager {
     /// Open a new session. The engine is spawned and registered before this
     /// returns; observers can `attach` immediately afterwards.
     ///
-    /// Returns `(engine, Some(project))` when the spawn auto-created a new
-    /// project for `cfg.cwd`, otherwise `(engine, None)`.
+    /// - `cfg.project_id = Some(id)`: look up that project and use its path.
+    /// - `cfg.project_id = None`: allocate an orphan dir at
+    ///   `<workspace>/<session_id>/`; the session is unowned.
+    ///
+    /// The `fixed_session_id` field in `cfg` (if set) pins the session UUID;
+    /// this is required for orphan sessions where we must know the id before
+    /// mkdir'ing the dir.
     pub async fn spawn(
         &self,
-        mut cfg: SessionSpawnConfig,
+        cfg: SessionSpawnConfig,
         broadcast_capacity: usize,
         mem_capacity: usize,
-    ) -> Result<(Arc<SessionEngine>, Option<Project>)> {
-        // Resolve (or create) the project for this cwd, then stamp the id into
-        // cfg before the engine writes its metadata.
-        let (project_id, created) = self.projects.resolve_or_create(&cfg.cwd)?;
-        cfg.project_id = project_id.clone();
-
+    ) -> Result<Arc<SessionEngine>> {
         let transport =
             self.factory
                 .build(&cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
@@ -62,9 +69,12 @@ impl SessionManager {
         };
         let engine = SessionEngine::spawn(transport, opts, cfg).await?;
         let id = engine.id().to_string();
-        self.projects.register_session(&project_id, &id);
+        // Register in the project membership index if the session has a project.
+        if let Some(pid) = engine.project_id() {
+            self.projects.register_session(pid, &id);
+        }
         self.sessions.write().await.insert(id, Arc::clone(&engine));
-        Ok((engine, created))
+        Ok(engine)
     }
 
     /// Resurrect a previously-closed (or restart-survived) session: read its
@@ -82,14 +92,20 @@ impl SessionManager {
             )));
         }
         let meta = read_metadata(&self.journal_dir, session_id).await?;
-        let project_id = self.projects.ensure_project(&meta.project_id, &meta.cwd)?;
+        // If the session had a project, verify it still exists in the registry;
+        // fail loudly rather than silently recovering (the session's cwd may
+        // have been deleted or moved).
+        if let Some(ref pid) = meta.project_id {
+            self.projects.ensure_project(pid)?;
+        }
         let cfg = SessionSpawnConfig {
             agent: meta.agent,
             cwd: meta.cwd,
-            project_id: project_id.clone(),
+            project_id: meta.project_id.clone(),
             model: meta.model,
             permission: meta.permission,
             resume_cursor: meta.resume_cursor,
+            fixed_session_id: Some(session_id.to_string()),
             tags: meta.tags,
         };
         let transport =
@@ -102,7 +118,9 @@ impl SessionManager {
         };
         let engine = SessionEngine::resume(transport, opts, session_id.to_string(), cfg).await?;
         let id = engine.id().to_string();
-        self.projects.register_session(&project_id, &id);
+        if let Some(ref pid) = meta.project_id {
+            self.projects.register_session(pid, &id);
+        }
         self.sessions.write().await.insert(id, Arc::clone(&engine));
         Ok(engine)
     }
@@ -286,14 +304,25 @@ impl SessionManager {
                     continue;
                 }
             };
-            let pid = self.projects.ensure_project(&meta.project_id, &meta.cwd)?;
-            self.projects.register_session(&pid, sid);
+            if let Some(ref pid) = meta.project_id {
+                match self.projects.ensure_project(pid) {
+                    Ok(verified_pid) => self.projects.register_session(&verified_pid, sid),
+                    Err(e) => {
+                        tracing::warn!(session = %sid, project_id = %pid, error = %e,
+                            "skip indexing: project not in registry");
+                    }
+                }
+            }
         }
         Ok(())
     }
 
     pub fn journal_dir(&self) -> &PathBuf {
         &self.journal_dir
+    }
+
+    pub fn workspace_dir(&self) -> &PathBuf {
+        &self.workspace_dir
     }
 
     pub fn factory(&self) -> &Arc<dyn TransportFactory> {
@@ -339,23 +368,33 @@ mod tests {
         std::env::temp_dir().join(format!("roy-manager-test-{}-{n}", std::process::id()))
     }
 
-    #[tokio::test]
-    async fn resume_all_brings_back_closed_sessions() {
-        let dir = tmp_dir();
-        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory)).expect("registry load");
+    fn new_mgr(dir: &PathBuf) -> SessionManager {
+        SessionManager::new(dir.clone(), dir.join("workspace"), Arc::new(FakeFactory))
+            .expect("registry load")
+    }
 
-        // Spawn → close two sessions to populate journals + metadata.
-        let cfg = |suffix: &str| SessionSpawnConfig {
-            agent: format!("agent-{suffix}"),
-            cwd: std::env::current_dir().unwrap(),
-            project_id: "test-project".into(),
+    /// Minimal orphan spawn config for tests.
+    fn orphan_cfg(agent: &str) -> SessionSpawnConfig {
+        SessionSpawnConfig {
+            agent: agent.to_string(),
+            cwd: std::env::temp_dir(),
+            project_id: None,
             model: None,
             permission: None,
             resume_cursor: None,
+            fixed_session_id: None,
             tags: std::collections::BTreeMap::default(),
-        };
-        let (e1, _) = mgr.spawn(cfg("a"), 256, 1024).await.unwrap();
-        let (e2, _) = mgr.spawn(cfg("b"), 256, 1024).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_all_brings_back_closed_sessions() {
+        let dir = tmp_dir();
+        let mgr = new_mgr(&dir);
+
+        // Spawn → close two sessions to populate journals + metadata.
+        let e1 = mgr.spawn(orphan_cfg("a"), 256, 1024).await.unwrap();
+        let e2 = mgr.spawn(orphan_cfg("b"), 256, 1024).await.unwrap();
         let id1 = e1.id().to_string();
         let id2 = e2.id().to_string();
         mgr.close(&id1).await.unwrap();
@@ -389,18 +428,9 @@ mod tests {
     #[tokio::test]
     async fn sweep_idle_closes_quiet_sessions() {
         let dir = tmp_dir();
-        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory)).expect("registry load");
+        let mgr = new_mgr(&dir);
 
-        let cfg = SessionSpawnConfig {
-            agent: "opencode".into(),
-            cwd: std::env::current_dir().unwrap(),
-            project_id: "test-project".into(),
-            model: None,
-            permission: None,
-            resume_cursor: None,
-            tags: std::collections::BTreeMap::default(),
-        };
-        let (engine, _) = mgr.spawn(cfg, 256, 1024).await.unwrap();
+        let engine = mgr.spawn(orphan_cfg("opencode"), 256, 1024).await.unwrap();
         let id = engine.id().to_string();
         assert_eq!(mgr.list().await, vec![id.clone()]);
 
@@ -421,19 +451,10 @@ mod tests {
     #[tokio::test]
     async fn registry_lifecycle() {
         let dir = tmp_dir();
-        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory)).expect("registry load");
+        let mgr = new_mgr(&dir);
         assert!(mgr.list().await.is_empty());
 
-        let cfg = SessionSpawnConfig {
-            agent: "opencode".into(),
-            cwd: std::env::current_dir().unwrap(),
-            project_id: "test-project".into(),
-            model: None,
-            permission: None,
-            resume_cursor: None,
-            tags: std::collections::BTreeMap::default(),
-        };
-        let (engine, _) = mgr.spawn(cfg, 256, 1024).await.unwrap();
+        let engine = mgr.spawn(orphan_cfg("opencode"), 256, 1024).await.unwrap();
         let id = engine.id().to_string();
 
         let ids = mgr.list().await;
@@ -452,19 +473,20 @@ mod tests {
     async fn index_existing_sessions_rebuilds_project_membership() {
         let dir = tmp_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        let factory: Arc<dyn TransportFactory> = Arc::new(FakeFactory);
-        let mgr = SessionManager::new(dir.clone(), factory).expect("registry load");
+        let mgr = new_mgr(&dir);
 
-        // Hand-write a meta file referencing a project id that doesn't exist
-        // in the registry; ensure_project must mint one for the meta's cwd.
+        // Create a real project in the registry so index_existing_sessions can
+        // verify it when it encounters a meta file that references it.
+        let project = mgr.projects().create_project("myproject").unwrap();
+        let pid = project.id.clone();
+
+        // Hand-write a meta file referencing that project id.
         let session_id = "manual-sid";
-        let proj_dir = dir.join("p1");
-        std::fs::create_dir_all(&proj_dir).unwrap();
         let meta = crate::session_meta::SessionMetadata {
             session_id: session_id.into(),
             agent: "fake".into(),
-            cwd: proj_dir.clone(),
-            project_id: "pre-existing-uuid".into(),
+            cwd: project.path.clone(),
+            project_id: Some(pid.clone()),
             model: None,
             permission: None,
             resume_cursor: None,
@@ -475,53 +497,26 @@ mod tests {
         std::fs::write(dir.join(format!("{session_id}.jsonl")), "").unwrap();
 
         mgr.index_existing_sessions().await.unwrap();
-        let projects = mgr.projects().list();
-        assert_eq!(projects.len(), 1, "ensure_project should mint one for the meta's cwd");
-        let sids = mgr.projects().sessions_in(&projects[0].id);
+        let sids = mgr.projects().sessions_in(&pid);
         assert_eq!(sids, vec![session_id.to_string()]);
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn spawn_auto_creates_project_for_new_cwd() {
-        let dir = tmp_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        let factory: Arc<dyn TransportFactory> = Arc::new(FakeFactory);
-        let mgr = SessionManager::new(dir.clone(), factory).expect("registry load");
-
-        let proj_dir = dir.join("a");
-        std::fs::create_dir_all(&proj_dir).unwrap();
-
-        let cfg = SessionSpawnConfig {
+        // A meta referencing an unknown project_id is skipped (warns, no panic).
+        let unknown_sid = "orphan-sid";
+        let orphan_meta = crate::session_meta::SessionMetadata {
+            session_id: unknown_sid.into(),
             agent: "fake".into(),
-            cwd: proj_dir.clone(),
-            project_id: String::new(),
+            cwd: dir.clone(),
+            project_id: Some("nonexistent-uuid".into()),
             model: None,
             permission: None,
             resume_cursor: None,
             tags: Default::default(),
         };
-        let (engine, created) = mgr.spawn(cfg, 16, 16).await.unwrap();
-        assert!(created.is_some(), "fresh cwd must auto-create project");
-        let pid = created.unwrap().id;
-        assert_eq!(mgr.projects().sessions_in(&pid), vec![engine.id().to_string()]);
+        crate::session_meta::write_metadata(&dir, &orphan_meta).await.unwrap();
+        std::fs::write(dir.join(format!("{unknown_sid}.jsonl")), "").unwrap();
 
-        // Second spawn into same cwd reuses the same project.
-        let cfg2 = SessionSpawnConfig {
-            agent: "fake".into(),
-            cwd: proj_dir.clone(),
-            project_id: String::new(),
-            model: None,
-            permission: None,
-            resume_cursor: None,
-            tags: Default::default(),
-        };
-        let (_engine2, created2) = mgr.spawn(cfg2, 16, 16).await.unwrap();
-        assert!(created2.is_none(), "existing project must not be re-created");
-        let mut sids = mgr.projects().sessions_in(&pid);
-        sids.sort();
-        assert_eq!(sids.len(), 2);
+        // Should complete without error even with unknown project.
+        mgr.index_existing_sessions().await.unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
     }
