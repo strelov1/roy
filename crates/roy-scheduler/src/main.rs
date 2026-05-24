@@ -11,8 +11,6 @@
 //! |      | `stop_reason.is_error()` or the `Fire` outcome was Error). |
 //! | 2    | Transport / CLI / DB error (no daemon, bad flag, etc.).    |
 
-mod pid_lock;
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -310,7 +308,7 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     // exits (currently only on a panic propagated out of driver::serve)
     // Drop releases the pid file. A SIGINT here lets tokio cancel the
     // future, dropping the lock the same way.
-    let _lock = pid_lock::PidLock::acquire(&pid_path)
+    let _lock = roy::PidLock::acquire(&pid_path)
         .with_context(|| format!("acquiring pid lock at {}", pid_path.display()))?;
 
     let mut opts = ServeOpts {
