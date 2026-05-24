@@ -4,7 +4,8 @@
 
 use std::process::Command;
 
-use anyhow::Context;
+use anyhow::{Context, Result};
+use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::roy_client::FireSuccess;
@@ -17,7 +18,7 @@ pub struct Config {
     pub sound: Option<String>,
 }
 
-pub fn parse_config(json: &str) -> anyhow::Result<Config> {
+pub fn parse_config(json: &str) -> Result<Config> {
     serde_json::from_str(json).context("notify_native config")
 }
 
@@ -26,18 +27,14 @@ pub struct ExecOutcome {
     pub error_message: Option<String>,
 }
 
-pub async fn execute(config_json: &str, agent_name: &str, success: &FireSuccess) -> ExecOutcome {
-    let cfg = match parse_config(config_json) {
-        Ok(c) => c,
-        Err(e) => {
-            return ExecOutcome {
-                status: "error",
-                error_message: Some(format!("config: {e}")),
-            };
-        }
-    };
+pub async fn execute_with_cfg(
+    cfg: &Config,
+    agent_name: &str,
+    success: &FireSuccess,
+) -> ExecOutcome {
     let title = cfg
         .title
+        .clone()
         .unwrap_or_else(|| format!("roy-scheduler: {agent_name}"));
     let body = first_line_or_summary(&success.assistant_text);
 
@@ -49,6 +46,32 @@ pub async fn execute(config_json: &str, agent_name: &str, success: &FireSuccess)
     tokio::task::spawn_blocking(move || run_blocking(title, body))
         .await
         .unwrap_or_else(|_| err("spawn_blocking panicked".into()))
+}
+
+pub fn build(config_json: &str) -> Result<Box<dyn super::Subscriber>> {
+    let cfg = parse_config(config_json)?;
+    Ok(Box::new(NotifyNativeSubscriber { cfg }))
+}
+
+pub struct NotifyNativeSubscriber {
+    cfg: Config,
+}
+
+#[async_trait]
+impl super::Subscriber for NotifyNativeSubscriber {
+    async fn run(&self, ctx: &super::FireCtx<'_>) -> super::Outcome {
+        let Some(success) = ctx.success else {
+            return super::Outcome::skipped("notify_native skipped (fire did not succeed)");
+        };
+        let exec = execute_with_cfg(&self.cfg, ctx.agent_name, success).await;
+        match exec.status {
+            "ok" => super::Outcome::ok(),
+            _ => super::Outcome::error(
+                exec.error_message
+                    .unwrap_or_else(|| "notify_native failed".into()),
+            ),
+        }
+    }
 }
 
 fn run_blocking(title: String, body: String) -> ExecOutcome {

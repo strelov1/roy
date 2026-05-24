@@ -13,6 +13,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::roy_client::{self, FireOutcome, FireSuccess};
@@ -33,22 +34,8 @@ pub struct ExecOutcome {
     pub error_message: Option<String>,
 }
 
-pub async fn execute(
-    socket_path: &Path,
-    config_json: &str,
-    fire_result: &FireSuccess,
-) -> ExecOutcome {
-    let cfg = match parse_config(config_json) {
-        Ok(c) => c,
-        Err(e) => {
-            return ExecOutcome {
-                status: "error",
-                error_message: Some(format!("config: {e}")),
-            };
-        }
-    };
-
-    let body = match cfg.prefix {
+pub async fn execute(socket_path: &Path, cfg: &Config, fire_result: &FireSuccess) -> ExecOutcome {
+    let body = match &cfg.prefix {
         Some(p) => format!("{p}{}", fire_result.assistant_text),
         None => fire_result.assistant_text.clone(),
     };
@@ -85,6 +72,32 @@ pub async fn execute(
             status: "error",
             error_message: Some(format!("roy_client: {e:#}")),
         },
+    }
+}
+
+pub fn build(config_json: &str) -> Result<Box<dyn super::Subscriber>> {
+    let cfg = parse_config(config_json)?;
+    Ok(Box::new(InjectParentSubscriber { cfg }))
+}
+
+pub struct InjectParentSubscriber {
+    cfg: Config,
+}
+
+#[async_trait]
+impl super::Subscriber for InjectParentSubscriber {
+    async fn run(&self, ctx: &super::FireCtx<'_>) -> super::Outcome {
+        let Some(success) = ctx.success else {
+            return super::Outcome::skipped("inject_parent skipped (fire did not succeed)");
+        };
+        let exec = execute(ctx.socket_path, &self.cfg, success).await;
+        match exec.status {
+            "ok" => super::Outcome::ok(),
+            _ => super::Outcome::error(
+                exec.error_message
+                    .unwrap_or_else(|| "inject_parent failed".into()),
+            ),
+        }
     }
 }
 
@@ -149,7 +162,8 @@ mod tests {
         )
         .await;
 
-        let out = execute(&path, r#"{"session_id":"parent-sid"}"#, &fake_success()).await;
+        let cfg = parse_config(r#"{"session_id":"parent-sid"}"#).unwrap();
+        let out = execute(&path, &cfg, &fake_success()).await;
         assert_eq!(out.status, "ok");
     }
 
@@ -167,7 +181,8 @@ mod tests {
         )
         .await;
 
-        let out = execute(&path, r#"{"session_id":"parent-sid"}"#, &fake_success()).await;
+        let cfg = parse_config(r#"{"session_id":"parent-sid"}"#).unwrap();
+        let out = execute(&path, &cfg, &fake_success()).await;
         assert_eq!(out.status, "error");
         assert!(out.error_message.unwrap().contains("no_session"));
     }

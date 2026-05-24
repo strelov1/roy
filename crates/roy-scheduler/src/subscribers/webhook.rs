@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::roy_client::FireSuccess;
@@ -115,18 +116,7 @@ pub struct ExecOutcome {
     pub response_snippet: Option<String>,
 }
 
-pub async fn execute(config_json: &str, ctx: &HashMap<String, String>) -> ExecOutcome {
-    let cfg = match parse_config(config_json) {
-        Ok(c) => c,
-        Err(e) => {
-            return ExecOutcome {
-                status: "error",
-                error_message: Some(format!("config: {e}")),
-                response_snippet: None,
-            };
-        }
-    };
-
+pub async fn execute_with_cfg(cfg: &Config, ctx: &HashMap<String, String>) -> ExecOutcome {
     let body = cfg
         .body_template
         .as_deref()
@@ -194,6 +184,51 @@ pub async fn execute(config_json: &str, ctx: &HashMap<String, String>) -> ExecOu
             error_message: Some(format!("send: {e}")),
             response_snippet: None,
         },
+    }
+}
+
+/// Backwards-compat wrapper used by existing tests and any callers that pass
+/// config JSON rather than a parsed `Config`.
+pub async fn execute(config_json: &str, ctx: &HashMap<String, String>) -> ExecOutcome {
+    let cfg = match parse_config(config_json) {
+        Ok(c) => c,
+        Err(e) => {
+            return ExecOutcome {
+                status: "error",
+                error_message: Some(format!("config: {e}")),
+                response_snippet: None,
+            };
+        }
+    };
+    execute_with_cfg(&cfg, ctx).await
+}
+
+pub fn build(config_json: &str) -> Result<Box<dyn super::Subscriber>> {
+    let cfg = parse_config(config_json)?;
+    Ok(Box::new(WebhookSubscriber { cfg }))
+}
+
+pub struct WebhookSubscriber {
+    cfg: Config,
+}
+
+#[async_trait]
+impl super::Subscriber for WebhookSubscriber {
+    async fn run(&self, ctx: &super::FireCtx<'_>) -> super::Outcome {
+        let render_ctx = build_context(ctx.fire, ctx.agent_name, ctx.success, ctx.error_message);
+        let exec = execute_with_cfg(&self.cfg, &render_ctx).await;
+        match exec.status {
+            "ok" => super::Outcome {
+                status: super::RunStatus::Ok,
+                error_message: exec.error_message,
+                response_snippet: exec.response_snippet,
+            },
+            _ => super::Outcome {
+                status: super::RunStatus::Error,
+                error_message: exec.error_message,
+                response_snippet: exec.response_snippet,
+            },
+        }
     }
 }
 
