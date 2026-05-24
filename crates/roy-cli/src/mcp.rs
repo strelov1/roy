@@ -219,6 +219,34 @@ fn tools_list() -> Value {
                     "required": ["prompt"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "roy_list_projects",
+                "description": "List all projects in the roy registry. Each project has an id (UUID), a display name, the canonical filesystem path, and a created_at timestamp.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+            },
+            {
+                "name": "roy_create_project",
+                "description": "Register a directory as a roy project. The path must exist on disk. If `name` is omitted, the directory's basename is used. Returns the new project's id.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "name": {"type": "string"}
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "roy_delete_project",
+                "description": "Cascade-delete a project and every session it owns. Permanently removes journal + metadata files. Returns the list of deleted session ids.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"project_id": {"type": "string"}},
+                    "required": ["project_id"],
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -239,6 +267,9 @@ async fn tools_call(id: Value, req: &Value, socket_path: &Path) -> Value {
         "roy_set_tags" => tool_set_tags(socket_path, args).await,
         "roy_wait_for_result" => tool_wait_for_result(socket_path, args).await,
         "roy_fire" => tool_fire(socket_path, args).await,
+        "roy_list_projects" => tool_list_projects(socket_path).await,
+        "roy_create_project" => tool_create_project(socket_path, args).await,
+        "roy_delete_project" => tool_delete_project(socket_path, args).await,
         other => Err(anyhow!("unknown tool: {other}")),
     };
 
@@ -835,6 +866,66 @@ async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<St
     }
 }
 
+async fn tool_list_projects(socket_path: &Path) -> anyhow::Result<String> {
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(&mut writer, &ClientCommand::ListProjects).await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::ProjectsListed { projects } => Ok(serde_json::to_string(&projects)?),
+        ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
+}
+
+async fn tool_create_project(socket_path: &Path, args: Value) -> anyhow::Result<String> {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing required field: path"))?
+        .to_string();
+    let name = args.get("name").and_then(Value::as_str).map(str::to_string);
+
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(
+        &mut writer,
+        &ClientCommand::CreateProject {
+            path: PathBuf::from(path),
+            name,
+        },
+    )
+    .await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::ProjectCreated { project } => Ok(serde_json::to_string(&project)?),
+        ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
+}
+
+async fn tool_delete_project(socket_path: &Path, args: Value) -> anyhow::Result<String> {
+    let project_id = args
+        .get("project_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing required field: project_id"))?
+        .to_string();
+
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(
+        &mut writer,
+        &ClientCommand::DeleteProject { project_id },
+    )
+    .await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::ProjectDeleted {
+            project_id,
+            deleted_sessions,
+        } => Ok(serde_json::to_string(&json!({
+            "project_id": project_id,
+            "deleted_sessions": deleted_sessions,
+        }))?),
+        ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
+}
+
 async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> anyhow::Result<()> {
     let line = serde_json::to_string(v)?;
     w.write_all(line.as_bytes()).await?;
@@ -871,6 +962,9 @@ mod tests {
                 "roy_set_tags",
                 "roy_wait_for_result",
                 "roy_fire",
+                "roy_list_projects",
+                "roy_create_project",
+                "roy_delete_project",
             ]
         );
     }
