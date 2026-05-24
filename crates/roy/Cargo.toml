@@ -24,6 +24,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 futures = "0.3"
+tempfile = "3"
 
 [[example]]
 name = "demo_gemini"

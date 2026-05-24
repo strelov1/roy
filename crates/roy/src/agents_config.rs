@@ -3,6 +3,8 @@
 //! `~/.config/roy/agents.toml`. This module owns parsing, validation, and
 //! the bootstrap-when-missing dance.
 
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 pub const SAMPLE_TOML: &str = include_str!("../templates/agents_sample.toml");
@@ -121,6 +123,73 @@ impl AgentsConfig {
     pub fn parse(text: &str) -> Result<Self, AgentsConfigError> {
         let cfg: AgentsConfig = toml::from_str(text)?;
         Ok(cfg)
+    }
+}
+
+/// Outcome of `load_or_bootstrap`. `Created` signals the file was missing
+/// and a sample was written; callers expose this as `status: created` on
+/// the wire so the UI can show a one-time hint.
+#[derive(Debug)]
+pub enum LoadOutcome {
+    Ok(AgentsConfig),
+    Created,
+}
+
+/// Resolve the config path. Precedence:
+/// 1. `$ROY_AGENTS_CONFIG` (override; mostly for tests + systemd).
+/// 2. `$XDG_CONFIG_HOME/roy/agents.toml`.
+/// 3. `$HOME/.config/roy/agents.toml`.
+///
+/// Returns an error only if `$HOME` is unset *and* the fallback is needed.
+pub fn config_path() -> Result<PathBuf, AgentsConfigError> {
+    if let Ok(p) = std::env::var("ROY_AGENTS_CONFIG") {
+        return Ok(PathBuf::from(p));
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return Ok(PathBuf::from(xdg).join("roy").join("agents.toml"));
+        }
+    }
+    let home = std::env::var("HOME").map_err(|_| {
+        AgentsConfigError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "HOME unset, cannot locate agents.toml",
+        ))
+    })?;
+    Ok(PathBuf::from(home)
+        .join(".config")
+        .join("roy")
+        .join("agents.toml"))
+}
+
+/// Atomic write: temp file + rename. Crash-safe; concurrent callers race
+/// on `rename` and the loser silently overwrites with identical content.
+async fn write_sample(path: &Path) -> Result<(), AgentsConfigError> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    tokio::fs::write(&tmp, SAMPLE_TOML).await?;
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
+/// Read+parse+validate the config at `path`. If the file is missing, write
+/// the sample and return `Created` (with no parsed config — the sample is
+/// entirely commented and would yield an empty config; we surface the
+/// "first run" signal instead).
+pub async fn load_or_bootstrap(path: &Path) -> Result<LoadOutcome, AgentsConfigError> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(text) => {
+            let cfg = AgentsConfig::parse(&text)?;
+            cfg.validate()?;
+            Ok(LoadOutcome::Ok(cfg))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            write_sample(path).await?;
+            Ok(LoadOutcome::Created)
+        }
+        Err(e) => Err(AgentsConfigError::Io(e)),
     }
 }
 
@@ -247,5 +316,58 @@ mod tests {
         let cfg = AgentsConfig::parse(SAMPLE_TOML).expect("sample parses");
         cfg.validate().expect("sample validates");
         assert!(cfg.agents.is_empty(), "sample must be fully commented out");
+    }
+
+    #[tokio::test]
+    async fn bootstraps_missing_file_with_sample() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("agents.toml");
+        let outcome = load_or_bootstrap(&path).await.unwrap();
+        assert!(matches!(outcome, LoadOutcome::Created));
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(written, SAMPLE_TOML);
+    }
+
+    #[tokio::test]
+    async fn loads_existing_valid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("agents.toml");
+        tokio::fs::write(
+            &path,
+            r#"
+            [[agent]]
+            preset = "gemini"
+            [[agent.models]]
+            id = "gemini-2.5-pro"
+            default = true
+        "#,
+        )
+        .await
+        .unwrap();
+        let outcome = load_or_bootstrap(&path).await.unwrap();
+        let LoadOutcome::Ok(cfg) = outcome else {
+            panic!("expected Ok")
+        };
+        assert_eq!(cfg.agents.len(), 1);
+        assert_eq!(cfg.agents[0].preset, AgentPreset::Gemini);
+    }
+
+    #[tokio::test]
+    async fn surfaces_validation_error_on_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("agents.toml");
+        tokio::fs::write(
+            &path,
+            r#"
+            [[agent]]
+            preset = "claude"
+            [[agent]]
+            preset = "claude"
+        "#,
+        )
+        .await
+        .unwrap();
+        let err = load_or_bootstrap(&path).await.unwrap_err();
+        assert!(matches!(err, AgentsConfigError::Validate(_)));
     }
 }
