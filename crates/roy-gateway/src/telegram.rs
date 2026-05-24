@@ -1,45 +1,20 @@
-//! Teloxide bot loop: receive text DMs, route through the orchestrator,
-//! reply with the assistant's final text.
-//!
-//! Only text DMs are handled in v1. Group chats, slash commands, photos,
-//! and edits are ignored.
+//! Teloxide bot loop. Dispatches /cancel vs text messages, runs the streaming
+//! pipeline on text, and signals the cancel registry on /cancel.
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use teloxide::prelude::*;
-use teloxide::types::ChatId;
+use teloxide::types::{ChatAction, ChatId, MessageId, ParseMode};
 
 use crate::binder::SessionBinder;
-use crate::daemon::{DaemonClient, FireOutcome};
-use crate::orchestrator::{handle_message, Fire, OrchestratorConfig, Replier};
-
-#[async_trait]
-impl Fire for DaemonClient {
-    async fn fire_spawn(
-        &self,
-        preset: &str,
-        project_id: Option<String>,
-        prompt: String,
-        tags: std::collections::BTreeMap<String, String>,
-        timeout: Duration,
-    ) -> Result<FireOutcome> {
-        DaemonClient::fire_spawn(self, preset, project_id, prompt, tags, timeout).await
-    }
-
-    async fn fire_resume(
-        &self,
-        session_id: &str,
-        prompt: String,
-        tags: std::collections::BTreeMap<String, String>,
-        timeout: Duration,
-    ) -> Result<FireOutcome> {
-        DaemonClient::fire_resume(self, session_id, prompt, tags, timeout).await
-    }
-}
+use crate::cancel::CancelRegistry;
+use crate::daemon::RealConnFactory;
+use crate::draft_stream::DraftReplier;
+use crate::orchestrator::{handle_message, OrchestratorConfig, Replier};
+use crate::typing::TypingReplier;
 
 pub struct TeloxideReplier {
     bot: Bot,
@@ -52,29 +27,53 @@ impl TeloxideReplier {
 }
 
 #[async_trait]
-impl Replier for TeloxideReplier {
-    async fn send(&self, chat_id: i64, text: &str) -> Result<()> {
-        self.bot.send_message(ChatId(chat_id), text).await?;
+impl DraftReplier for TeloxideReplier {
+    async fn send(&self, chat_id: i64, html: &str) -> Result<i32> {
+        let msg = self
+            .bot
+            .send_message(ChatId(chat_id), html)
+            .parse_mode(ParseMode::Html)
+            .await?;
+        Ok(msg.id.0)
+    }
+
+    async fn edit(&self, chat_id: i64, message_id: i32, html: &str) -> Result<()> {
+        self.bot
+            .edit_message_text(ChatId(chat_id), MessageId(message_id), html)
+            .parse_mode(ParseMode::Html)
+            .await?;
         Ok(())
     }
 }
+
+#[async_trait]
+impl TypingReplier for TeloxideReplier {
+    async fn typing(&self, chat_id: i64) -> Result<()> {
+        self.bot
+            .send_chat_action(ChatId(chat_id), ChatAction::Typing)
+            .await?;
+        Ok(())
+    }
+}
+
+impl Replier for TeloxideReplier {}
 
 #[derive(Clone)]
 pub struct BotDeps {
     pub cfg: Arc<OrchestratorConfig>,
     pub binder: Arc<SessionBinder>,
-    pub daemon: Arc<DaemonClient>,
+    pub conn_factory: Arc<RealConnFactory>,
     pub replier: Arc<TeloxideReplier>,
+    pub cancel_registry: Arc<CancelRegistry>,
     pub allowed_user_ids: Arc<HashSet<u64>>,
 }
 
-/// Spawn the bot and block until ctrl-C / hangup.
 pub async fn run(bot: Bot, deps: BotDeps) -> Result<()> {
     tracing::info!("starting teloxide dispatcher");
 
     let handler =
-        Update::filter_message().endpoint(|bot: Bot, msg: Message, deps: BotDeps| async move {
-            if let Err(e) = on_message(&bot, &msg, &deps).await {
+        Update::filter_message().endpoint(|_bot: Bot, msg: Message, deps: BotDeps| async move {
+            if let Err(e) = on_message(&msg, &deps).await {
                 tracing::warn!(?e, chat_id = msg.chat.id.0, "message handler failed");
             }
             respond(())
@@ -90,7 +89,7 @@ pub async fn run(bot: Bot, deps: BotDeps) -> Result<()> {
     Ok(())
 }
 
-async fn on_message(_bot: &Bot, msg: &Message, deps: &BotDeps) -> Result<()> {
+async fn on_message(msg: &Message, deps: &BotDeps) -> Result<()> {
     let Some(text) = msg.text() else {
         return Ok(());
     };
@@ -103,13 +102,60 @@ async fn on_message(_bot: &Bot, msg: &Message, deps: &BotDeps) -> Result<()> {
         return Ok(());
     }
 
-    handle_message(
-        deps.cfg.as_ref(),
-        deps.binder.as_ref(),
-        deps.daemon.as_ref(),
-        deps.replier.as_ref(),
-        msg.chat.id.0,
-        text.to_string(),
-    )
-    .await
+    let chat_id = msg.chat.id.0;
+
+    if is_cancel_command(text) {
+        on_cancel(deps, chat_id).await
+    } else {
+        handle_message(
+            deps.cfg.as_ref(),
+            deps.binder.as_ref(),
+            deps.cancel_registry.as_ref(),
+            deps.conn_factory.as_ref(),
+            &deps.replier,
+            chat_id,
+            text.to_string(),
+        )
+        .await
+    }
+}
+
+fn is_cancel_command(text: &str) -> bool {
+    let head = text.split_whitespace().next().unwrap_or("");
+    head == "/cancel" || head.starts_with("/cancel@")
+}
+
+async fn on_cancel(deps: &BotDeps, chat_id: i64) -> Result<()> {
+    let signaled = deps.cancel_registry.signal(chat_id).await;
+    let reply = if signaled {
+        "❎ cancelled"
+    } else {
+        "Нечего отменять — turn не запущен"
+    };
+    deps.replier.send(chat_id, reply).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_plain_cancel() {
+        assert!(is_cancel_command("/cancel"));
+        assert!(is_cancel_command("/cancel  "));
+        assert!(is_cancel_command("/cancel reason ignored"));
+    }
+
+    #[test]
+    fn detects_cancel_with_bot_suffix() {
+        assert!(is_cancel_command("/cancel@my_bot"));
+    }
+
+    #[test]
+    fn does_not_match_other_text() {
+        assert!(!is_cancel_command("cancel"));
+        assert!(!is_cancel_command("hello /cancel"));
+        assert!(!is_cancel_command(""));
+    }
 }
