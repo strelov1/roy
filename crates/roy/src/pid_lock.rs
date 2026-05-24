@@ -82,10 +82,32 @@ fn read_pid(path: &Path) -> Result<Option<i32>> {
     Ok(s.trim().parse::<i32>().ok())
 }
 
+/// Best-effort read of the pid stored at `path`. Returns `None` when the file
+/// is missing, unreadable, or doesn't parse as an integer. Use this from
+/// `status`-style commands that want to surface "who owns the lock right now?"
+/// without trying to acquire it.
+pub fn peek_pid(path: &Path) -> Option<i32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Pid-file path the daemon installs alongside its Unix socket. Mirrors the
+/// logic in `Daemon::run_with_opts`: `daemon.sock` → `daemon.sock.pid`, a
+/// suffix-less socket → `<name>.pid`. Sharing this helper keeps the daemon
+/// and `roy status` from drifting on the convention.
+pub fn pid_path_for_socket(socket: &Path) -> PathBuf {
+    socket.with_extension(
+        socket
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!("{e}.pid"))
+            .unwrap_or_else(|| "pid".to_string()),
+    )
+}
+
 /// True if a process with `pid` is alive. Uses `kill(pid, 0)` which sends no
 /// signal but performs the permission/existence checks: returns 0 iff a
 /// process exists and we may signal it, errors with ESRCH iff no such pid.
-fn pid_alive(pid: i32) -> bool {
+pub fn pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
@@ -156,6 +178,42 @@ mod tests {
             mode, 0o600,
             "pid file must be 0600 regardless of umask, got {mode:o}"
         );
+    }
+
+    #[test]
+    fn peek_pid_returns_value_when_file_holds_integer() {
+        let path = tmp_path();
+        std::fs::write(&path, "12345\n").unwrap();
+        assert_eq!(peek_pid(&path), Some(12345));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn peek_pid_is_none_for_missing_or_garbage() {
+        let path = tmp_path();
+        assert_eq!(peek_pid(&path), None);
+        std::fs::write(&path, "not-a-number\n").unwrap();
+        assert_eq!(peek_pid(&path), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pid_alive_true_for_own_pid_false_for_zero() {
+        assert!(pid_alive(std::process::id() as i32));
+        assert!(!pid_alive(0));
+        assert!(!pid_alive(-1));
+    }
+
+    #[test]
+    fn pid_path_for_socket_appends_pid_to_existing_extension() {
+        let p = pid_path_for_socket(Path::new("/tmp/daemon.sock"));
+        assert_eq!(p, PathBuf::from("/tmp/daemon.sock.pid"));
+    }
+
+    #[test]
+    fn pid_path_for_socket_uses_pid_when_no_extension() {
+        let p = pid_path_for_socket(Path::new("/tmp/daemon"));
+        assert_eq!(p, PathBuf::from("/tmp/daemon.pid"));
     }
 
     #[test]
