@@ -11,6 +11,7 @@ use anyhow::{anyhow, Context};
 use clap::{Parser, Subcommand};
 use roy::{
     daemon::{Daemon, DefaultTransportFactory},
+    project::Project,
     ClientCommand, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -53,6 +54,11 @@ enum Cmd {
     /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
     /// IDE plugin) which talks to it over stdio.
     Mcp(McpArgs),
+    /// Manage projects (list / create / rename / delete).
+    Projects {
+        #[command(subcommand)]
+        cmd: ProjectsCmd,
+    },
 }
 
 #[derive(clap::Args)]
@@ -158,6 +164,26 @@ struct McpArgs {
     socket: Option<PathBuf>,
 }
 
+#[derive(Subcommand)]
+enum ProjectsCmd {
+    /// List projects.
+    List,
+    /// Create a project at <path>. The path must exist on disk.
+    Create {
+        path: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Rename a project (id or unique name match).
+    Rename { id_or_name: String, new_name: String },
+    /// Cascade-delete a project and all its sessions.
+    Delete {
+        id_or_name: String,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 fn main() -> ExitCode {
     init_tracing();
     let cli = Cli::parse();
@@ -198,6 +224,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
             let socket = args.socket.unwrap_or_else(default_socket);
             mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
         }
+        Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
     }
 }
 
@@ -303,9 +330,19 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     let (session, resume_cursor) = match read_event(&mut events).await? {
         ServerEvent::Spawned {
             session,
+            project_id,
+            project: created_project,
             resume_cursor,
             ..
         } => {
+            eprintln!("roy run: session {session} project {project_id}");
+            if let Some(p) = &created_project {
+                eprintln!(
+                    "roy run: project auto-created '{}' at {}",
+                    p.name,
+                    p.path.display()
+                );
+            }
             if args.detach {
                 let payload = serde_json::json!({
                     "type": "session",
@@ -671,6 +708,111 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::from(2))
         }
         other => anyhow::bail!("unexpected response to Fire: {other:?}"),
+    }
+}
+
+async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<()> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    match cmd {
+        ProjectsCmd::List => {
+            send_cmd(&mut writer, &ClientCommand::ListProjects).await?;
+            match read_event(&mut events).await? {
+                ServerEvent::ProjectsListed { projects } => {
+                    for p in projects {
+                        println!("{}\t{}\t{}", p.id, p.name, p.path.display());
+                    }
+                    Ok(())
+                }
+                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+                other => Err(anyhow!("unexpected: {other:?}")),
+            }
+        }
+        ProjectsCmd::Create { path, name } => {
+            send_cmd(&mut writer, &ClientCommand::CreateProject { path, name }).await?;
+            match read_event(&mut events).await? {
+                ServerEvent::ProjectCreated { project } => {
+                    println!("{}", project.id);
+                    eprintln!("created project {} at {}", project.name, project.path.display());
+                    Ok(())
+                }
+                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+                other => Err(anyhow!("unexpected: {other:?}")),
+            }
+        }
+        ProjectsCmd::Rename { id_or_name, new_name } => {
+            let project_id =
+                resolve_project_id(&mut writer, &mut events, &id_or_name).await?;
+            send_cmd(
+                &mut writer,
+                &ClientCommand::RenameProject { project_id, name: new_name },
+            )
+            .await?;
+            match read_event(&mut events).await? {
+                ServerEvent::ProjectRenamed { project } => {
+                    println!("{}", project.name);
+                    Ok(())
+                }
+                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+                other => Err(anyhow!("unexpected: {other:?}")),
+            }
+        }
+        ProjectsCmd::Delete { id_or_name, yes } => {
+            let project_id =
+                resolve_project_id(&mut writer, &mut events, &id_or_name).await?;
+            if !yes {
+                eprintln!(
+                    "This will delete project {project_id} and all its sessions. Re-run with --yes to confirm."
+                );
+                return Ok(());
+            }
+            send_cmd(
+                &mut writer,
+                &ClientCommand::DeleteProject { project_id: project_id.clone() },
+            )
+            .await?;
+            match read_event(&mut events).await? {
+                ServerEvent::ProjectDeleted { project_id, deleted_sessions } => {
+                    eprintln!(
+                        "deleted project {project_id} ({} sessions)",
+                        deleted_sessions.len()
+                    );
+                    Ok(())
+                }
+                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+                other => Err(anyhow!("unexpected: {other:?}")),
+            }
+        }
+    }
+}
+
+/// Resolve a user-supplied id-or-name to a project id by listing projects and
+/// matching first by id (exact), then by unique name.
+async fn resolve_project_id<B: AsyncBufReadExt + Unpin>(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    events: &mut tokio::io::Lines<B>,
+    query: &str,
+) -> anyhow::Result<String> {
+    send_cmd(writer, &ClientCommand::ListProjects).await?;
+    let projects: Vec<Project> = match read_event(events).await? {
+        ServerEvent::ProjectsListed { projects } => projects,
+        ServerEvent::Error { code, message, .. } => {
+            return Err(anyhow!("{code}: {message}"));
+        }
+        other => return Err(anyhow!("unexpected: {other:?}")),
+    };
+    if let Some(p) = projects.iter().find(|p| p.id == query) {
+        return Ok(p.id.clone());
+    }
+    let by_name: Vec<&Project> = projects.iter().filter(|p| p.name == query).collect();
+    match by_name.as_slice() {
+        [p] => Ok(p.id.clone()),
+        [] => Err(anyhow!("no project named or id `{query}`")),
+        _ => Err(anyhow!(
+            "ambiguous name `{query}` — multiple projects match; specify id"
+        )),
     }
 }
 
