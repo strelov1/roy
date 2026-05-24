@@ -25,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
             SessionSpawnConfig {
                 agent: "opencode".into(),
                 cwd,
+                project_id: "demo".into(),
                 model: None,
                 permission: None,
                 resume_cursor: None,

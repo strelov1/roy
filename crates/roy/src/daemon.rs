@@ -542,6 +542,7 @@ impl Daemon {
         let cfg = SessionSpawnConfig {
             agent,
             cwd: cwd.map(PathBuf::from).unwrap_or_else(default_agent_cwd),
+            project_id: String::new(),
             model,
             permission,
             resume_cursor: resume,
@@ -718,6 +719,7 @@ impl Daemon {
                 let cfg = SessionSpawnConfig {
                     agent: preset,
                     cwd: cwd.map(PathBuf::from).unwrap_or_else(default_agent_cwd),
+                    project_id: String::new(),
                     model: None,
                     permission: None,
                     resume_cursor: None,

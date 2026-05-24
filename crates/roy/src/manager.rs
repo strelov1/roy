@@ -72,6 +72,7 @@ impl SessionManager {
         let cfg = SessionSpawnConfig {
             agent: meta.agent,
             cwd: meta.cwd,
+            project_id: meta.project_id,
             model: meta.model,
             permission: meta.permission,
             resume_cursor: meta.resume_cursor,
@@ -292,6 +293,7 @@ mod tests {
         let cfg = |suffix: &str| SessionSpawnConfig {
             agent: format!("agent-{suffix}"),
             cwd: std::env::current_dir().unwrap(),
+            project_id: "test-project".into(),
             model: None,
             permission: None,
             resume_cursor: None,
@@ -337,6 +339,7 @@ mod tests {
         let cfg = SessionSpawnConfig {
             agent: "opencode".into(),
             cwd: std::env::current_dir().unwrap(),
+            project_id: "test-project".into(),
             model: None,
             permission: None,
             resume_cursor: None,
@@ -369,6 +372,7 @@ mod tests {
         let cfg = SessionSpawnConfig {
             agent: "opencode".into(),
             cwd: std::env::current_dir().unwrap(),
+            project_id: "test-project".into(),
             model: None,
             permission: None,
             resume_cursor: None,

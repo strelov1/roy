@@ -48,6 +48,7 @@ impl EngineOpts {
 pub struct SessionSpawnConfig {
     pub agent: String,
     pub cwd: PathBuf,
+    pub project_id: String,
     pub model: Option<String>,
     pub permission: Option<String>,
     /// Forwarded to `Transport::open` so the agent side resumes via its
@@ -63,6 +64,7 @@ pub struct SessionEngine {
     journal_dir: PathBuf,
     agent: String,
     cwd: PathBuf,
+    project_id: String,
     /// Display label only; the daemon doesn't feed it back into the
     /// transport. `set_model` mutates it and rewrites on-disk metadata.
     model: StdMutex<Option<String>>,
@@ -140,6 +142,7 @@ impl SessionEngine {
             journal_dir: opts.journal_dir.clone(),
             agent: cfg.agent.clone(),
             cwd: cfg.cwd.clone(),
+            project_id: cfg.project_id.clone(),
             model: StdMutex::new(cfg.model.clone()),
             permission: cfg.permission.clone(),
             resume_cursor: StdMutex::new(initial_cursor.clone()),
@@ -160,6 +163,7 @@ impl SessionEngine {
                 session_id,
                 agent: cfg.agent,
                 cwd: cfg.cwd,
+                project_id: cfg.project_id,
                 model: cfg.model,
                 permission: cfg.permission,
                 resume_cursor: initial_cursor,
@@ -370,6 +374,7 @@ impl SessionEngine {
             session_id: self.session_id.clone(),
             agent: self.agent.clone(),
             cwd: self.cwd.clone(),
+            project_id: self.project_id.clone(),
             model: self.model.lock().unwrap().clone(),
             permission: self.permission.clone(),
             resume_cursor: self.resume_cursor.lock().unwrap().clone(),

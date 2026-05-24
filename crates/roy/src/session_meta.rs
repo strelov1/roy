@@ -19,6 +19,7 @@ pub struct SessionMetadata {
     pub session_id: String,
     pub agent: String,
     pub cwd: PathBuf,
+    pub project_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,6 +75,7 @@ mod tests {
             session_id: "sid-1".to_string(),
             agent: "opencode".to_string(),
             cwd: PathBuf::from("/tmp/foo"),
+            project_id: "test-project".to_string(),
             model: None,
             permission: Some("allow".to_string()),
             resume_cursor: Some("acp-sid-x".to_string()),

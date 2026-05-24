@@ -28,6 +28,7 @@ fn test_cfg() -> SessionSpawnConfig {
     SessionSpawnConfig {
         agent: "test".into(),
         cwd: std::env::current_dir().unwrap(),
+        project_id: "test-project".into(),
         model: None,
         permission: None,
         resume_cursor: None,
