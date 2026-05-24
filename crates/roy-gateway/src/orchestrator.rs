@@ -155,6 +155,9 @@ where
         let _ = conn.cancel_turn(&session_id).await;
         renderer.append_error_footer("turn timed out");
         draft.update(renderer.body()).await?;
+    } else if let Ok(Err(_)) = &elapsed {
+        renderer.append_error_footer("connection lost");
+        let _ = draft.update(renderer.body()).await;
     }
 
     let _ = conn.release_input(&session_id).await;
@@ -264,6 +267,8 @@ mod tests {
         AcquireOk,
         SendOk,
         Frame(TurnEvent),
+        /// Simulate `next_frame` returning an `Err` (daemon disconnect, etc.).
+        FrameErr,
         /// Block `next_frame` for this duration before returning the next step.
         BlockFor(Duration),
         ReleaseOk,
@@ -319,6 +324,9 @@ mod tests {
                         tokio::time::sleep(d).await;
                     }
                     Some(MockStep::Frame(e)) => return Ok(Some(e)),
+                    Some(MockStep::FrameErr) => {
+                        return Err(anyhow::anyhow!("simulated frame stream error"))
+                    }
                     None => return Ok(None),
                     other => panic!("unexpected next_frame, next step was {other:?}"),
                 }
@@ -573,5 +581,44 @@ mod tests {
         assert!(binder.get(42).await.is_none());
         let sent = replier.sent.lock().await.clone();
         assert_eq!(sent, vec![(42, "⏳".into())]);
+    }
+
+    #[tokio::test]
+    async fn frame_stream_error_appends_connection_lost_footer() {
+        let dir = tempfile::tempdir().unwrap();
+        let binder = fresh_binder(&dir).await;
+        let registry = CancelRegistry::new();
+        let factory = MockConnFactory::new(vec![
+            MockStep::SpawnReturns("s".into()),
+            MockStep::AcquireOk,
+            MockStep::SendOk,
+            MockStep::Frame(TurnEvent::AssistantText {
+                text: "partial".into(),
+            }),
+            MockStep::FrameErr,
+            MockStep::ReleaseOk,
+        ]);
+        let replier = Arc::new(MockReplier::new());
+
+        handle_message(
+            &cfg(),
+            &binder,
+            &registry,
+            &factory,
+            &replier,
+            42,
+            "x".into(),
+        )
+        .await
+        .unwrap();
+
+        let edits = replier.edits.lock().await.clone();
+        assert!(
+            edits
+                .iter()
+                .any(|(_, _, html)| html.contains("connection lost")),
+            "expected connection-lost footer, got: {:?}",
+            edits.iter().map(|(_, _, h)| h.clone()).collect::<Vec<_>>()
+        );
     }
 }

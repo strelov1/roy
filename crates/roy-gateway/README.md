@@ -1,25 +1,29 @@
 # roy-gateway
 
-Bridges chat platforms ↔ a running `roy serve` daemon. v1 supports
+Bridges chat platforms ↔ a running `roy serve` daemon. v1.1 supports
 **Telegram only**.
 
-## How it works
+## How it works (v1.1 streaming)
 
-1. `roy serve` is running, you have a preset (`claude` / `gemini` /
-   `opencode` / `codex`) installed and pre-authenticated, and (if you
-   want to scope sessions to a specific working directory) you have a
-   roy project pre-created.
+1. `roy serve` is running. You have a preset (`claude` / `gemini` /
+   `opencode` / `codex`) installed and pre-authenticated, and optionally a
+   roy project pre-created (referenced by `project_id` in config).
 2. `roy-gateway` runs as a long-lived process. On every inbound text DM:
-   - If the chat is new, `Fire { Spawn { preset, project_id } }` is sent
-     to the daemon. The returned `session_id` is bound to `chat_id` in a
-     JSON file.
-   - If the chat is known, `Fire { Resume { session_id } }` is sent. The
-     daemon hands the prompt back through ACP `session/load`.
-3. When `FireDone` lands, the assistant's final text is sent to the chat
-   as one Telegram message.
-
-Streaming partials, message edits, debouncing, and `/cancel` are deferred
-to v2 — see the plan doc at `docs/superpowers/plans/2026-05-23-roy-gateway-telegram.md`.
+   - Send a `⏳` placeholder message to the chat.
+   - Open a daemon connection; `Spawn` (new chat) or `Resume` (known chat)
+     to get a `session_id`, bind it to `chat_id` in the JSON binder.
+   - `AcquireInput` (holds the daemon's input lease for the turn —
+     prerequisite for `/cancel`).
+   - `Send` the user's prompt.
+   - Stream `Frame` events from the daemon. Each event extends the rendered
+     HTML body (thinking → italic, tool calls → `<code>`, assistant text →
+     plain). The placeholder is edited every ~1 second to show the latest
+     body. At 4000 chars the message is finalized and a new one is started.
+   - On terminal `Result`, flush final state, `ReleaseInput`, close the
+     connection, remove the cancel-registry entry.
+3. `/cancel` (DM) signals the streaming task to send `CancelTurn` to the
+   daemon, append a `❎ cancelled by user` line, and finalize. If no turn is
+   running, the bot replies "Нечего отменять".
 
 ## Config
 
@@ -44,7 +48,7 @@ path = "/Users/me/.roy/gateway-telegram.json"
 ## Run
 
 ```bash
-# 1. start the daemon (separately, in its own terminal)
+# 1. start the daemon (separate terminal)
 roy serve
 
 # 2. start the gateway
@@ -52,14 +56,35 @@ RUST_LOG=roy_gateway=info,info \
   cargo run -p roy-gateway -- --config ~/.config/roy-gateway/telegram.toml
 ```
 
-## Manual smoke checklist
+## Manual smoke checklist (v1.1)
 
-- [ ] DM your bot. Wait for a reply. Confirm the binder file has one entry.
-- [ ] Send a follow-up. Confirm the same `session_id` is reused
-      (`jq < ~/.roy/gateway-telegram.json`).
-- [ ] Stop the gateway (Ctrl-C). Restart. Send another message. Confirm
-      the conversation continues.
-- [ ] Stop the daemon. Send a message. Expect a `⚠ …` error reply in
-      the chat, gateway keeps running.
+- [ ] DM your bot. Confirm `⏳` placeholder appears within a second, then
+      gets edited as the agent produces text.
+- [ ] Confirm `🧠 thinking:` blocks appear (italic) for AssistantThought
+      events.
+- [ ] Confirm `🔧 <tool>(<args>)` blocks appear for ToolUse events.
+- [ ] Verify the chat shows "typing…" status in the header while the turn
+      runs.
+- [ ] Send a follow-up to the same chat. Confirm same `session_id` is
+      reused (`jq < ~/.roy/gateway-telegram.json`).
+- [ ] Trigger a long-running turn. Send `/cancel`. Confirm the streaming
+      message gains `❎ cancelled by user` footer within ~1 second and the
+      bot replies `❎ cancelled`.
+- [ ] Send `/cancel` when no turn is running. Confirm reply
+      `Нечего отменять — turn не запущен`.
+- [ ] Trigger a long agent response that crosses 4000 chars. Confirm the
+      message is finalized at a paragraph boundary and a new message
+      continues the body.
+- [ ] Configure `turn_timeout_secs` low (e.g. 10) and trigger a turn that
+      runs longer. Confirm `⚠ turn timed out` footer appears.
+- [ ] Stop the daemon. Send a message. Confirm a `⚠ …` error reply
+      appears in the chat; gateway keeps running.
 - [ ] (If `allowed_user_ids` set) DM from a non-allowlisted account.
       Expect silence and a `rejecting non-allowlisted sender` debug log.
+
+## Still deferred to later iterations
+
+- Debounce of fast successive messages.
+- `Channel` trait + Slack/Discord support.
+- Persisting full transcripts in chat after edits (history is in roy journal).
+- Inline buttons, attachments, voice.
