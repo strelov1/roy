@@ -126,7 +126,7 @@ fn tools_list() -> Value {
                     "properties": {
                         "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
                         "task": {"type": "string"},
-                        "cwd": {"type": "string"},
+                        "project_id": {"type": "string", "description": "Roy project id to run the session under. Omit to create an orphan session."},
                         "model": {"type": "string"},
                         "permission": {"type": "string", "enum": ["allow", "deny"]},
                         "resume": {"type": "string", "description": "Agent-side resume cursor (e.g. prior ACP sessionId)."}
@@ -143,7 +143,7 @@ fn tools_list() -> Value {
                     "properties": {
                         "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
                         "task": {"type": "string"},
-                        "cwd": {"type": "string"},
+                        "project_id": {"type": "string", "description": "Roy project id to run the session under. Omit to create an orphan session."},
                         "model": {"type": "string"},
                         "permission": {"type": "string", "enum": ["allow", "deny"]},
                         "resume": {"type": "string"}
@@ -205,12 +205,12 @@ fn tools_list() -> Value {
             },
             {
                 "name": "roy_fire",
-                "description": "One-shot: Spawn (or Resume) a session, send a prompt, wait for the terminal Result. Returns assistant_text + stop_reason. Pass `resume` to reuse an existing session id, otherwise pass `agent` (and optional `cwd`).",
+                "description": "One-shot: Spawn (or Resume) a session, send a prompt, wait for the terminal Result. Returns assistant_text + stop_reason. Pass `resume` to reuse an existing session id, otherwise pass `agent` (and optional `project_id`).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
-                        "cwd": {"type": "string"},
+                        "project_id": {"type": "string", "description": "Roy project id to run the session under. Omit to create an orphan session."},
                         "resume": {"type": "string", "description": "Existing roy session id to resume into."},
                         "prompt": {"type": "string"},
                         "tags": {"type": "object", "additionalProperties": {"type": "string"}},
@@ -227,14 +227,13 @@ fn tools_list() -> Value {
             },
             {
                 "name": "roy_create_project",
-                "description": "Register a directory as a roy project. The path must exist on disk. If `name` is omitted, the directory's basename is used. Returns the new project's id.",
+                "description": "Create a new roy project with the given name. Roy manages the directory at `<workspace>/<name>/`. Returns the new project's id.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string"},
-                        "name": {"type": "string"}
+                        "name": {"type": "string", "description": "Project name: ASCII letters, digits, '_', '-' only; no leading dot."}
                     },
-                    "required": ["path"],
+                    "required": ["name"],
                     "additionalProperties": false
                 }
             },
@@ -327,7 +326,7 @@ async fn send_cmd(
 struct SpawnArgs {
     agent: String,
     task: String,
-    cwd: Option<String>,
+    project_id: Option<String>,
     model: Option<String>,
     permission: Option<String>,
     resume: Option<String>,
@@ -344,7 +343,7 @@ fn parse_spawn_args(args: &Value) -> anyhow::Result<SpawnArgs> {
     Ok(SpawnArgs {
         agent: required("agent")?,
         task: required("task")?,
-        cwd: optional("cwd"),
+        project_id: optional("project_id"),
         model: optional("model"),
         permission: optional("permission"),
         resume: optional("resume"),
@@ -510,14 +509,14 @@ async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("missing 'prompt'"))?
         .to_string();
     let agent = args.get("agent").and_then(Value::as_str);
-    let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_string);
+    let project_id = args.get("project_id").and_then(Value::as_str).map(str::to_string);
     let resume = args.get("resume").and_then(Value::as_str);
     let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64);
 
     let target = match (agent, resume) {
         (Some(a), None) => FireTarget::Spawn {
             preset: a.to_string(),
-            cwd,
+            project_id,
         },
         (None, Some(sid)) => FireTarget::Resume {
             session_id: sid.to_string(),
@@ -597,7 +596,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     let SpawnArgs {
         agent,
         task,
-        cwd,
+        project_id,
         model,
         permission,
         resume,
@@ -610,7 +609,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         &mut writer,
         &ClientCommand::Spawn {
             agent,
-            cwd,
+            project_id,
             model,
             permission,
             resume,
@@ -707,7 +706,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
     let SpawnArgs {
         agent,
         task,
-        cwd,
+        project_id,
         model,
         permission,
         resume,
@@ -719,7 +718,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
         &mut writer,
         &ClientCommand::Spawn {
             agent,
-            cwd,
+            project_id,
             model,
             permission,
             resume,
@@ -877,20 +876,16 @@ async fn tool_list_projects(socket_path: &Path) -> anyhow::Result<String> {
 }
 
 async fn tool_create_project(socket_path: &Path, args: Value) -> anyhow::Result<String> {
-    let path = args
-        .get("path")
+    let name = args
+        .get("name")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing required field: path"))?
+        .ok_or_else(|| anyhow!("missing required field: name"))?
         .to_string();
-    let name = args.get("name").and_then(Value::as_str).map(str::to_string);
 
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
     send_cmd(
         &mut writer,
-        &ClientCommand::CreateProject {
-            path: PathBuf::from(path),
-            name,
-        },
+        &ClientCommand::CreateProject { name },
     )
     .await?;
     match next_event(&mut lines).await? {
@@ -1001,7 +996,7 @@ mod tests {
         let parsed = parse_spawn_args(&json!({
             "agent": "opencode",
             "task": "do it",
-            "cwd": "/tmp",
+            "project_id": "pid-123",
             "model": "gpt-x",
             "permission": "allow",
             "resume": "sid-1"
@@ -1009,7 +1004,7 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.agent, "opencode");
         assert_eq!(parsed.task, "do it");
-        assert_eq!(parsed.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(parsed.project_id.as_deref(), Some("pid-123"));
         assert_eq!(parsed.model.as_deref(), Some("gpt-x"));
         assert_eq!(parsed.permission.as_deref(), Some("allow"));
         assert_eq!(parsed.resume.as_deref(), Some("sid-1"));
@@ -1024,7 +1019,7 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.agent, "gemini");
         assert_eq!(parsed.task, "go");
-        assert!(parsed.cwd.is_none());
+        assert!(parsed.project_id.is_none());
         assert!(parsed.model.is_none());
         assert!(parsed.permission.is_none());
         assert!(parsed.resume.is_none());

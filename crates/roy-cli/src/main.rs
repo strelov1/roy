@@ -67,6 +67,10 @@ struct ServeArgs {
     socket: Option<PathBuf>,
     #[arg(long)]
     journal_dir: Option<PathBuf>,
+    /// Root directory where roy creates project and orphan session dirs.
+    /// Defaults to `~/.roy/workspace/` or `ROY_WORKSPACE`.
+    #[arg(long)]
+    workspace_dir: Option<PathBuf>,
     /// Enable WebSocket listener on this port (in addition to the Unix socket).
     #[arg(long)]
     port: Option<u16>,
@@ -83,8 +87,9 @@ struct RunArgs {
     /// claude | gemini | opencode | codex
     agent: String,
     task: String,
+    /// Project name to spawn the session under. Omit to create an orphan session.
     #[arg(long)]
-    cwd: Option<PathBuf>,
+    project: Option<String>,
     #[arg(long)]
     model: Option<String>,
     /// allow | deny (ACP agents only)
@@ -145,9 +150,9 @@ struct FireArgs {
     /// `--resume` is absent.
     #[arg(long, conflicts_with = "resume", required_unless_present = "resume")]
     agent: Option<String>,
-    /// Working directory for a new session. Ignored with --resume.
+    /// Project name for a new session. Ignored with --resume.
     #[arg(long, conflicts_with = "resume")]
-    cwd: Option<PathBuf>,
+    project: Option<String>,
     /// Resume an existing session id instead of spawning a new one.
     #[arg(long)]
     resume: Option<String>,
@@ -168,14 +173,9 @@ struct McpArgs {
 enum ProjectsCmd {
     /// List projects.
     List,
-    /// Create a project at <path>. The path must exist on disk.
-    Create {
-        path: PathBuf,
-        #[arg(long)]
-        name: Option<String>,
-    },
-    /// Rename a project (id or unique name match).
-    Rename { id_or_name: String, new_name: String },
+    /// Create a new project with the given name. Roy manages the directory at
+    /// `<workspace>/<name>/`.
+    Create { name: String },
     /// Cascade-delete a project and all its sessions.
     Delete {
         id_or_name: String,
@@ -258,10 +258,19 @@ fn default_journal_dir() -> PathBuf {
     PathBuf::from(home).join(".roy/journals")
 }
 
+fn default_workspace_dir() -> PathBuf {
+    if let Ok(s) = std::env::var("ROY_WORKSPACE") {
+        return PathBuf::from(s);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".roy/workspace")
+}
+
 async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     let socket = args.socket.unwrap_or_else(default_socket);
     let journal_dir = args.journal_dir.unwrap_or_else(default_journal_dir);
-    let daemon = Arc::new(Daemon::new(journal_dir, Arc::new(DefaultTransportFactory))?);
+    let workspace_dir = args.workspace_dir.unwrap_or_else(default_workspace_dir);
+    let daemon = Arc::new(Daemon::new(journal_dir, workspace_dir, Arc::new(DefaultTransportFactory))?);
     eprintln!("roy serve: listening on {}", socket.display());
     if let Some(port) = args.port {
         eprintln!("roy serve: WebSocket on 127.0.0.1:{port}");
@@ -319,7 +328,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         &mut writer,
         &ClientCommand::Spawn {
             agent: args.agent.clone(),
-            cwd: args.cwd.map(|p| p.to_string_lossy().into_owned()),
+            project_id: args.project.clone(),
             model: args.model.clone(),
             permission: args.permission.clone(),
             resume: args.resume.clone(),
@@ -331,17 +340,13 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         ServerEvent::Spawned {
             session,
             project_id,
-            project: created_project,
             resume_cursor,
             ..
         } => {
-            eprintln!("roy run: session {session} project {project_id}");
-            if let Some(p) = &created_project {
-                eprintln!(
-                    "roy run: project auto-created '{}' at {}",
-                    p.name,
-                    p.path.display()
-                );
+            if let Some(pid) = &project_id {
+                eprintln!("roy run: session {session} project {pid}");
+            } else {
+                eprintln!("roy run: session {session} (orphan)");
             }
             if args.detach {
                 let payload = serde_json::json!({
@@ -628,7 +633,7 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
     let target = match (args.agent, args.resume) {
         (Some(agent), None) => FireTarget::Spawn {
             preset: agent,
-            cwd: args.cwd.map(|p| p.to_string_lossy().into_owned()),
+            project_id: args.project,
         },
         (None, Some(session_id)) => FireTarget::Resume { session_id },
         (Some(_), Some(_)) => anyhow::bail!("--agent conflicts with --resume"),
@@ -730,29 +735,12 @@ async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<()> {
                 other => Err(anyhow!("unexpected: {other:?}")),
             }
         }
-        ProjectsCmd::Create { path, name } => {
-            send_cmd(&mut writer, &ClientCommand::CreateProject { path, name }).await?;
+        ProjectsCmd::Create { name } => {
+            send_cmd(&mut writer, &ClientCommand::CreateProject { name }).await?;
             match read_event(&mut events).await? {
                 ServerEvent::ProjectCreated { project } => {
                     println!("{}", project.id);
-                    eprintln!("created project {} at {}", project.name, project.path.display());
-                    Ok(())
-                }
-                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
-                other => Err(anyhow!("unexpected: {other:?}")),
-            }
-        }
-        ProjectsCmd::Rename { id_or_name, new_name } => {
-            let project_id =
-                resolve_project_id(&mut writer, &mut events, &id_or_name).await?;
-            send_cmd(
-                &mut writer,
-                &ClientCommand::RenameProject { project_id, name: new_name },
-            )
-            .await?;
-            match read_event(&mut events).await? {
-                ServerEvent::ProjectRenamed { project } => {
-                    println!("{}", project.name);
+                    eprintln!("created project '{}' at {}", project.name, project.path.display());
                     Ok(())
                 }
                 ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
@@ -909,7 +897,7 @@ mod tests {
         RunArgs {
             agent: agent.into(),
             task: "noop".into(),
-            cwd: None,
+            project: None,
             model: None,
             permission: None,
             detach: false,
@@ -1023,11 +1011,12 @@ mod fire_args_tests {
     }
 
     #[test]
-    fn fire_with_cwd_and_resume_rejected() {
-        let cli = Cli::try_parse_from(["roy", "fire", "p", "--resume", "abc", "--cwd", "/tmp"]);
+    fn fire_with_project_and_resume_rejected() {
+        let cli =
+            Cli::try_parse_from(["roy", "fire", "p", "--resume", "abc", "--project", "myproj"]);
         assert!(
             cli.is_err(),
-            "expected error: --cwd conflicts with --resume"
+            "expected error: --project conflicts with --resume"
         );
     }
 }
