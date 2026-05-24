@@ -61,6 +61,7 @@ impl StopReason {
 pub fn event_to_json(event: &TurnEvent) -> Value {
     match event {
         TurnEvent::System { subtype } => json!({"type": "system", "subtype": subtype}),
+        TurnEvent::UserPrompt { text } => json!({"type": "user_prompt", "text": text}),
         TurnEvent::AssistantText { text } => json!({"type": "assistant_text", "text": text}),
         TurnEvent::AssistantThought { text } => {
             json!({"type": "assistant_thought", "text": text})
@@ -101,6 +102,13 @@ pub fn event_from_json(v: &Value) -> Result<TurnEvent> {
         "system" => Ok(TurnEvent::System {
             subtype: v
                 .get("subtype")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        }),
+        "user_prompt" => Ok(TurnEvent::UserPrompt {
+            text: v
+                .get("text")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
@@ -169,6 +177,12 @@ pub enum TurnEvent {
     System {
         subtype: String,
     },
+    /// What the user typed on the trigger side. Journaled by the engine before
+    /// the prompt is handed to the transport, so a refresh / late attach can
+    /// reconstruct the conversation — agents don't echo user input over ACP.
+    UserPrompt {
+        text: String,
+    },
     /// The agent's final visible message chunk. Concatenate across consecutive
     /// `AssistantText` events to reconstruct the user-facing reply.
     AssistantText {
@@ -228,6 +242,18 @@ mod tests {
         } else {
             panic!("wrong variant");
         }
+    }
+
+    #[test]
+    fn user_prompt_round_trips_through_wire() {
+        let e = TurnEvent::UserPrompt {
+            text: "hello agent".into(),
+        };
+        let v = event_to_json(&e);
+        assert_eq!(v["type"], "user_prompt");
+        assert_eq!(v["text"], "hello agent");
+        let back = event_from_json(&v).unwrap();
+        assert_eq!(back, e);
     }
 
     #[test]

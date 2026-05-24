@@ -17,7 +17,12 @@ use roy::{Attach, SessionManager, SessionSpawnConfig, TurnEvent};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let journal_dir = std::env::temp_dir().join("roy-demo-journals");
-    let manager = SessionManager::new(journal_dir.clone(), Arc::new(DefaultTransportFactory));
+    let workspace_dir = std::env::temp_dir().join("roy-demo-workspace");
+    let manager = SessionManager::new(
+        journal_dir.clone(),
+        workspace_dir,
+        Arc::new(DefaultTransportFactory),
+    )?;
     let cwd = std::env::current_dir()?;
 
     let engine = manager
@@ -25,9 +30,12 @@ async fn main() -> anyhow::Result<()> {
             SessionSpawnConfig {
                 agent: "opencode".into(),
                 cwd,
+                project_id: None,
                 model: None,
                 permission: None,
                 resume_cursor: None,
+                fixed_session_id: None,
+                tags: std::collections::BTreeMap::new(),
             },
             256,
             1024,

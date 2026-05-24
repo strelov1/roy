@@ -1,5 +1,54 @@
 # Persistence and resume
 
+## Workspace layout
+
+All project and orphan-session working directories live under
+`workspace_dir` (default `~/.roy/workspace/`; override via `ROY_WORKSPACE`
+env var or `roy serve --workspace-dir <path>`):
+
+```
+<workspace_dir>/
+  <project_name>/      # one per project; created at CreateProject
+  <session_id>/        # one per orphan session; created at spawn-without-project
+```
+
+The daemon creates these directories but does not own their contents after
+creation — the agent and the user write to them freely.
+
+**Cascade delete of a project removes the registry entry and each session's
+`.jsonl` / `.meta.json` files, but does NOT remove `<workspace>/<name>/`.
+The user may have committed work in that directory.**
+
+## Project registry
+
+`<journal_dir>/projects.json` lists every project:
+
+```json
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "1f7c…",
+      "name": "roy",
+      "path": "/Users/alice/.roy/workspace/roy",
+      "created_at": 1722345600
+    }
+  ]
+}
+```
+
+Written atomically (temp file in same directory + `rename`) after every
+mutation. Missing `version` is treated as `v1`. Unknown `version` is a
+hard error.
+
+At startup, `index_existing_sessions` scans all `.meta.json` files and
+rebuilds `sessions_by_project`. If a meta references a `project_id` that
+is not in the registry, the session is logged as a warning and skipped
+from the index — no auto-create. The user must clean up by hand (delete
+the `.jsonl` / `.meta.json` pair or restore `projects.json`).
+
+---
+
 Each session writes two files under `journal_dir` (defaults to
 `~/.roy/journals/`):
 
@@ -50,9 +99,10 @@ session's `resume_cursor` changes:
 {
   "session_id": "0a91…",
   "agent": "opencode",
-  "cwd": "/Users/alice/projects/example",
+  "cwd": "/Users/alice/.roy/workspace/myproject",
   "model": null,
   "permission": "allow",
+  "project_id": "1f7c…",
   "resume_cursor": "sess_abc123"
 }
 ```
@@ -63,10 +113,15 @@ Fields:
 |-----------------|-----------------------------------------------------------------|
 | `session_id`    | roy-side UUID minted at first spawn; stable across restarts     |
 | `agent`         | the preset name (`claude`, `gemini`, `opencode`, `codex`)       |
-| `cwd`           | the working directory passed on spawn                           |
+| `cwd`           | the working directory for this session                          |
 | `model`         | the `--model` flag, if applicable (claude only)                 |
 | `permission`    | the requested `PermissionPolicy` (`allow` / `deny`)             |
+| `project_id`    | UUID of the owning project; `null` means orphan session         |
 | `resume_cursor` | the agent-issued session id (e.g. ACP `sessionId`) most recently observed from `Handle::resume_cursor()` |
+
+`cwd` is kept on `SessionMetadata` even though it mirrors the project path,
+so meta files remain self-contained (no registry lookup needed to interpret
+one file in isolation).
 
 The atomic write is a temp file inside the same directory plus
 `tokio::fs::rename` — partial writes never replace the canonical file,

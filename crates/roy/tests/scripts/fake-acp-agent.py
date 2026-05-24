@@ -12,10 +12,25 @@ Flags:
   --exit-on-initialize   crash (non-zero exit) on the initialize request.
   --no-initialize-reply  never answer initialize.
   --jsonrpc-error        answer initialize with a JSON-RPC error.
+  --flood N              on the default prompt branch, emit N AssistantText
+                         chunks ("flood-0\\n", "flood-1\\n", ...) before the
+                         final "ack" chunk and terminal Result. Used by tests
+                         that stress the broadcast/journal pipeline.
 """
 import sys, json
 
-flags = set(sys.argv[1:])
+flags = set()
+flood_n = 0
+_argv = sys.argv[1:]
+_i = 0
+while _i < len(_argv):
+    a = _argv[_i]
+    if a == "--flood":
+        flood_n = int(_argv[_i + 1])
+        _i += 2
+    else:
+        flags.add(a)
+        _i += 1
 
 ALLOW_ID = "opt-allow-1"
 
@@ -84,6 +99,8 @@ for line in sys.stdin:
             chunk(sid, "working")
             pending = (mid, sid)
         else:
+            for _k in range(flood_n):
+                chunk(sid, f"flood-{_k}\n")
             chunk(sid, "ack")
             result(mid, "end_turn")
     elif method == "session/cancel":

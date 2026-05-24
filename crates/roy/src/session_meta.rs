@@ -4,6 +4,7 @@
 //! to spawn, then hand the stored `resume_cursor` to the transport so the
 //! underlying ACP `session/load` reconnects to the agent-side session.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -13,17 +14,25 @@ use crate::error::{Result, RoyError};
 /// Static + cursor fields for a session, kept in sync with the journal on
 /// disk. `resume_cursor` is mutated as the agent reports a new cursor; the
 /// rest are set at spawn and never change for the session's lifetime.
+///
+/// `project_id: None` means the session is orphan — it has its own private
+/// workspace dir (`<workspace>/<session_id>/`) and is not counted under any
+/// project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub session_id: String,
     pub agent: String,
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, String>,
 }
 
 /// Compute the metadata file path for `session_id` in `dir`.
@@ -71,9 +80,11 @@ mod tests {
             session_id: "sid-1".to_string(),
             agent: "opencode".to_string(),
             cwd: PathBuf::from("/tmp/foo"),
+            project_id: Some("test-project".to_string()),
             model: None,
             permission: Some("allow".to_string()),
             resume_cursor: Some("acp-sid-x".to_string()),
+            tags: BTreeMap::from([("foo".to_string(), "bar".to_string())]),
         };
         write_metadata(&dir, &meta).await.unwrap();
         let back = read_metadata(&dir, "sid-1").await.unwrap();

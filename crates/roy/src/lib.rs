@@ -1,3 +1,4 @@
+pub mod agents_config;
 pub mod control;
 pub mod daemon;
 pub mod engine;
@@ -6,10 +7,15 @@ pub mod event;
 pub mod journal;
 pub mod manager;
 pub mod pid_lock;
+pub mod project;
 pub mod session_meta;
 pub mod transport;
 
-pub use control::{ClientCommand, ErrorCode, ServerEvent};
+pub use agents_config::{
+    AgentEntry, AgentInfo, AgentPreset, AgentsConfig, AgentsConfigError, AgentsConfigStatus,
+    LoadOutcome, ModelEntry, ModelInfo,
+};
+pub use control::{ClientCommand, ErrorCode, FireTarget, ServerEvent};
 pub use daemon::{Daemon, DefaultTransportFactory, ServeOpts, TransportFactory};
 pub use engine::{Attach, EngineOpts, InputLease, SessionEngine, SessionSpawnConfig};
 pub use error::{Result, RoyError};
@@ -17,5 +23,6 @@ pub use event::{event_from_json, event_to_json, StopReason, TurnEvent};
 pub use journal::{ArchivedJournal, Journal, JournalEntry, Seq};
 pub use manager::SessionManager;
 pub use pid_lock::PidLock;
+pub use project::Project;
 pub use session_meta::SessionMetadata;
 pub use transport::{AcpConfig, AcpTransport, Handle, PermissionPolicy, Transport};

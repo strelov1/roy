@@ -17,9 +17,9 @@ workspace with two crates:
   sessions; the `Daemon` exposes the registry over Unix-socket and WebSocket
   triggers; the underlying transport speaks ACP via the official
   `agent-client-protocol` SDK.
-- **`crates/roy-cli`** — the `roy` binary. Five subcommands plus an MCP server
-  mode. Each subcommand is a thin trigger client over the daemon's Unix
-  socket.
+- **`crates/roy-cli`** — the `roy` binary. Eight subcommands plus an MCP
+  server mode. Each subcommand is a thin trigger client over the daemon's
+  Unix socket.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -33,10 +33,12 @@ workspace with two crates:
 │   ▲ Unix socket    ▲ WebSocket    ▲ stdio MCP            │
 └───┼────────────────┼───────────────┼─────────────────────┘
     │                │               │
- roy run         WS client       LLM via roy mcp
- roy attach      (browser/IDE)
+ roy run / fire   WS client       LLM via roy mcp
+ roy wait         (browser/IDE)
+ roy attach
  roy list / list-archived
  roy resume / close
+ roy set-tags
 ```
 
 Each trigger speaks the same JSON control protocol (`ClientCommand` /
@@ -179,14 +181,17 @@ Desktop config, IDE plugin, etc.):
 `roy mcp` is a thin bridge — it requires `roy serve` to be running. Tools
 exposed:
 
-| tool                 | what                                                            |
-|----------------------|-----------------------------------------------------------------|
-| `roy_list_sessions`  | live sessions                                                   |
-| `roy_list_archived`  | sessions whose journals exist on disk but aren't live           |
-| `roy_run`            | spawn + send + wait for `Result`, return text + stop reason     |
-| `roy_run_detached`   | spawn + send, return session id (LLM polls with `roy_read_session`) |
-| `roy_read_session`   | paginated journal snapshot (live or archived)                   |
-| `roy_close`          | close a live session                                            |
+| tool                    | what                                                            |
+|-------------------------|-----------------------------------------------------------------|
+| `roy_list_sessions`     | live sessions                                                   |
+| `roy_list_archived`     | sessions whose journals exist on disk but aren't live           |
+| `roy_run`               | spawn + send + wait for `Result`, return text + stop reason     |
+| `roy_run_detached`      | spawn + send, return session id (LLM polls with `roy_read_session`) |
+| `roy_read_session`      | paginated journal snapshot (live or archived)                   |
+| `roy_close`             | close a live session                                            |
+| `roy_set_tags`          | replace the tag map on a live session (pass `{}` to clear all) |
+| `roy_wait_for_result`   | long-poll for the next terminal Result on a session             |
+| `roy_fire`              | one-shot Spawn-or-Resume + Send + WaitForResult                 |
 
 ## Resume + persistence
 

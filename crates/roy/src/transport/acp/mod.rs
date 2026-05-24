@@ -397,6 +397,14 @@ async fn run_turn(
     );
     let mut prompt_fut = Box::pin(cx.send_request(prompt).block_task());
 
+    // Helper: pipe the JSON-RPC error message into the journal as a System
+    // event so the UI / late attach can surface what actually broke (e.g.
+    // "Authentication required") instead of just an opaque is_error=true.
+    let emit_agent_error = |e: &dyn std::fmt::Display| {
+        let _ = event_tx.send(TurnEvent::System {
+            subtype: format!("agent_error: {}", e),
+        });
+    };
     let stop_reason = tokio::select! {
         r = &mut prompt_fut => match r {
             Ok(resp) => {
@@ -405,7 +413,7 @@ async fn run_turn(
                 }
                 map_stop_reason(resp.stop_reason)
             }
-            Err(_) => StopReason::Error,
+            Err(e) => { emit_agent_error(&e); StopReason::Error }
         },
         _ = cancel_rx => {
             let _ = cx.send_notification(CancelNotification::new(session_id.clone()));
@@ -416,10 +424,13 @@ async fn run_turn(
                     }
                     map_stop_reason(resp.stop_reason)
                 }
-                Err(_) => StopReason::Error,
+                Err(e) => { emit_agent_error(&e); StopReason::Error }
             }
         }
-        _ = dead_rx.changed() => StopReason::Error,
+        _ = dead_rx.changed() => {
+            emit_agent_error(&"agent process exited mid-turn");
+            StopReason::Error
+        }
     };
 
     // Close the notification gate BEFORE emitting the terminal Result so a
