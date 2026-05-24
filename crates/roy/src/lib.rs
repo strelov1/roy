@@ -11,7 +11,10 @@ pub mod project;
 pub mod session_meta;
 pub mod transport;
 
-pub use agents_config::{AgentEntry, AgentPreset, AgentsConfig, AgentsConfigError, ModelEntry};
+pub use agents_config::{
+    AgentEntry, AgentInfo, AgentPreset, AgentsConfig, AgentsConfigError, AgentsConfigStatus,
+    LoadOutcome, ModelEntry, ModelInfo,
+};
 pub use control::{ClientCommand, ErrorCode, FireTarget, ServerEvent};
 pub use daemon::{Daemon, DefaultTransportFactory, ServeOpts, TransportFactory};
 pub use engine::{Attach, EngineOpts, InputLease, SessionEngine, SessionSpawnConfig};

@@ -58,6 +58,10 @@ pub enum ErrorCode {
     /// `CreateProject` failed because the name contains invalid characters or
     /// is otherwise malformed (v2: name must match `^[A-Za-z0-9_-]+$`).
     InvalidProjectName,
+    /// I/O failure reading/writing `agents.toml` (permission denied, disk
+    /// full, etc.). Parse and validation errors do NOT use this code —
+    /// they're surfaced via `AgentsList { status: Invalid }`.
+    ConfigError,
     /// Forward-compat: a code emitted by a newer server.
     Other(String),
 }
@@ -84,6 +88,7 @@ impl ErrorCode {
             ErrorCode::CreateProjectFailed => "create_project_failed",
             ErrorCode::DeleteProjectFailed => "delete_project_failed",
             ErrorCode::InvalidProjectName => "invalid_project_name",
+            ErrorCode::ConfigError => "config_error",
             ErrorCode::Other(s) => s.as_str(),
         }
     }
@@ -109,6 +114,7 @@ impl ErrorCode {
             "create_project_failed" => ErrorCode::CreateProjectFailed,
             "delete_project_failed" => ErrorCode::DeleteProjectFailed,
             "invalid_project_name" => ErrorCode::InvalidProjectName,
+            "config_error" => ErrorCode::ConfigError,
             other => ErrorCode::Other(other.to_string()),
         }
     }
@@ -251,6 +257,10 @@ pub enum ClientCommand {
     /// journal + metadata files are erased, then the registry entry is
     /// removed. Synchronous.
     DeleteProject { project_id: String },
+    /// Read `~/.config/roy/agents.toml` (creating a sample if missing) and
+    /// return the configured agents + models. Pull-only: clients call this
+    /// whenever they want fresh data.
+    ListAgents,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -389,6 +399,14 @@ pub enum ServerEvent {
     ProjectDeleted {
         project_id: String,
         deleted_sessions: Vec<String>,
+    },
+    /// Response to `ListAgents`. `agents` is empty when `status` is `Created`
+    /// or `Invalid`; `config_path` is always the resolved path even on errors
+    /// so the UI can show it.
+    AgentsList {
+        agents: Vec<crate::agents_config::AgentInfo>,
+        config_path: std::path::PathBuf,
+        status: crate::agents_config::AgentsConfigStatus,
     },
 }
 
@@ -532,6 +550,7 @@ mod tests {
             ErrorCode::CreateProjectFailed,
             ErrorCode::DeleteProjectFailed,
             ErrorCode::InvalidProjectName,
+            ErrorCode::ConfigError,
         ];
         for code in cases {
             let json = serde_json::to_string(&code).unwrap();
@@ -592,5 +611,37 @@ mod tests {
         roundtrip(&ServerEvent::ProjectsListed {
             projects: Vec::new(),
         });
+    }
+
+    #[test]
+    fn list_agents_roundtrips() {
+        let cmd = ClientCommand::ListAgents;
+        let s = serde_json::to_string(&cmd).unwrap();
+        let back: ClientCommand = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, ClientCommand::ListAgents));
+    }
+
+    #[test]
+    fn agents_list_event_roundtrips() {
+        use crate::agents_config::{AgentInfo, AgentPreset, AgentsConfigStatus, ModelInfo};
+        let ev = ServerEvent::AgentsList {
+            agents: vec![AgentInfo {
+                preset: AgentPreset::Claude,
+                models: vec![ModelInfo {
+                    id: "claude-sonnet-4-6".into(),
+                    label: "Claude Sonnet 4.6".into(),
+                    default: true,
+                }],
+            }],
+            config_path: "/tmp/agents.toml".into(),
+            status: AgentsConfigStatus::Ok,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        let back: ServerEvent = serde_json::from_str(&s).unwrap();
+        let ServerEvent::AgentsList { agents, status, .. } = back else {
+            panic!()
+        };
+        assert_eq!(agents.len(), 1);
+        assert!(matches!(status, AgentsConfigStatus::Ok));
     }
 }

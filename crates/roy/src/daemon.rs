@@ -515,6 +515,7 @@ impl Daemon {
             ClientCommand::DeleteProject { project_id } => {
                 self.handle_delete_project(project_id, event_tx).await
             }
+            ClientCommand::ListAgents => self.handle_list_agents(event_tx).await,
         }
     }
 
@@ -933,6 +934,54 @@ impl Daemon {
         let _ = event_tx.send(ServerEvent::ProjectDeleted {
             project_id,
             deleted_sessions: deleted,
+        });
+    }
+
+    async fn handle_list_agents(self: &Arc<Self>, event_tx: &EventTx) {
+        use crate::agents_config::{
+            config_path, load_or_bootstrap, AgentsConfigError, AgentsConfigStatus, LoadOutcome,
+        };
+
+        let path = match config_path() {
+            Ok(p) => p,
+            Err(e) => {
+                send_error(
+                    event_tx,
+                    None,
+                    ErrorCode::ConfigError,
+                    &format!("resolve config path: {e}"),
+                );
+                return;
+            }
+        };
+
+        let (agents, status) = match load_or_bootstrap(&path).await {
+            Ok(LoadOutcome::Ok(cfg)) => (cfg.into_wire(), AgentsConfigStatus::Ok),
+            Ok(LoadOutcome::Created) => (vec![], AgentsConfigStatus::Created),
+            Err(AgentsConfigError::Parse(e)) => (
+                vec![],
+                AgentsConfigStatus::Invalid {
+                    reason: format!("toml parse error: {e}"),
+                },
+            ),
+            Err(AgentsConfigError::Validate(s)) => {
+                (vec![], AgentsConfigStatus::Invalid { reason: s })
+            }
+            Err(AgentsConfigError::Io(e)) => {
+                send_error(
+                    event_tx,
+                    None,
+                    ErrorCode::ConfigError,
+                    &format!("config io error at {}: {e}", path.display()),
+                );
+                return;
+            }
+        };
+
+        let _ = event_tx.send(ServerEvent::AgentsList {
+            agents,
+            config_path: path,
+            status,
         });
     }
 
