@@ -63,7 +63,7 @@ pub async fn dispatch(
             }
             SubscriberKind::NotifyNative => match success {
                 Some(s) => {
-                    let out = notify_native::execute(&sub.config, agent_name, s);
+                    let out = notify_native::execute(&sub.config, agent_name, s).await;
                     (out.status, out.error_message, None)
                 }
                 None => (

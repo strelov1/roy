@@ -26,7 +26,7 @@ pub struct ExecOutcome {
     pub error_message: Option<String>,
 }
 
-pub fn execute(config_json: &str, agent_name: &str, success: &FireSuccess) -> ExecOutcome {
+pub async fn execute(config_json: &str, agent_name: &str, success: &FireSuccess) -> ExecOutcome {
     let cfg = match parse_config(config_json) {
         Ok(c) => c,
         Err(e) => {
@@ -41,6 +41,17 @@ pub fn execute(config_json: &str, agent_name: &str, success: &FireSuccess) -> Ex
         .unwrap_or_else(|| format!("roy-scheduler: {agent_name}"));
     let body = first_line_or_summary(&success.assistant_text);
 
+    // `std::process::Command::status()` is a blocking syscall. With
+    // max_fires=8 several fire tasks could block tokio workers
+    // simultaneously and starve the scheduler poll loop. Move the syscall
+    // off the runtime via spawn_blocking; the cfg-gated platform branches
+    // are unchanged.
+    tokio::task::spawn_blocking(move || run_blocking(title, body))
+        .await
+        .unwrap_or_else(|_| err("spawn_blocking panicked".into()))
+}
+
+fn run_blocking(title: String, body: String) -> ExecOutcome {
     #[cfg(target_os = "macos")]
     {
         let script = format!(
