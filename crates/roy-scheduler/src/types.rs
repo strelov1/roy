@@ -29,7 +29,7 @@ impl Agent {
     }
 }
 
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, FromRow, Serialize, Deserialize)]
 pub struct Trigger {
     pub id: String,
     pub agent_id: String,
