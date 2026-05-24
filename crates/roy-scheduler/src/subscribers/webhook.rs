@@ -85,35 +85,28 @@ pub fn build_context(
 /// Render `{{key}}` placeholders. Unknown keys render as empty string.
 pub fn render(template: &str, ctx: &HashMap<String, String>) -> String {
     let mut out = String::with_capacity(template.len());
-    let bytes = template.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
-            // find matching }}
-            if let Some(end) = find_close(&bytes[i + 2..]) {
-                let key = std::str::from_utf8(&bytes[i + 2..i + 2 + end])
-                    .unwrap_or("")
-                    .trim();
-                out.push_str(ctx.get(key).map(String::as_str).unwrap_or(""));
-                i += 2 + end + 2;
-                continue;
+    let mut rest = template;
+    while !rest.is_empty() {
+        if let Some(start) = rest.find("{{") {
+            // Copy bytes before the placeholder verbatim.
+            out.push_str(&rest[..start]);
+            let after_open = &rest[start + 2..];
+            if let Some(end_rel) = after_open.find("}}") {
+                let key = after_open[..end_rel].trim();
+                out.push_str(ctx.get(key).map(String::as_str).unwrap_or_default());
+                rest = &after_open[end_rel + 2..];
+            } else {
+                // Unclosed — copy the rest as-is.
+                out.push_str("{{");
+                out.push_str(after_open);
+                break;
             }
+        } else {
+            out.push_str(rest);
+            break;
         }
-        out.push(bytes[i] as char);
-        i += 1;
     }
     out
-}
-
-fn find_close(haystack: &[u8]) -> Option<usize> {
-    let mut j = 0;
-    while j + 1 < haystack.len() {
-        if haystack[j] == b'}' && haystack[j + 1] == b'}' {
-            return Some(j);
-        }
-        j += 1;
-    }
-    None
 }
 
 pub struct ExecOutcome {
@@ -233,6 +226,13 @@ mod tests {
     fn render_handles_unclosed_braces() {
         // `{{a` with no closing — passes through verbatim.
         assert_eq!(render("hi {{a", &HashMap::new()), "hi {{a");
+    }
+
+    #[test]
+    fn render_preserves_multibyte_content_around_placeholders() {
+        let mut ctx = HashMap::new();
+        ctx.insert("name".into(), "мир".into());
+        assert_eq!(render("привет {{name}} 🌍", &ctx), "привет мир 🌍");
     }
 
     #[tokio::test]
