@@ -907,16 +907,29 @@ impl Daemon {
                 return;
             }
         };
-        let mut deleted = Vec::with_capacity(session_ids.len());
-        for sid in session_ids {
-            if let Err(e) = self.manager.close(&sid).await {
+        let close_results = futures_util::future::join_all(session_ids.iter().map(|sid| {
+            let manager = Arc::clone(&self.manager);
+            let sid = sid.clone();
+            async move { manager.close(&sid).await }
+        }))
+        .await;
+        for (sid, res) in session_ids.iter().zip(close_results) {
+            if let Err(e) = res {
                 tracing::warn!(session = %sid, error = %e, "cascade close failed");
             }
-            if let Err(e) = self.manager.delete_archive(&sid).await {
+        }
+        let delete_results = futures_util::future::join_all(session_ids.iter().map(|sid| {
+            let manager = Arc::clone(&self.manager);
+            let sid = sid.clone();
+            async move { manager.delete_archive(&sid).await }
+        }))
+        .await;
+        for (sid, res) in session_ids.iter().zip(delete_results) {
+            if let Err(e) = res {
                 tracing::warn!(session = %sid, error = %e, "cascade delete failed");
             }
-            deleted.push(sid);
         }
+        let deleted = session_ids;
         let _ = event_tx.send(ServerEvent::ProjectDeleted {
             project_id,
             deleted_sessions: deleted,
