@@ -134,8 +134,12 @@ impl AgentsConfig {
         Ok(())
     }
 
+    /// Parse + validate. The two are coupled deliberately: every caller wants
+    /// a config that's both syntactically and semantically valid, so the
+    /// public entry point enforces both.
     pub fn parse(text: &str) -> Result<Self, AgentsConfigError> {
         let cfg: AgentsConfig = toml::from_str(text)?;
+        cfg.validate()?;
         Ok(cfg)
     }
 }
@@ -260,11 +264,7 @@ impl AgentsConfig {
 /// "first run" signal instead).
 pub async fn load_or_bootstrap(path: &Path) -> Result<LoadOutcome, AgentsConfigError> {
     match tokio::fs::read_to_string(path).await {
-        Ok(text) => {
-            let cfg = AgentsConfig::parse(&text)?;
-            cfg.validate()?;
-            Ok(LoadOutcome::Ok(cfg))
-        }
+        Ok(text) => Ok(LoadOutcome::Ok(AgentsConfig::parse(&text)?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             write_sample(path).await?;
             Ok(LoadOutcome::Created)
@@ -328,8 +328,7 @@ mod tests {
         [[agent]]
         preset = "claude"
     "#;
-        let cfg = AgentsConfig::parse(text).unwrap();
-        let err = cfg.validate().unwrap_err();
+        let err = AgentsConfig::parse(text).unwrap_err();
         let AgentsConfigError::Validate(msg) = err else {
             panic!("wrong variant")
         };
@@ -349,8 +348,7 @@ mod tests {
         id = "claude-opus-4-7"
         default = true
     "#;
-        let cfg = AgentsConfig::parse(text).unwrap();
-        let err = cfg.validate().unwrap_err();
+        let err = AgentsConfig::parse(text).unwrap_err();
         let AgentsConfigError::Validate(msg) = err else {
             panic!("wrong variant")
         };
@@ -368,8 +366,7 @@ mod tests {
         [[agent.models]]
         id = "x"
     "#;
-        let cfg = AgentsConfig::parse(text).unwrap();
-        let err = cfg.validate().unwrap_err();
+        let err = AgentsConfig::parse(text).unwrap_err();
         assert!(matches!(err, AgentsConfigError::Validate(_)));
     }
 
@@ -381,20 +378,13 @@ mod tests {
         [[agent.models]]
         id = ""
     "#;
-        let cfg = AgentsConfig::parse(text).unwrap();
-        assert!(matches!(
-            cfg.validate(),
-            Err(AgentsConfigError::Validate(_))
-        ));
+        let err = AgentsConfig::parse(text).unwrap_err();
+        assert!(matches!(err, AgentsConfigError::Validate(_)));
     }
 
     #[test]
     fn sample_file_parses_to_empty_config() {
-        // The committed sample is fully commented, so it should parse and
-        // validate as an empty config. This guards against typos in the
-        // sample file landing in a release.
-        let cfg = AgentsConfig::parse(SAMPLE_TOML).expect("sample parses");
-        cfg.validate().expect("sample validates");
+        let cfg = AgentsConfig::parse(SAMPLE_TOML).expect("sample parses + validates");
         assert!(cfg.agents.is_empty(), "sample must be fully commented out");
     }
 

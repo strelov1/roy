@@ -51,7 +51,7 @@ impl EngineOpts {
 /// sessions where the dir is pre-created as `<workspace>/<session_id>/`.
 #[derive(Debug, Clone)]
 pub struct SessionSpawnConfig {
-    pub agent: String,
+    pub agent: crate::agents_config::AgentPreset,
     pub cwd: PathBuf,
     pub project_id: Option<String>,
     pub model: Option<String>,
@@ -152,7 +152,7 @@ impl SessionEngine {
         let engine = Arc::new(Self {
             session_id: session_id.clone(),
             journal_dir: opts.journal_dir.clone(),
-            agent: cfg.agent.clone(),
+            agent: cfg.agent.to_string(),
             cwd: cfg.cwd.clone(),
             project_id: cfg.project_id.clone(),
             model: StdMutex::new(cfg.model.clone()),
@@ -173,7 +173,7 @@ impl SessionEngine {
             &opts.journal_dir,
             &SessionMetadata {
                 session_id,
-                agent: cfg.agent,
+                agent: cfg.agent.to_string(),
                 cwd: cfg.cwd,
                 project_id: cfg.project_id, // Option<String> — None = orphan
                 model: cfg.model,

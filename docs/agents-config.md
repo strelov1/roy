@@ -91,3 +91,66 @@ data programmatically.
 - Routing the model into the spawned agent — `model` is a display
   label. The underlying agent picks its model via its own configuration
   (e.g. `/model` slash command in Claude Code).
+
+## Full example
+
+```toml
+# ~/.config/roy/agents.toml
+
+[[agent]]
+preset = "claude"
+
+[[agent.models]]
+id = "claude-sonnet-4-6"
+label = "Claude Sonnet 4.6"
+default = true
+
+[[agent.models]]
+id = "claude-opus-4-7"
+label = "Claude Opus 4.7"
+
+[[agent]]
+preset = "gemini"
+
+[[agent.models]]
+id = "gemini-2.5-pro"
+label = "Gemini 2.5 Pro"
+default = true
+```
+
+After editing the file, refresh the picker in the web UI (the refresh
+button next to the empty-state banner, or just re-open `NewChat`) or
+re-run `roy agents list` from a shell.
+
+## Troubleshooting
+
+**`"No agents in ~/.config/roy/agents.toml"` even though I see agents in the file.**
+Most likely: every `[[agent]]` block is still commented out from the
+sample. Remove the leading `# ` from the lines you want active. Run
+`roy agents list --json` to see what the daemon parses.
+
+**`"config invalid: ..."` banner with a duplicate-default reason.**
+Two models in the same agent have `default = true`. Only one is
+allowed. Pick one, remove the flag from the other.
+
+**Picker shows an agent but spawning it fails with `No such file or directory`.**
+The ACP-adapter binary isn't on `PATH`. Roy does not check for
+presence — it only filters what to *show*, not what's *runnable*.
+Install the binary (`claude-code-acp`, `gemini`, `opencode`,
+`codex-acp`) and put it on `PATH`. Verify with `which claude-code-acp`.
+
+**Switched the picker to a different model, the underlying agent kept the old one.**
+`model` is a display label only — roy does not feed it into the
+spawned agent process. The agent picks its model through its own
+mechanism (e.g. Claude Code's `/model` slash command). Change it
+inside the chat to actually swap models.
+
+**Edited the file, picker still shows the old list.**
+Hit the refresh button in `NewChat`. The daemon re-reads the file on
+every request (no cache), but the web UI only refetches when you tell
+it to.
+
+**Two `default = true` got silently merged after I uncommented a block.**
+That doesn't happen — it's a hard validation error (`config invalid`
+status). If you see the picker working with two defaults, you're
+looking at stale data. Refresh.
