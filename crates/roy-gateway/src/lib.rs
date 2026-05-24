@@ -10,5 +10,6 @@
 pub mod binder;
 pub mod config;
 pub mod daemon;
+pub mod formatting;
 pub mod orchestrator;
 pub mod telegram;
