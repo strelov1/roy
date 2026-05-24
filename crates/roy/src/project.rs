@@ -112,6 +112,40 @@ impl ProjectRegistry {
     pub fn list(&self) -> Vec<Project> {
         self.inner.lock().expect("registry poisoned").projects.clone()
     }
+
+    /// Look up the project for `cwd` or create a new one if absent. Returns
+    /// `(project_id, Some(project))` when freshly created, otherwise
+    /// `(project_id, None)`. Canonicalises `cwd` first.
+    pub fn resolve_or_create(&self, cwd: &Path) -> Result<(String, Option<Project>)> {
+        let canonical = canonicalize_for_project(cwd)?;
+        let mut state = self.inner.lock().expect("registry poisoned");
+        if let Some(p) = state.projects.iter().find(|p| p.path == canonical) {
+            return Ok((p.id.clone(), None));
+        }
+        let project = Project {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: basename_or_path(&canonical),
+            path: canonical,
+            created_at: unix_now(),
+        };
+        let id = project.id.clone();
+        state.projects.push(project.clone());
+        self.persist(&state)?;
+        Ok((id, Some(project)))
+    }
+}
+
+fn basename_or_path(p: &Path) -> String {
+    p.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.to_string_lossy().into_owned())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -195,5 +229,41 @@ mod tests {
         .unwrap();
         let err = ProjectRegistry::load(&dir).unwrap_err();
         assert!(matches!(err, RoyError::Protocol(_)));
+    }
+
+    #[test]
+    fn resolve_or_create_creates_then_resolves() {
+        let dir = tmp_journal_dir();
+        let reg = ProjectRegistry::load(&dir).unwrap();
+        let project_dir = dir.join("proj-a");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let (id1, created1) = reg.resolve_or_create(&project_dir).unwrap();
+        assert!(created1.is_some(), "first call must create");
+        let (id2, created2) = reg.resolve_or_create(&project_dir).unwrap();
+        assert!(created2.is_none(), "second call must reuse");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn resolve_or_create_is_concurrency_safe() {
+        use std::sync::Arc;
+        let dir = tmp_journal_dir();
+        let reg = Arc::new(ProjectRegistry::load(&dir).unwrap());
+        let project_dir = dir.join("proj-conc");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let reg = Arc::clone(&reg);
+            let p = project_dir.clone();
+            handles.push(std::thread::spawn(move || {
+                reg.resolve_or_create(&p).unwrap().0
+            }));
+        }
+        let ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let first = ids[0].clone();
+        assert!(ids.iter().all(|i| i == &first), "all threads must agree on id");
+        assert_eq!(reg.list().len(), 1, "only one project must exist");
     }
 }
