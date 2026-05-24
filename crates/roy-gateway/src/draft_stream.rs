@@ -33,6 +33,7 @@ struct State {
     current_id: i32,
     current_body: String,
     last_sent_at: Instant,
+    dirty: bool, // true if current_body differs from what was last sent
 }
 
 impl<R: DraftReplier + 'static> DraftStream<R> {
@@ -60,6 +61,7 @@ impl<R: DraftReplier + 'static> DraftStream<R> {
                 current_id: initial_message_id,
                 current_body: String::new(),
                 last_sent_at: Instant::now() - throttle,
+                dirty: false,
             }),
         }
     }
@@ -82,6 +84,7 @@ impl<R: DraftReplier + 'static> DraftStream<R> {
             guard.current_id = new_id;
             guard.current_body = tail.to_string();
             guard.last_sent_at = Instant::now();
+            guard.dirty = false;
             return Ok(());
         }
 
@@ -91,6 +94,7 @@ impl<R: DraftReplier + 'static> DraftStream<R> {
 
         if guard.last_sent_at.elapsed() < self.throttle {
             guard.current_body = full_body;
+            guard.dirty = true;
             return Ok(());
         }
 
@@ -99,19 +103,21 @@ impl<R: DraftReplier + 'static> DraftStream<R> {
             .await?;
         guard.current_body = full_body;
         guard.last_sent_at = Instant::now();
+        guard.dirty = false;
         Ok(())
     }
 
     /// Force the latest body to be written even if we're inside the throttle window.
     /// Use at end-of-turn to make sure the final state is visible.
     pub async fn flush(&self) -> Result<()> {
-        let guard = self.state.lock().await;
-        if guard.current_body.is_empty() {
+        let mut guard = self.state.lock().await;
+        if guard.current_body.is_empty() || !guard.dirty {
             return Ok(());
         }
         self.replier
             .edit(self.chat_id, guard.current_id, &guard.current_body)
             .await?;
+        guard.dirty = false;
         Ok(())
     }
 }
@@ -122,7 +128,7 @@ fn best_boundary(text: &str, max: usize) -> usize {
     }
     // Find the largest char boundary <= max; from there, prefer paragraph,
     // then line, then word boundaries inside the safe head.
-    let max_char_boundary = floor_char_boundary(text, max);
+    let max_char_boundary = text.floor_char_boundary(max);
     let head = &text[..max_char_boundary];
     if let Some(idx) = head.rfind("\n\n") {
         return idx + 2;
@@ -134,19 +140,6 @@ fn best_boundary(text: &str, max: usize) -> usize {
         return idx + 1;
     }
     max_char_boundary
-}
-
-fn floor_char_boundary(text: &str, byte_idx: usize) -> usize {
-    if byte_idx >= text.len() {
-        return text.len();
-    }
-    // Walk back from byte_idx until we land on a char boundary.
-    // `str::is_char_boundary` is stable; this avoids needing nightly's `floor_char_boundary`.
-    let mut idx = byte_idx;
-    while idx > 0 && !text.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
 }
 
 #[cfg(test)]
@@ -222,6 +215,16 @@ mod tests {
         let edits = replier.edits.lock().unwrap().clone();
         // First edit was "one"; flush forces "two" through.
         assert_eq!(edits.last().unwrap().2, "two");
+    }
+
+    #[tokio::test]
+    async fn flush_skips_when_nothing_changed_since_last_send() {
+        let replier = Arc::new(MockReplier::new(100));
+        let stream = DraftStream::new(replier.clone(), 7, 100);
+        stream.update("hello".into()).await.unwrap(); // sends an edit
+        stream.flush().await.unwrap(); // should NOT send another
+        let edits = replier.edits.lock().unwrap().clone();
+        assert_eq!(edits.len(), 1, "flush after clean update must not re-edit");
     }
 
     #[tokio::test]

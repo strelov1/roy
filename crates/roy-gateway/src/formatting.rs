@@ -5,13 +5,7 @@
 
 use roy::event::TurnEvent;
 use serde_json::Value;
-
-/// HTML-escape `<`, `>`, `&` — the only entities Telegram HTML mode cares about.
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
+use teloxide::utils::html::escape;
 
 #[derive(Debug, Default)]
 struct ActiveBlock {
@@ -135,7 +129,8 @@ fn render_tool_args(args: &Value) -> String {
     if raw.len() <= TOOL_ARGS_MAX {
         raw
     } else {
-        format!("{}…", &raw[..TOOL_ARGS_MAX])
+        let safe = raw.floor_char_boundary(TOOL_ARGS_MAX);
+        format!("{}…", &raw[..safe])
     }
 }
 
@@ -220,6 +215,19 @@ mod tests {
         let body = r.body();
         assert!(body.contains("…"));
         assert!(body.len() < 300);
+    }
+
+    #[test]
+    fn long_tool_args_with_multibyte_does_not_panic() {
+        let mut r = Renderer::new();
+        // 500 'я' (2 bytes each) = 1000 bytes, well over TOOL_ARGS_MAX
+        let long_val = "я".repeat(500);
+        r.feed(TurnEvent::ToolUse {
+            name: "n".into(),
+            input: json!({"big": long_val}),
+        });
+        let body = r.body();
+        assert!(body.contains("…"));
     }
 
     #[test]

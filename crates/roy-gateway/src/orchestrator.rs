@@ -94,6 +94,10 @@ where
     )
     .await;
 
+    if let Err(ref e) = outcome {
+        let _ = draft.update(format!("⚠ {e}")).await;
+    }
+
     typing.stop();
     let _ = draft.flush().await;
     outcome
@@ -581,6 +585,14 @@ mod tests {
         assert!(binder.get(42).await.is_none());
         let sent = replier.sent.lock().await.clone();
         assert_eq!(sent, vec![(42, "⏳".into())]);
+        let edits = replier.edits.lock().await.clone();
+        assert!(
+            edits
+                .iter()
+                .any(|(_, _, html)| html.contains("daemon down")),
+            "expected zombie placeholder to be updated with ⚠ footer, got: {:?}",
+            edits.iter().map(|(_, _, h)| h.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
