@@ -98,11 +98,19 @@ fn escape_applescript(s: &str) -> String {
 fn first_line_or_summary(text: &str) -> String {
     let line = text.lines().next().unwrap_or("").trim();
     if line.is_empty() {
-        "(empty)".into()
-    } else if line.len() > 200 {
-        format!("{}…", &line[..200])
-    } else {
+        return "(empty)".into();
+    }
+    // Slice at a char boundary so multi-byte (cyrillic / CJK / emoji)
+    // content does not panic the fire task.
+    let cut = line
+        .char_indices()
+        .nth(200)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
+    if cut == line.len() {
         line.into()
+    } else {
+        format!("{}…", &line[..cut])
     }
 }
 
@@ -137,6 +145,15 @@ mod tests {
         let out = first_line_or_summary(&long);
         assert!(out.ends_with('…'));
         // 200 'x' + '…' = 201 chars total (in display width). Char count check.
+        assert_eq!(out.chars().count(), 201);
+    }
+
+    #[test]
+    fn first_line_handles_multibyte_codepoints_without_panic() {
+        // 250 cyrillic chars (each 2 bytes in UTF-8) — used to panic on &line[..200].
+        let s: String = std::iter::repeat('я').take(250).collect();
+        let out = first_line_or_summary(&s);
+        assert!(out.ends_with('…'));
         assert_eq!(out.chars().count(), 201);
     }
 
