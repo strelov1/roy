@@ -526,23 +526,28 @@ async fn cmd_resume(args: ResumeArgs) -> anyhow::Result<()> {
         },
     )
     .await?;
-    match read_event(&mut events).await? {
-        ServerEvent::Resumed {
-            session,
-            resume_cursor,
-        } => {
-            let payload = serde_json::json!({
-                "type": "session",
-                "id": session,
-                "resume_cursor": resume_cursor,
-            });
-            println!("{payload}");
-            Ok(())
+    loop {
+        match read_event(&mut events).await? {
+            ServerEvent::Resuming { session } => {
+                eprintln!("roy resume: resuming {session}…");
+            }
+            ServerEvent::Resumed {
+                session,
+                resume_cursor,
+            } => {
+                let payload = serde_json::json!({
+                    "type": "session",
+                    "id": session,
+                    "resume_cursor": resume_cursor,
+                });
+                println!("{payload}");
+                return Ok(());
+            }
+            ServerEvent::Error { code, message, .. } => {
+                anyhow::bail!("resume failed: {code}: {message}")
+            }
+            other => anyhow::bail!("unexpected response to Resume: {other:?}"),
         }
-        ServerEvent::Error { code, message, .. } => {
-            anyhow::bail!("resume failed: {code}: {message}")
-        }
-        other => anyhow::bail!("unexpected response to Resume: {other:?}"),
     }
 }
 
