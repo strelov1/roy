@@ -176,10 +176,10 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new(journal_dir: PathBuf, factory: Arc<dyn TransportFactory>) -> Self {
-        Self {
-            manager: Arc::new(SessionManager::new(journal_dir, factory)),
-        }
+    pub fn new(journal_dir: PathBuf, factory: Arc<dyn TransportFactory>) -> Result<Self> {
+        Ok(Self {
+            manager: Arc::new(SessionManager::new(journal_dir, factory)?),
+        })
     }
 
     /// High-level entry: resume-all (if requested), spawn the idle-GC task
@@ -1367,7 +1367,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tmp_dir();
         let socket_path = dir.join("daemon.sock");
-        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
         let socket_path_for_task = socket_path.clone();
         let listener_handle = {
             let d = Arc::clone(&daemon);
@@ -1407,7 +1407,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_attach_send_round_trip_over_duplex() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -1517,7 +1517,7 @@ mod tests {
     #[tokio::test]
     async fn closed_session_is_attachable_via_archive_fallback() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -1653,7 +1653,7 @@ mod tests {
     #[tokio::test]
     async fn read_journal_snapshot_paginates_a_live_session() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -1804,7 +1804,7 @@ mod tests {
     #[tokio::test]
     async fn close_then_resume_continues_the_journal() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -1985,7 +1985,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_with_resume_uses_session_load() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -2049,7 +2049,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_attach_send_round_trip_over_websocket() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2175,7 +2175,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_result_resolves_when_turn_finishes() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
 
         // Connection 1: for Spawn + Send
         let (client1_side, server1_side) = tokio::io::duplex(8192);
@@ -2273,7 +2273,7 @@ mod tests {
     #[tokio::test]
     async fn fire_combo_spawns_sends_and_waits() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -2334,7 +2334,7 @@ mod tests {
     #[tokio::test]
     async fn set_tags_replaces_the_tag_map() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)));
+        let daemon = Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);

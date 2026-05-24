@@ -15,21 +15,25 @@ use crate::daemon::TransportFactory;
 use crate::engine::{EngineOpts, SessionEngine, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
 use crate::journal::{JournalEntry, Seq};
+use crate::project::ProjectRegistry;
 use crate::session_meta::read_metadata;
 
 pub struct SessionManager {
     journal_dir: PathBuf,
     sessions: RwLock<HashMap<String, Arc<SessionEngine>>>,
     factory: Arc<dyn TransportFactory>,
+    projects: Arc<ProjectRegistry>,
 }
 
 impl SessionManager {
-    pub fn new(journal_dir: PathBuf, factory: Arc<dyn TransportFactory>) -> Self {
-        Self {
+    pub fn new(journal_dir: PathBuf, factory: Arc<dyn TransportFactory>) -> Result<Self> {
+        let projects = Arc::new(ProjectRegistry::load(&journal_dir)?);
+        Ok(Self {
             journal_dir,
             sessions: RwLock::new(HashMap::new()),
             factory,
-        }
+            projects,
+        })
     }
 
     /// Open a new session. The engine is spawned and registered before this
@@ -248,6 +252,10 @@ impl SessionManager {
     pub fn factory(&self) -> &Arc<dyn TransportFactory> {
         &self.factory
     }
+
+    pub fn projects(&self) -> &Arc<ProjectRegistry> {
+        &self.projects
+    }
 }
 
 #[cfg(test)]
@@ -287,7 +295,7 @@ mod tests {
     #[tokio::test]
     async fn resume_all_brings_back_closed_sessions() {
         let dir = tmp_dir();
-        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory));
+        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory)).expect("registry load");
 
         // Spawn → close two sessions to populate journals + metadata.
         let cfg = |suffix: &str| SessionSpawnConfig {
@@ -334,7 +342,7 @@ mod tests {
     #[tokio::test]
     async fn sweep_idle_closes_quiet_sessions() {
         let dir = tmp_dir();
-        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory));
+        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory)).expect("registry load");
 
         let cfg = SessionSpawnConfig {
             agent: "opencode".into(),
@@ -366,7 +374,7 @@ mod tests {
     #[tokio::test]
     async fn registry_lifecycle() {
         let dir = tmp_dir();
-        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory));
+        let mgr = SessionManager::new(dir.clone(), Arc::new(FakeFactory)).expect("registry load");
         assert!(mgr.list().await.is_empty());
 
         let cfg = SessionSpawnConfig {

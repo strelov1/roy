@@ -17,7 +17,7 @@ use roy::{Attach, SessionManager, SessionSpawnConfig, TurnEvent};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let journal_dir = std::env::temp_dir().join("roy-demo-journals");
-    let manager = SessionManager::new(journal_dir.clone(), Arc::new(DefaultTransportFactory));
+    let manager = SessionManager::new(journal_dir.clone(), Arc::new(DefaultTransportFactory))?;
     let cwd = std::env::current_dir()?;
 
     let engine = manager

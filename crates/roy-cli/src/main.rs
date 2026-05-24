@@ -234,7 +234,7 @@ fn default_journal_dir() -> PathBuf {
 async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     let socket = args.socket.unwrap_or_else(default_socket);
     let journal_dir = args.journal_dir.unwrap_or_else(default_journal_dir);
-    let daemon = Arc::new(Daemon::new(journal_dir, Arc::new(DefaultTransportFactory)));
+    let daemon = Arc::new(Daemon::new(journal_dir, Arc::new(DefaultTransportFactory))?);
     eprintln!("roy serve: listening on {}", socket.display());
     if let Some(port) = args.port {
         eprintln!("roy serve: WebSocket on 127.0.0.1:{port}");
