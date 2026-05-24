@@ -6,7 +6,6 @@
 //! See `docs/architecture.md`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -50,14 +49,15 @@ pub enum ErrorCode {
     SetModelFailed,
     /// The named project id is not in the registry.
     NoProject,
-    /// `CreateProject` failed because the canonical path is already owned.
+    /// `CreateProject` failed because a project with that name already exists.
     ProjectExists,
-    /// `CreateProject` failed (FS / canonicalize / persist).
+    /// `CreateProject` failed (FS / persist).
     CreateProjectFailed,
     /// `DeleteProject` failed (registry write).
     DeleteProjectFailed,
-    /// `RenameProject` failed (unknown id / persist).
-    RenameProjectFailed,
+    /// `CreateProject` failed because the name contains invalid characters or
+    /// is otherwise malformed (v2: name must match `^[A-Za-z0-9_-]+$`).
+    InvalidProjectName,
     /// Forward-compat: a code emitted by a newer server.
     Other(String),
 }
@@ -83,7 +83,7 @@ impl ErrorCode {
             ErrorCode::ProjectExists => "project_exists",
             ErrorCode::CreateProjectFailed => "create_project_failed",
             ErrorCode::DeleteProjectFailed => "delete_project_failed",
-            ErrorCode::RenameProjectFailed => "rename_project_failed",
+            ErrorCode::InvalidProjectName => "invalid_project_name",
             ErrorCode::Other(s) => s.as_str(),
         }
     }
@@ -108,7 +108,7 @@ impl ErrorCode {
             "project_exists" => ErrorCode::ProjectExists,
             "create_project_failed" => ErrorCode::CreateProjectFailed,
             "delete_project_failed" => ErrorCode::DeleteProjectFailed,
-            "rename_project_failed" => ErrorCode::RenameProjectFailed,
+            "invalid_project_name" => ErrorCode::InvalidProjectName,
             other => ErrorCode::Other(other.to_string()),
         }
     }
@@ -140,10 +140,14 @@ pub enum ClientCommand {
     /// Open a new session. `agent` is the preset name (claude, gemini,
     /// opencode, codex). `resume` re-attaches an agent-side session via the
     /// transport's resume_cursor.
+    ///
+    /// `project_id: Some(id)` — spawn inside an existing project's directory.
+    /// `project_id: None` — orphan session; daemon allocates
+    /// `<workspace>/<session_id>/` as the cwd.
     Spawn {
         agent: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cwd: Option<String>,
+        project_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         /// `allow` / `deny`. Overrides the preset's default `PermissionPolicy`.
@@ -239,15 +243,10 @@ pub enum ClientCommand {
     },
     /// Return all projects in the registry.
     ListProjects,
-    /// Create a project at `path`. If `name` is None, daemon uses
-    /// `basename(canonical(path))`. Path must exist on disk.
-    CreateProject {
-        path: PathBuf,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-    /// Rename a project. Path is immutable in this iteration.
-    RenameProject { project_id: String, name: String },
+    /// Create a project with the given name inside the workspace. The name
+    /// must match `^[A-Za-z0-9_-]+$` and must be unique. The daemon creates
+    /// `<workspace_dir>/<name>/` automatically.
+    CreateProject { name: String },
     /// Cascade-delete a project: every session it owns is closed and its
     /// journal + metadata files are erased, then the registry entry is
     /// removed. Synchronous.
@@ -259,8 +258,9 @@ pub enum ClientCommand {
 pub enum FireTarget {
     Spawn {
         preset: String,
+        /// `Some(project_id)` to spawn inside a project's dir; `None` for orphan.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cwd: Option<String>,
+        project_id: Option<String>,
     },
     Resume {
         session_id: String,
@@ -272,14 +272,12 @@ pub enum FireTarget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ServerEvent {
-    /// Response to `Spawn`. `project_id` is always set (auto-resolved); when
-    /// the spawn auto-created the project, the full record arrives in
-    /// `project: Some(_)`.
+    /// Response to `Spawn`. `project_id` is `Some` when the session was
+    /// spawned inside a project, `None` for orphan sessions.
     Spawned {
         session: String,
-        project_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        project: Option<Project>,
+        project_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_cursor: Option<String>,
     },
@@ -385,9 +383,6 @@ pub enum ServerEvent {
     ProjectsListed { projects: Vec<Project> },
     /// Response to `CreateProject`.
     ProjectCreated { project: Project },
-    /// Response to `RenameProject`. Full record so clients can replace their
-    /// row in one shot.
-    ProjectRenamed { project: Project },
     /// Response to `DeleteProject`. Lists the session ids that were
     /// cascade-deleted so the client can prune them from its caches
     /// atomically.
@@ -401,7 +396,8 @@ pub enum ServerEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session: String,
-    pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub agent: String,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -429,9 +425,18 @@ mod tests {
     fn spawn_command_roundtrips() {
         roundtrip(&ClientCommand::Spawn {
             agent: "opencode".into(),
-            cwd: Some("/tmp/proj".into()),
+            project_id: Some("proj-uuid".into()),
             model: None,
             permission: Some("allow".into()),
+            resume: None,
+            tags: BTreeMap::new(),
+        });
+        // Orphan spawn (no project)
+        roundtrip(&ClientCommand::Spawn {
+            agent: "claude".into(),
+            project_id: None,
+            model: None,
+            permission: None,
             resume: None,
             tags: BTreeMap::new(),
         });
@@ -464,12 +469,7 @@ mod tests {
     #[test]
     fn create_project_roundtrips() {
         roundtrip(&ClientCommand::CreateProject {
-            path: std::path::PathBuf::from("/tmp/proj"),
-            name: Some("demo".into()),
-        });
-        roundtrip(&ClientCommand::CreateProject {
-            path: std::path::PathBuf::from("/tmp/proj"),
-            name: None,
+            name: "demo".into(),
         });
     }
 
@@ -477,14 +477,6 @@ mod tests {
     fn delete_project_roundtrips() {
         roundtrip(&ClientCommand::DeleteProject {
             project_id: "abc".into(),
-        });
-    }
-
-    #[test]
-    fn rename_project_roundtrips() {
-        roundtrip(&ClientCommand::RenameProject {
-            project_id: "abc".into(),
-            name: "new-name".into(),
         });
     }
 
@@ -539,7 +531,7 @@ mod tests {
             ErrorCode::ProjectExists,
             ErrorCode::CreateProjectFailed,
             ErrorCode::DeleteProjectFailed,
-            ErrorCode::RenameProjectFailed,
+            ErrorCode::InvalidProjectName,
         ];
         for code in cases {
             let json = serde_json::to_string(&code).unwrap();
@@ -560,20 +552,31 @@ mod tests {
     }
 
     #[test]
-    fn spawned_event_roundtrips_with_project() {
+    fn spawned_event_roundtrips() {
+        // With project_id
+        roundtrip(&ServerEvent::Spawned {
+            session: "sid".into(),
+            project_id: Some("pid".into()),
+            resume_cursor: None,
+        });
+        // Orphan (no project_id)
+        roundtrip(&ServerEvent::Spawned {
+            session: "sid2".into(),
+            project_id: None,
+            resume_cursor: Some("cursor-1".into()),
+        });
+    }
+
+    #[test]
+    fn project_created_event_roundtrips() {
         use std::path::PathBuf;
         let p = Project {
             id: "pid".into(),
-            name: "n".into(),
-            path: PathBuf::from("/tmp/p"),
+            name: "my-proj".into(),
+            path: PathBuf::from("/home/user/.roy/workspace/my-proj"),
             created_at: 1,
         };
-        roundtrip(&ServerEvent::Spawned {
-            session: "sid".into(),
-            project_id: p.id.clone(),
-            project: Some(p),
-            resume_cursor: None,
-        });
+        roundtrip(&ServerEvent::ProjectCreated { project: p });
     }
 
     #[test]
