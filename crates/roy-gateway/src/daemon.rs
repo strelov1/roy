@@ -125,12 +125,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Conn for TurnConn<S> {
             tags,
         })
         .await?;
-        match self.read_event().await? {
-            ServerEvent::Spawned { session, .. } => Ok(session),
-            ServerEvent::Error { code, message, .. } => {
-                Err(anyhow!("spawn failed: {code}: {message}"))
+        loop {
+            match self.read_event().await? {
+                ServerEvent::Spawning { .. } => continue,
+                ServerEvent::Spawned { session, .. } => return Ok(session),
+                ServerEvent::Error { code, message, .. } => {
+                    return Err(anyhow!("spawn failed: {code}: {message}"));
+                }
+                other => return Err(anyhow!("unexpected response to Spawn: {other:?}")),
             }
-            other => Err(anyhow!("unexpected response to Spawn: {other:?}")),
         }
     }
 
@@ -140,12 +143,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Conn for TurnConn<S> {
             tags: Some(tags),
         })
         .await?;
-        match self.read_event().await? {
-            ServerEvent::Resumed { session, .. } => Ok(session),
-            ServerEvent::Error { code, message, .. } => {
-                Err(anyhow!("resume failed: {code}: {message}"))
+        loop {
+            match self.read_event().await? {
+                ServerEvent::Resuming { .. } => continue,
+                ServerEvent::Resumed { session, .. } => return Ok(session),
+                ServerEvent::Error { code, message, .. } => {
+                    return Err(anyhow!("resume failed: {code}: {message}"));
+                }
+                other => return Err(anyhow!("unexpected response to Resume: {other:?}")),
             }
-            other => Err(anyhow!("unexpected response to Resume: {other:?}")),
         }
     }
 
