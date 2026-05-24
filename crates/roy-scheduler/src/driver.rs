@@ -165,9 +165,9 @@ pub async fn serve(opts: ServeOpts) -> Result<()> {
 }
 
 /// Run a fire whose `running` row was already inserted upstream by
-/// `poll_tick` (or `cmd_fire_now` for ad-hoc invocations). Fetches the
-/// agent, invokes it, then writes the terminal update + dispatches
-/// subscribers.
+/// `poll_tick`. Fetches the agent, then delegates to `run_fire_for_agent`
+/// — the shared post-insert pipeline used by both scheduled fires and
+/// ad-hoc `fire-now` invocations.
 pub async fn invoke_fire(
     pool: &SqlitePool,
     socket_path: &std::path::Path,
@@ -185,7 +185,53 @@ pub async fn invoke_fire(
     tags.insert("roy-scheduler:fire_id".into(), fire_id.clone());
     tags.insert("roy-scheduler:kind".into(), "background_fire".into());
 
-    let target = build_target(&agent);
+    let _fire = run_fire_for_agent(pool, socket_path, &agent, fire_id, tags, fire_timeout).await?;
+    Ok(())
+}
+
+/// Ad-hoc fire entry point — used by `roy-scheduler fire-now`. Inserts a
+/// `running` fire row with `trigger_id = None`, then runs the same
+/// post-insert pipeline as scheduled fires (terminal update, persistent
+/// session capture, subscriber dispatch). Returns the terminal `Fire` row.
+pub async fn fire_agent_ad_hoc(
+    pool: &SqlitePool,
+    socket_path: &std::path::Path,
+    agent_id: &str,
+    fire_timeout: Duration,
+) -> Result<crate::types::Fire> {
+    let agent = agents::get_by_id(pool, agent_id)
+        .await?
+        .with_context(|| format!("agent {agent_id} not found"))?;
+
+    let fire_id = fires::insert_running(
+        pool,
+        fires::NewFire {
+            agent_id: agent.id.clone(),
+            trigger_id: None,
+        },
+    )
+    .await?;
+
+    let mut tags = BTreeMap::new();
+    tags.insert("roy-scheduler:agent_id".into(), agent.id.clone());
+    tags.insert("roy-scheduler:fire_id".into(), fire_id.clone());
+    tags.insert("roy-scheduler:kind".into(), "fire_now".into());
+
+    run_fire_for_agent(pool, socket_path, &agent, fire_id, tags, fire_timeout).await
+}
+
+/// Shared post-insert pipeline: invoke the daemon, write the terminal
+/// fire row, capture the persistent session id if applicable, dispatch
+/// subscribers. The `running` row must already exist at `fire_id`.
+async fn run_fire_for_agent(
+    pool: &SqlitePool,
+    socket_path: &std::path::Path,
+    agent: &Agent,
+    fire_id: String,
+    tags: BTreeMap<String, String>,
+    fire_timeout: Duration,
+) -> Result<crate::types::Fire> {
+    let target = build_target(agent);
     let outcome =
         roy_client::fire(socket_path, target, agent.task.clone(), tags, fire_timeout).await;
 
@@ -271,7 +317,7 @@ pub async fn invoke_fire(
     )
     .await?;
 
-    Ok(())
+    Ok(fire)
 }
 
 fn build_target(agent: &Agent) -> roy::FireTarget {
@@ -370,6 +416,151 @@ mod tests {
         let back = tstore::get_by_id(&pool, &t.id).await.unwrap().unwrap();
         assert!(back.is_paused());
         assert_eq!(back.last_error.as_deref(), Some("invalid cron"));
+    }
+
+    /// Spawn a mock roy daemon at `path` that replies to one ClientCommand
+    /// with the given ServerEvent. Mirrors roy_client::tests::spawn_mock —
+    /// kept inline (rather than exported) so the test stays self-contained.
+    async fn spawn_mock_daemon(path: std::path::PathBuf, reply: roy::ServerEvent) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+        let listener = UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (rd, mut wr) = sock.into_split();
+            let mut lines = BufReader::new(rd).lines();
+            let _cmd_line = lines.next_line().await.unwrap();
+            let out = serde_json::to_string(&reply).unwrap();
+            wr.write_all(out.as_bytes()).await.unwrap();
+            wr.write_all(b"\n").await.unwrap();
+        });
+    }
+
+    #[tokio::test]
+    async fn fire_agent_ad_hoc_dispatches_subscribers() {
+        use crate::store::subscribers as substore;
+        use crate::types::SubscriberKind;
+        use roy::{ServerEvent, StopReason, TurnEvent};
+        use wiremock::matchers::{method, path as wpath};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // 1. Webhook target.
+        let webhook = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/hook"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ack"))
+            .mount(&webhook)
+            .await;
+
+        // 2. Mock roy daemon at a tempdir UDS path.
+        let dir = tempdir().unwrap();
+        let sock_path = dir.path().join("roy.sock");
+        spawn_mock_daemon(
+            sock_path.clone(),
+            ServerEvent::FireDone {
+                session: "sid-ad-hoc".into(),
+                seq_range: (1, 4),
+                result: TurnEvent::Result {
+                    cost_usd: Some(0.02),
+                    stop_reason: StopReason::EndTurn,
+                },
+                assistant_text: "ad-hoc body".into(),
+            },
+        )
+        .await;
+
+        // 3. DB with an agent + an agent-scope webhook subscriber.
+        let pool = db::open(&dir.path().join("t.db")).await.unwrap();
+        let a = agents::insert(
+            &pool,
+            agents::NewAgent {
+                name: "ad-hoc-agent".into(),
+                preset: "claude".into(),
+                project_id: None,
+                task: "task".into(),
+                model: None,
+                persistent: false,
+            },
+        )
+        .await
+        .unwrap();
+        let cfg = format!(
+            r#"{{"url":"{}/hook","body_template":"text={{{{result.assistant_text}}}}"}}"#,
+            webhook.uri()
+        );
+        substore::insert(
+            &pool,
+            substore::NewSubscriber {
+                agent_id: Some(a.id.clone()),
+                trigger_id: None,
+                kind: SubscriberKind::Webhook,
+                config_json: cfg,
+                order_index: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 4. Fire ad-hoc. Subscribers should run.
+        let fire = fire_agent_ad_hoc(&pool, &sock_path, &a.id, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(fire.status, "ok");
+        assert_eq!(fire.session_id.as_deref(), Some("sid-ad-hoc"));
+
+        // 5. The webhook should have received the rendered body.
+        let reqs = webhook.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(String::from_utf8_lossy(&reqs[0].body), "text=ad-hoc body");
+
+        // 6. A fire_subscriber_runs row should exist (ok).
+        let runs = substore::list_runs_for_fire(&pool, &fire.id).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "ok");
+    }
+
+    #[tokio::test]
+    async fn fire_agent_ad_hoc_captures_persistent_session_id() {
+        use roy::{ServerEvent, StopReason, TurnEvent};
+
+        let dir = tempdir().unwrap();
+        let sock_path = dir.path().join("roy.sock");
+        spawn_mock_daemon(
+            sock_path.clone(),
+            ServerEvent::FireDone {
+                session: "captured-sid".into(),
+                seq_range: (1, 2),
+                result: TurnEvent::Result {
+                    cost_usd: None,
+                    stop_reason: StopReason::EndTurn,
+                },
+                assistant_text: "ok".into(),
+            },
+        )
+        .await;
+
+        let pool = db::open(&dir.path().join("t.db")).await.unwrap();
+        let a = agents::insert(
+            &pool,
+            agents::NewAgent {
+                name: "persist".into(),
+                preset: "claude".into(),
+                project_id: None,
+                task: "t".into(),
+                model: None,
+                persistent: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(a.persistent_session_id.is_none());
+
+        fire_agent_ad_hoc(&pool, &sock_path, &a.id, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let back = agents::get_by_id(&pool, &a.id).await.unwrap().unwrap();
+        assert_eq!(back.persistent_session_id.as_deref(), Some("captured-sid"));
     }
 
     #[tokio::test]
