@@ -29,6 +29,10 @@ Each preset maps to a specific binary that must be on `PATH` and pre-authenticat
 | `opencode` | `opencode` | Launched with `acp`; no ACP modes |
 | `codex` | `codex-acp` | ACP adapter for Codex; uses `full-access` mode |
 
+Which presets and models are *surfaced* to clients is controlled by
+`~/.config/roy/agents.toml` (see `docs/agents-config.md`). The four
+preset binaries above must still be installed and authenticated.
+
 ## Commands
 
 ```bash

@@ -166,6 +166,27 @@ payload — only framing differs.
 MCP-aware client (Claude Desktop, IDE plugin). Each tools/call opens a
 fresh Unix-socket connection to the daemon and drives one round trip.
 
+### Agents discovery layer
+
+`crates/roy/src/agents_config.rs` is a stateless module that reads
+`~/.config/roy/agents.toml` on demand (`load_or_bootstrap`), validates
+it, and normalises into wire-facing `AgentInfo` / `ModelInfo`
+structures. The daemon's `handle_list_agents` (`daemon.rs`) is a thin
+wrapper that translates outcomes into `ServerEvent::AgentsList`
+variants (`status: ok | created | invalid`).
+
+No cache, no file watcher — the file is re-read on every `ListAgents`
+request. Bootstrap is atomic (write-to-tmp + rename) and concurrent-safe
+via per-call UUID-suffixed temp names. The daemon never overwrites a
+user's existing `agents.toml`.
+
+This module is the single source of truth for the set of available
+agents and models. The CLI (`roy agents list`), the MCP tool
+(`roy_list_agents`), and `roy-web`'s `agentsConfig` store all consume
+the same wire shape — see [agents-config.md](./agents-config.md) for
+the user-facing reference and [wire-protocol.md](./wire-protocol.md) for
+the JSON shapes.
+
 ### Tests
 
 Hermetic by default. `crates/roy/tests/scripts/fake-acp-agent.py` is a

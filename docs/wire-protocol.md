@@ -109,6 +109,7 @@ triggers (and, indirectly, of every MCP tool result body).
 | `list_projects`   | —                                                                                               |
 | `create_project`  | `name`                                                                                          |
 | `delete_project`  | `project_id`                                                                                    |
+| `list_agents`     | —                                                                                               |
 
 `permission` is `"allow"` or `"deny"`. `agent` is one of `claude`,
 `gemini`, `opencode`, `codex` (with the default `TransportFactory`).
@@ -145,6 +146,7 @@ The on-disk `workspace_dir/<name>/` directory is **not** removed.
 | `projects_listed`   | `projects: [Project]`                                                                                   |
 | `project_created`   | `project: Project`                                                                                      |
 | `project_deleted`   | `project_id: string`, `deleted_sessions: [string]`                                                      |
+| `agents_list`       | `agents: [AgentInfo]`, `config_path: string`, `status: AgentsConfigStatus`                              |
 | `error`             | optional `session`, typed `code` (see below), `message`                                                 |
 
 `spawned.project_id` is `null` for an orphan session, a UUID string otherwise.
@@ -168,6 +170,32 @@ The on-disk `workspace_dir/<name>/` directory is **not** removed.
 
 `journal_read.next_seq` is the seq the client should pass to its next
 `read_journal` to continue polling.
+
+`AgentInfo` and `ModelInfo` shapes (used in `agents_list.agents[]`):
+
+```json
+{
+  "preset": "claude",
+  "models": [
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "default": true},
+    {"id": "claude-opus-4-7",   "label": "Claude Opus 4.7",   "default": false}
+  ]
+}
+```
+
+`label` is always populated by the daemon (defaults to `id` if the user
+omitted it in `agents.toml`). `default` is `true` for exactly one model
+per agent: the explicitly-marked one, or the first if none was marked.
+
+`AgentsConfigStatus` is a tagged union (`{"kind": "<variant>", …}`):
+
+| kind      | extra fields    | meaning                                                |
+|-----------|-----------------|--------------------------------------------------------|
+| `ok`      | —               | File parsed and validated; `agents` may still be empty |
+| `created` | —               | File was missing; sample was just written              |
+| `invalid` | `reason: string`| Parse or validation failure; `agents` is `[]`          |
+
+See [agents-config.md](./agents-config.md) for the user-facing reference.
 
 ### ErrorCode
 
