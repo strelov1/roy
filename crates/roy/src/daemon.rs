@@ -2830,4 +2830,173 @@ mod tests {
         drop(events);
         let _ = serve_handle.await;
     }
+
+    /// Spin up a fresh Daemon, send one command, read one ServerEvent, return it.
+    async fn run_command_against_daemon(cmd: ClientCommand) -> ServerEvent {
+        let dir = tmp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let serve_handle = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        send_cmd_line(&mut client_wr, &cmd).await;
+        let ev = next_event_line(&mut events).await;
+
+        drop(client_wr);
+        drop(events);
+        let _ = serve_handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+        ev
+    }
+
+    // ── ListAgents integration tests ────────────────────────────────────────
+
+    use crate::agents_config::AgentsConfigStatus;
+
+    #[tokio::test]
+    async fn list_agents_returns_ok_for_valid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("agents.toml");
+        tokio::fs::write(
+            &cfg_path,
+            r#"
+            [[agent]]
+            preset = "claude"
+            [[agent.models]]
+            id = "claude-sonnet-4-6"
+            default = true
+        "#,
+        )
+        .await
+        .unwrap();
+
+        temp_env::async_with_vars(
+            [("ROY_AGENTS_CONFIG", Some(cfg_path.to_str().unwrap()))],
+            async {
+                let ev = run_command_against_daemon(ClientCommand::ListAgents).await;
+                let ServerEvent::AgentsList { agents, status, .. } = ev else {
+                    panic!("got {ev:?}");
+                };
+                assert!(matches!(status, AgentsConfigStatus::Ok));
+                assert_eq!(agents.len(), 1);
+                assert_eq!(agents[0].preset, crate::agents_config::AgentPreset::Claude);
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn list_agents_bootstraps_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("missing.toml");
+        temp_env::async_with_vars(
+            [("ROY_AGENTS_CONFIG", Some(cfg_path.to_str().unwrap()))],
+            async {
+                let ev = run_command_against_daemon(ClientCommand::ListAgents).await;
+                let ServerEvent::AgentsList { agents, status, .. } = ev else {
+                    panic!()
+                };
+                assert!(matches!(status, AgentsConfigStatus::Created));
+                assert!(agents.is_empty());
+                assert!(cfg_path.exists());
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn list_agents_reports_invalid_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("agents.toml");
+        tokio::fs::write(&cfg_path, "this is not toml [[[")
+            .await
+            .unwrap();
+        temp_env::async_with_vars(
+            [("ROY_AGENTS_CONFIG", Some(cfg_path.to_str().unwrap()))],
+            async {
+                let ev = run_command_against_daemon(ClientCommand::ListAgents).await;
+                let ServerEvent::AgentsList { status, agents, .. } = ev else {
+                    panic!()
+                };
+                assert!(agents.is_empty());
+                assert!(matches!(status, AgentsConfigStatus::Invalid { .. }));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn list_agents_reports_validation_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("agents.toml");
+        tokio::fs::write(
+            &cfg_path,
+            r#"
+            [[agent]]
+            preset = "claude"
+            [[agent]]
+            preset = "claude"
+        "#,
+        )
+        .await
+        .unwrap();
+        temp_env::async_with_vars(
+            [("ROY_AGENTS_CONFIG", Some(cfg_path.to_str().unwrap()))],
+            async {
+                let ev = run_command_against_daemon(ClientCommand::ListAgents).await;
+                let ServerEvent::AgentsList { status, .. } = ev else {
+                    panic!()
+                };
+                let AgentsConfigStatus::Invalid { reason } = status else {
+                    panic!()
+                };
+                assert!(reason.contains("duplicate"), "got: {reason}");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn list_agents_concurrent_bootstrap_is_safe() {
+        // Two tasks race on a clean config path. Atomic rename means the
+        // "loser" silently overwrites with identical sample content. Both
+        // must return Created, neither may panic, the file must end up
+        // readable and equal to SAMPLE_TOML.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("missing.toml");
+        temp_env::async_with_vars(
+            [("ROY_AGENTS_CONFIG", Some(cfg_path.to_str().unwrap()))],
+            async {
+                let (a, b) = tokio::join!(
+                    run_command_against_daemon(ClientCommand::ListAgents),
+                    run_command_against_daemon(ClientCommand::ListAgents),
+                );
+                for ev in [a, b] {
+                    let ServerEvent::AgentsList { status, .. } = ev else {
+                        panic!("expected AgentsList, got {ev:?}")
+                    };
+                    assert!(
+                        matches!(status, AgentsConfigStatus::Created),
+                        "expected Created, got {status:?}"
+                    );
+                }
+                let written = tokio::fs::read_to_string(&cfg_path).await.unwrap();
+                assert_eq!(written, crate::agents_config::SAMPLE_TOML);
+            },
+        )
+        .await;
+    }
 }

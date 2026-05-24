@@ -25,6 +25,7 @@ tracing = "0.1"
 [dev-dependencies]
 futures = "0.3"
 tempfile = "3"
+temp-env = { version = "0.3", features = ["async_closure"] }
 
 [[example]]
 name = "demo_gemini"

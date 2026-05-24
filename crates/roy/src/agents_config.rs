@@ -176,13 +176,21 @@ pub fn config_path() -> Result<PathBuf, AgentsConfigError> {
         .join("agents.toml"))
 }
 
-/// Atomic write: temp file + rename. Crash-safe; concurrent callers race
-/// on `rename` and the loser silently overwrites with identical content.
+/// Atomic write: unique temp file + rename. Crash-safe; concurrent callers
+/// race on `rename` and the loser silently overwrites with identical content.
+/// Each call uses a unique temp filename so concurrent writers don't clobber
+/// each other's in-flight temp file.
 async fn write_sample(path: &Path) -> Result<(), AgentsConfigError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let tmp = path.with_extension("toml.tmp");
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("agents.toml"),
+        uuid::Uuid::new_v4().as_simple(),
+    ));
     tokio::fs::write(&tmp, SAMPLE_TOML).await?;
     tokio::fs::rename(&tmp, path).await?;
     Ok(())
