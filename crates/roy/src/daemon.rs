@@ -197,6 +197,7 @@ impl Daemon {
                 }
             }
         }
+        self.manager.index_existing_sessions().await?;
         if let Some(threshold) = opts.idle_timeout {
             let mgr = Arc::clone(&self.manager);
             let tick = std::cmp::max(threshold / 4, std::time::Duration::from_millis(50));

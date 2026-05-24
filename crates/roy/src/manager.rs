@@ -259,6 +259,39 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Scan journal_dir for *.meta.json files and populate the registry's
+    /// session-index. Idempotent. Called once after construction to rebuild
+    /// in-memory mapping from on-disk metadata.
+    pub async fn index_existing_sessions(&self) -> Result<()> {
+        if !tokio::fs::try_exists(&self.journal_dir)
+            .await
+            .map_err(RoyError::Io)?
+        {
+            return Ok(());
+        }
+        let mut entries = tokio::fs::read_dir(&self.journal_dir)
+            .await
+            .map_err(RoyError::Io)?;
+        while let Some(entry) = entries.next_entry().await.map_err(RoyError::Io)? {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Some(sid) = name.strip_suffix(".meta.json") else {
+                continue;
+            };
+            let meta = match read_metadata(&self.journal_dir, sid).await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(session = %sid, error = %e, "skip indexing: meta unreadable");
+                    continue;
+                }
+            };
+            let pid = self.projects.ensure_project(&meta.project_id, &meta.cwd)?;
+            self.projects.register_session(&pid, sid);
+        }
+        Ok(())
+    }
+
     pub fn journal_dir(&self) -> &PathBuf {
         &self.journal_dir
     }
@@ -411,6 +444,41 @@ mod tests {
         assert!(mgr.list().await.is_empty());
         assert!(mgr.get(&id).await.is_none());
         assert!(mgr.close(&id).await.is_err(), "double close should error");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn index_existing_sessions_rebuilds_project_membership() {
+        let dir = tmp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let factory: Arc<dyn TransportFactory> = Arc::new(FakeFactory);
+        let mgr = SessionManager::new(dir.clone(), factory).expect("registry load");
+
+        // Hand-write a meta file referencing a project id that doesn't exist
+        // in the registry; ensure_project must mint one for the meta's cwd.
+        let session_id = "manual-sid";
+        let proj_dir = dir.join("p1");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let meta = crate::session_meta::SessionMetadata {
+            session_id: session_id.into(),
+            agent: "fake".into(),
+            cwd: proj_dir.clone(),
+            project_id: "pre-existing-uuid".into(),
+            model: None,
+            permission: None,
+            resume_cursor: None,
+            tags: Default::default(),
+        };
+        crate::session_meta::write_metadata(&dir, &meta).await.unwrap();
+        // Write an empty journal file so it doesn't fail later scans.
+        std::fs::write(dir.join(format!("{session_id}.jsonl")), "").unwrap();
+
+        mgr.index_existing_sessions().await.unwrap();
+        let projects = mgr.projects().list();
+        assert_eq!(projects.len(), 1, "ensure_project should mint one for the meta's cwd");
+        let sids = mgr.projects().sessions_in(&projects[0].id);
+        assert_eq!(sids, vec![session_id.to_string()]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
