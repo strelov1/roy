@@ -613,6 +613,9 @@ impl Daemon {
         tags: Option<BTreeMap<String, String>>,
         event_tx: &EventTx,
     ) {
+        let _ = event_tx.send(ServerEvent::Resuming {
+            session: session.clone(),
+        });
         match self.manager.resume(&session, 256, 1024).await {
             Ok(engine) => {
                 if let Some(new_tags) = tags {
@@ -2066,6 +2069,12 @@ mod tests {
             },
         )
         .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::Resuming {
+                session: resuming_id,
+            } => assert_eq!(resuming_id, session, "Resuming must echo the requested id"),
+            other => panic!("expected Resuming ack, got {other:?}"),
+        }
         match next_event_line(&mut events).await {
             ServerEvent::Resumed {
                 session: resumed_id,
