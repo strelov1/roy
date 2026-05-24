@@ -69,8 +69,7 @@ pub struct BotDeps {
 }
 
 /// Spawn the bot and block until ctrl-C / hangup.
-pub async fn run(token: String, deps: BotDeps) -> Result<()> {
-    let bot = Bot::new(token);
+pub async fn run(bot: Bot, deps: BotDeps) -> Result<()> {
     tracing::info!("starting teloxide dispatcher");
 
     let handler =

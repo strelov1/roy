@@ -31,10 +31,10 @@ pub struct TelegramConfig {
     pub allowed_user_ids: Vec<u64>,
     /// roy preset to spawn for new chats (`claude` / `gemini` / `opencode` / `codex`).
     pub preset: String,
-    /// Working directory for spawned sessions. `None` → daemon picks its
-    /// default (`ROY_CWD` / daemon cwd).
+    /// `Some(project_id)` to scope spawned sessions to that project; `None`
+    /// to use the daemon's default cwd.
     #[serde(default)]
-    pub cwd: Option<String>,
+    pub project_id: Option<String>,
     #[serde(default = "default_turn_timeout_secs")]
     pub turn_timeout_secs: u64,
 }
@@ -73,7 +73,7 @@ mod tests {
             token = "1234:abc"
             allowed_user_ids = [1, 2]
             preset = "claude"
-            cwd = "/Users/me/proj"
+            project_id = "proj-abc"
             turn_timeout_secs = 300
 
             [binder]
@@ -84,7 +84,7 @@ mod tests {
         assert_eq!(cfg.telegram.token, "1234:abc");
         assert_eq!(cfg.telegram.allowed_user_ids, vec![1, 2]);
         assert_eq!(cfg.telegram.preset, "claude");
-        assert_eq!(cfg.telegram.cwd.as_deref(), Some("/Users/me/proj"));
+        assert_eq!(cfg.telegram.project_id.as_deref(), Some("proj-abc"));
         assert_eq!(cfg.telegram.turn_timeout_secs, 300);
         assert_eq!(cfg.binder.path, "/tmp/binder.json");
     }
@@ -102,7 +102,7 @@ mod tests {
         let cfg: GatewayConfig = toml::from_str(raw).unwrap();
         assert!(cfg.daemon.socket.is_none());
         assert!(cfg.telegram.allowed_user_ids.is_empty());
-        assert!(cfg.telegram.cwd.is_none());
+        assert!(cfg.telegram.project_id.is_none());
         assert_eq!(cfg.telegram.turn_timeout_secs, 600);
     }
 }
