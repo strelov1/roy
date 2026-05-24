@@ -13,10 +13,14 @@ Non-negotiable expectations for any change in this repo:
 
 ## What this is
 
-A Cargo workspace with two crates:
+A Cargo workspace with four crates:
 
 - **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting metadata so sessions survive across daemon restarts.
 - **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket / WebSocket) plus an MCP server (`roy mcp`) that exposes the daemon to MCP-aware AI clients.
+- **`crates/roy-scheduler`** — cron + one-shot fire dispatcher. Talks to the daemon over its Unix socket using `ClientCommand::Fire`; never reaches into `SessionManager`, `Engine`, or `Journal`. Owns its own SQLite state (`~/.local/state/roy-scheduler/state.db`) for triggers, fires, and subscribers.
+- **`crates/roy-gateway`** — chat-platform → daemon bridge (v1: Telegram). Same boundary rule as `roy-scheduler`. Persists `chat_id → roy session_id` in a JSON file so chats survive restarts.
+
+External crates (`roy-scheduler`, `roy-gateway`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API.
 
 Roy spawns agent CLIs; it does not install them. The agent's working directory comes from the client: `roy run --cwd …`, MCP `cwd` argument, or `ClientCommand::Spawn.cwd`. When no client supplies one, the daemon falls back to `ROY_CWD` (env), then its own `current_dir`. Set `ROY_CWD` on the systemd/launchd unit to pin a default project root for every default-cwd session.
 
