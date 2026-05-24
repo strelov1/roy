@@ -29,6 +29,30 @@ impl Agent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerKind {
+    Cron,
+    Oneshot,
+}
+
+impl TriggerKind {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            TriggerKind::Cron => "cron",
+            TriggerKind::Oneshot => "oneshot",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "cron" => Some(Self::Cron),
+            "oneshot" => Some(Self::Oneshot),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, FromRow, Serialize, Deserialize)]
 pub struct Trigger {
     pub id: String,
@@ -49,8 +73,13 @@ impl Trigger {
         self.paused != 0
     }
 
+    pub fn kind(&self) -> TriggerKind {
+        TriggerKind::parse(&self.kind)
+            .unwrap_or_else(|| panic!("invalid kind in DB: {:?}", self.kind))
+    }
+
     pub fn is_oneshot(&self) -> bool {
-        self.kind == "oneshot"
+        matches!(self.kind(), TriggerKind::Oneshot)
     }
 }
 
@@ -150,6 +179,14 @@ pub struct SubscriberRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trigger_kind_roundtrips() {
+        for kind in [TriggerKind::Cron, TriggerKind::Oneshot] {
+            assert_eq!(TriggerKind::parse(kind.as_db()), Some(kind));
+        }
+        assert_eq!(TriggerKind::parse("nope"), None);
+    }
 
     #[test]
     fn subscriber_kind_roundtrips() {
