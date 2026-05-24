@@ -14,3 +14,4 @@ pub mod draft_stream;
 pub mod formatting;
 pub mod orchestrator;
 pub mod telegram;
+pub mod typing;
