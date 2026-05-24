@@ -16,7 +16,10 @@ mod pid_lock;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Context;
 use clap::{ArgGroup, Parser, Subcommand};
+use roy_scheduler::{db, store};
+use sqlx::SqlitePool;
 
 #[derive(Parser)]
 #[command(
@@ -254,16 +257,90 @@ fn init_tracing() {
         .try_init();
 }
 
+fn default_db_path() -> PathBuf {
+    if let Ok(s) = std::env::var("ROY_SCHEDULER_DB") {
+        return PathBuf::from(s);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local/state/roy-scheduler/state.db")
+}
+
+/// First wired up by the `fire-now` and `serve` subcommands (later sub-commits).
+#[allow(dead_code)]
+fn default_socket() -> PathBuf {
+    if let Ok(s) = std::env::var("ROY_SOCKET") {
+        return PathBuf::from(s);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".roy/daemon.sock")
+}
+
+/// First wired up by the `serve` subcommand (sub-commit 6 of Task 17).
+#[allow(dead_code)]
+fn default_pid_file() -> PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local/state/roy-scheduler/serve.pid")
+}
+
+/// Open the SQLite pool at the configured path. `db::open` auto-runs migrations.
+async fn open_pool() -> anyhow::Result<SqlitePool> {
+    let path = default_db_path();
+    db::open(&path)
+        .await
+        .with_context(|| format!("opening DB at {}", path.display()))
+}
+
+/// Print one JSON line on stdout — the project-wide output convention.
+fn print_json(v: impl serde::Serialize) -> anyhow::Result<()> {
+    let s = serde_json::to_string(&v).context("serializing JSON output")?;
+    println!("{s}");
+    Ok(())
+}
+
 async fn cmd_serve(_args: ServeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
 async fn cmd_migrate() -> anyhow::Result<()> {
-    Ok(())
+    // `db::open` runs the embedded migrator unconditionally — opening is
+    // sufficient. Print a one-line confirmation for scripting.
+    let _pool = open_pool().await?;
+    print_json(serde_json::json!({ "status": "ok" }))
 }
 
-async fn cmd_agents(_cmd: AgentsCmd) -> anyhow::Result<()> {
-    Ok(())
+async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<()> {
+    let pool = open_pool().await?;
+    match cmd {
+        AgentsCmd::Add(a) => {
+            let agent = store::agents::insert(
+                &pool,
+                store::agents::NewAgent {
+                    name: a.name,
+                    preset: a.preset,
+                    project_id: a.project,
+                    task: a.task,
+                    model: a.model,
+                    persistent: a.persistent,
+                },
+            )
+            .await?;
+            print_json(&agent)
+        }
+        AgentsCmd::List => {
+            let agents = store::agents::list(&pool).await?;
+            print_json(&agents)
+        }
+        AgentsCmd::Show { id } => {
+            let agent = store::agents::get_by_id(&pool, &id)
+                .await?
+                .with_context(|| format!("agent {id} not found"))?;
+            print_json(&agent)
+        }
+        AgentsCmd::Rm { id } => {
+            let removed = store::agents::delete(&pool, &id).await?;
+            print_json(serde_json::json!({ "id": id, "removed": removed }))
+        }
+    }
 }
 
 async fn cmd_triggers(_cmd: TriggersCmd) -> anyhow::Result<()> {
