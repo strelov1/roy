@@ -133,6 +133,85 @@ impl ProjectRegistry {
         self.persist(&state)?;
         Ok((id, Some(project)))
     }
+
+    /// Rename a project. Returns the updated Project. Errors if id unknown.
+    pub fn rename(&self, id: &str, new_name: &str) -> Result<Project> {
+        let mut state = self.inner.lock().expect("registry poisoned");
+        let proj = state
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| RoyError::Protocol(format!("no_project: {id}")))?;
+        proj.name = new_name.to_string();
+        let snapshot = proj.clone();
+        self.persist(&state)?;
+        Ok(snapshot)
+    }
+
+    /// Remove the project entry from the in-memory state and persist, and
+    /// return the set of session ids that were attached to it (so the caller
+    /// can cascade-close them outside the lock). Errors if id unknown.
+    pub fn remove_entry(&self, id: &str) -> Result<Vec<String>> {
+        let mut state = self.inner.lock().expect("registry poisoned");
+        let pos = state
+            .projects
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| RoyError::Protocol(format!("no_project: {id}")))?;
+        state.projects.remove(pos);
+        let sids = state
+            .sessions_by_project
+            .remove(id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        self.persist(&state)?;
+        Ok(sids)
+    }
+
+    /// Register a session under a project. Idempotent.
+    pub fn register_session(&self, project_id: &str, session_id: &str) {
+        let mut state = self.inner.lock().expect("registry poisoned");
+        state
+            .sessions_by_project
+            .entry(project_id.to_string())
+            .or_default()
+            .insert(session_id.to_string());
+    }
+
+    /// Unregister a session. Idempotent.
+    pub fn unregister_session(&self, project_id: &str, session_id: &str) {
+        let mut state = self.inner.lock().expect("registry poisoned");
+        if let Some(set) = state.sessions_by_project.get_mut(project_id) {
+            set.remove(session_id);
+        }
+    }
+
+    /// Snapshot of session ids attached to a project.
+    pub fn sessions_in(&self, project_id: &str) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("registry poisoned")
+            .sessions_by_project
+            .get(project_id)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Look up the project id (if any) for a session.
+    pub fn project_of(&self, session_id: &str) -> Option<String> {
+        let state = self.inner.lock().expect("registry poisoned");
+        state
+            .sessions_by_project
+            .iter()
+            .find_map(|(pid, sids)| {
+                if sids.contains(session_id) {
+                    Some(pid.clone())
+                } else {
+                    None
+                }
+            })
+    }
 }
 
 fn basename_or_path(p: &Path) -> String {
@@ -265,5 +344,40 @@ mod tests {
         let first = ids[0].clone();
         assert!(ids.iter().all(|i| i == &first), "all threads must agree on id");
         assert_eq!(reg.list().len(), 1, "only one project must exist");
+    }
+
+    #[test]
+    fn rename_updates_in_memory_and_disk() {
+        let dir = tmp_journal_dir();
+        let reg = ProjectRegistry::load(&dir).unwrap();
+        let project_dir = dir.join("proj-rename");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let (id, _) = reg.resolve_or_create(&project_dir).unwrap();
+        let updated = reg.rename(&id, "new-name").unwrap();
+        assert_eq!(updated.name, "new-name");
+        let reg2 = ProjectRegistry::load(&dir).unwrap();
+        assert_eq!(reg2.list()[0].name, "new-name");
+    }
+
+    #[test]
+    fn rename_unknown_id_errors() {
+        let dir = tmp_journal_dir();
+        let reg = ProjectRegistry::load(&dir).unwrap();
+        assert!(reg.rename("does-not-exist", "x").is_err());
+    }
+
+    #[test]
+    fn remove_entry_returns_session_ids_and_drops_project() {
+        let dir = tmp_journal_dir();
+        let reg = ProjectRegistry::load(&dir).unwrap();
+        let project_dir = dir.join("proj-del");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let (pid, _) = reg.resolve_or_create(&project_dir).unwrap();
+        reg.register_session(&pid, "s1");
+        reg.register_session(&pid, "s2");
+        let mut sids = reg.remove_entry(&pid).unwrap();
+        sids.sort();
+        assert_eq!(sids, vec!["s1".to_string(), "s2".to_string()]);
+        assert!(reg.list().is_empty());
     }
 }
