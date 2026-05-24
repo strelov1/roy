@@ -208,6 +208,13 @@ struct FireNowArgs {
     /// Per-fire timeout (seconds). Defaults to 600.
     #[arg(long)]
     fire_timeout: Option<u64>,
+    /// Session id of the caller. Recorded on the fire's session as the
+    /// reserved tag `roy-scheduler:initiated_by_session` so the UI can link
+    /// the fire back to its initiator. Distinct from
+    /// `roy-scheduler:parent_session_id`, which is set by the
+    /// `inject_parent` subscriber.
+    #[arg(long, value_name = "SESSION_ID")]
+    parent: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -567,7 +574,8 @@ async fn cmd_fire_now(args: FireNowArgs) -> anyhow::Result<ExitCode> {
     let socket = default_socket();
     let timeout = Duration::from_secs(args.fire_timeout.unwrap_or(600));
 
-    let fire = driver::fire_agent_ad_hoc(&pool, &socket, &args.agent_id, timeout).await?;
+    let fire =
+        driver::fire_agent_ad_hoc(&pool, &socket, &args.agent_id, timeout, args.parent).await?;
 
     // Map terminal status to exit code. The "ok" / "error" / "timeout"
     // strings come from FireStatus's column representation.
@@ -593,4 +601,28 @@ async fn cmd_fire_now(args: FireNowArgs) -> anyhow::Result<ExitCode> {
 
     print_json(&fire)?;
     Ok(exit)
+}
+
+#[cfg(test)]
+mod fire_now_args_tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn fire_now_accepts_parent_flag() {
+        let cli = Cli::try_parse_from([
+            "roy-scheduler",
+            "fire-now",
+            "agent-uuid",
+            "--parent",
+            "parent-sid",
+        ]);
+        assert!(cli.is_ok(), "expected success, got {:?}", cli.err());
+    }
+
+    #[test]
+    fn fire_now_parent_is_optional() {
+        let cli = Cli::try_parse_from(["roy-scheduler", "fire-now", "agent-uuid"]);
+        assert!(cli.is_ok(), "expected success, got {:?}", cli.err());
+    }
 }
