@@ -6,6 +6,7 @@
 //! See `docs/architecture.md`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -235,6 +236,21 @@ pub enum ClientCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
     },
+    /// Return all projects in the registry.
+    ListProjects,
+    /// Create a project at `path`. If `name` is None, daemon uses
+    /// `basename(canonical(path))`. Path must exist on disk.
+    CreateProject {
+        path: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Rename a project. Path is immutable in this iteration.
+    RenameProject { project_id: String, name: String },
+    /// Cascade-delete a project: every session it owns is closed and its
+    /// journal + metadata files are erased, then the registry entry is
+    /// removed. Synchronous.
+    DeleteProject { project_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -416,6 +432,39 @@ mod tests {
     fn list_command_serializes_as_bare_op() {
         let s = serde_json::to_string(&ClientCommand::List).unwrap();
         assert_eq!(s, "{\"op\":\"list\"}");
+    }
+
+    #[test]
+    fn list_projects_serializes_as_bare_op() {
+        let s = serde_json::to_string(&ClientCommand::ListProjects).unwrap();
+        assert_eq!(s, "{\"op\":\"list_projects\"}");
+    }
+
+    #[test]
+    fn create_project_roundtrips() {
+        roundtrip(&ClientCommand::CreateProject {
+            path: std::path::PathBuf::from("/tmp/proj"),
+            name: Some("demo".into()),
+        });
+        roundtrip(&ClientCommand::CreateProject {
+            path: std::path::PathBuf::from("/tmp/proj"),
+            name: None,
+        });
+    }
+
+    #[test]
+    fn delete_project_roundtrips() {
+        roundtrip(&ClientCommand::DeleteProject {
+            project_id: "abc".into(),
+        });
+    }
+
+    #[test]
+    fn rename_project_roundtrips() {
+        roundtrip(&ClientCommand::RenameProject {
+            project_id: "abc".into(),
+            name: "new-name".into(),
+        });
     }
 
     #[test]

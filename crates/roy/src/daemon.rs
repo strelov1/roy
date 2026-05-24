@@ -512,6 +512,21 @@ impl Daemon {
                 self.handle_fire(target, prompt, tags, timeout_ms, event_tx)
                     .await
             }
+            ClientCommand::ListProjects => {
+                self.handle_list_projects(event_tx).await
+            }
+            ClientCommand::CreateProject { path, name } => {
+                self.handle_create_project(path, name, event_tx).await
+            }
+            ClientCommand::RenameProject {
+                project_id,
+                name,
+            } => {
+                self.handle_rename_project(project_id, name, event_tx).await
+            }
+            ClientCommand::DeleteProject { project_id } => {
+                self.handle_delete_project(project_id, event_tx).await
+            }
         }
     }
 
@@ -811,6 +826,61 @@ impl Daemon {
                 });
             }
         }
+    }
+
+    async fn handle_list_projects(self: &Arc<Self>, event_tx: &EventTx) {
+        // TODO: Implement list_projects handler.
+        // For now, send an error to indicate not yet implemented.
+        send_error(
+            event_tx,
+            None,
+            ErrorCode::Other("not_implemented".into()),
+            "list_projects not yet implemented",
+        );
+    }
+
+    async fn handle_create_project(
+        self: &Arc<Self>,
+        _path: std::path::PathBuf,
+        _name: Option<String>,
+        event_tx: &EventTx,
+    ) {
+        // TODO: Implement create_project handler.
+        send_error(
+            event_tx,
+            None,
+            ErrorCode::Other("not_implemented".into()),
+            "create_project not yet implemented",
+        );
+    }
+
+    async fn handle_rename_project(
+        self: &Arc<Self>,
+        _project_id: String,
+        _name: String,
+        event_tx: &EventTx,
+    ) {
+        // TODO: Implement rename_project handler.
+        send_error(
+            event_tx,
+            None,
+            ErrorCode::Other("not_implemented".into()),
+            "rename_project not yet implemented",
+        );
+    }
+
+    async fn handle_delete_project(
+        self: &Arc<Self>,
+        _project_id: String,
+        event_tx: &EventTx,
+    ) {
+        // TODO: Implement delete_project handler.
+        send_error(
+            event_tx,
+            None,
+            ErrorCode::Other("not_implemented".into()),
+            "delete_project not yet implemented",
+        );
     }
 
     /// Live engine → subscribe to its broadcast; otherwise fall back to a
