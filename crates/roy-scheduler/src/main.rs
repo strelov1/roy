@@ -436,8 +436,69 @@ fn compute_next_cron(expr: &str, tz: &chrono_tz::Tz) -> Option<chrono::DateTime<
         .map(|t| t.with_timezone(&chrono::Utc))
 }
 
-async fn cmd_subscribers(_cmd: SubscribersCmd) -> anyhow::Result<()> {
-    Ok(())
+async fn cmd_subscribers(cmd: SubscribersCmd) -> anyhow::Result<()> {
+    let pool = open_pool().await?;
+    match cmd {
+        SubscribersCmd::Add(a) => {
+            let kind = roy_scheduler::types::SubscriberKind::parse(&a.kind).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown subscriber kind: {:?} (expected inject_parent|webhook|notify_native|chain_agent)",
+                    a.kind
+                )
+            })?;
+            // Verify the --config string is well-formed JSON. The dispatcher
+            // parses per-kind later; rejecting garbage here gives a clearer
+            // error.
+            serde_json::from_str::<serde_json::Value>(&a.config)
+                .with_context(|| format!("--config is not valid JSON: {:?}", a.config))?;
+
+            // ArgGroup already enforces XOR; validate target existence so we
+            // don't insert a row that immediately violates the FK.
+            if let Some(ref aid) = a.agent {
+                if store::agents::get_by_id(&pool, aid).await?.is_none() {
+                    anyhow::bail!("agent {aid} not found");
+                }
+            }
+            if let Some(ref tid) = a.trigger {
+                if store::triggers::get_by_id(&pool, tid).await?.is_none() {
+                    anyhow::bail!("trigger {tid} not found");
+                }
+            }
+
+            let sub = store::subscribers::insert(
+                &pool,
+                store::subscribers::NewSubscriber {
+                    agent_id: a.agent,
+                    trigger_id: a.trigger,
+                    kind,
+                    config_json: a.config,
+                    order_index: a.order,
+                },
+            )
+            .await?;
+            print_json(&sub)
+        }
+        SubscribersCmd::List { agent, trigger } => {
+            let v = match (agent, trigger) {
+                (Some(a), None) => store::subscribers::list_for_agent(&pool, &a).await?,
+                (None, Some(t)) => store::subscribers::list_for_trigger(&pool, &t).await?,
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("--agent and --trigger are mutually exclusive")
+                }
+                (None, None) => sqlx::query_as::<_, roy_scheduler::types::Subscriber>(
+                    "SELECT * FROM fire_subscribers ORDER BY created_at DESC",
+                )
+                .fetch_all(&pool)
+                .await
+                .context("listing subscribers")?,
+            };
+            print_json(&v)
+        }
+        SubscribersCmd::Rm { id } => {
+            let removed = store::subscribers::delete(&pool, &id).await?;
+            print_json(serde_json::json!({ "id": id, "removed": removed }))
+        }
+    }
 }
 
 async fn cmd_fires(_cmd: FiresCmd) -> anyhow::Result<()> {
