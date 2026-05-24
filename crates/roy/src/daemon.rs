@@ -2443,4 +2443,217 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn create_list_rename_delete_roundtrip() {
+        let dir = tmp_dir();
+        let daemon =
+            Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let serve_handle = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        // CreateProject — path must exist on disk for canonicalize to succeed.
+        let proj_path = dir.join("proj-a");
+        std::fs::create_dir_all(&proj_path).unwrap();
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::CreateProject {
+                path: proj_path.clone(),
+                name: None,
+            },
+        )
+        .await;
+        let project = match next_event_line(&mut events).await {
+            ServerEvent::ProjectCreated { project } => project,
+            other => panic!("expected ProjectCreated, got {other:?}"),
+        };
+        assert_eq!(project.name, "proj-a");
+
+        // ListProjects
+        send_cmd_line(&mut client_wr, &ClientCommand::ListProjects).await;
+        let listed = match next_event_line(&mut events).await {
+            ServerEvent::ProjectsListed { projects } => projects,
+            other => panic!("expected ProjectsListed, got {other:?}"),
+        };
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, project.id);
+
+        // RenameProject
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::RenameProject {
+                project_id: project.id.clone(),
+                name: "renamed".into(),
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::ProjectRenamed { project: p } => assert_eq!(p.name, "renamed"),
+            other => panic!("expected ProjectRenamed, got {other:?}"),
+        }
+
+        // DeleteProject — no sessions, so deleted_sessions empty
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::DeleteProject {
+                project_id: project.id.clone(),
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::ProjectDeleted { project_id, deleted_sessions } => {
+                assert_eq!(project_id, project.id);
+                assert!(deleted_sessions.is_empty());
+            }
+            other => panic!("expected ProjectDeleted, got {other:?}"),
+        }
+
+        // Verify gone
+        send_cmd_line(&mut client_wr, &ClientCommand::ListProjects).await;
+        match next_event_line(&mut events).await {
+            ServerEvent::ProjectsListed { projects } => assert!(projects.is_empty()),
+            other => panic!("expected ProjectsListed, got {other:?}"),
+        }
+
+        drop(client_wr);
+        drop(events);
+        let _ = serve_handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn spawn_auto_creates_project_then_reuses() {
+        let dir = tmp_dir();
+        let daemon =
+            Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let serve_handle = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        let proj_path = dir.join("proj-spawn");
+        std::fs::create_dir_all(&proj_path).unwrap();
+
+        // First spawn
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                cwd: Some(proj_path.to_string_lossy().into()),
+                model: None,
+                permission: None,
+                resume: None,
+                tags: BTreeMap::new(),
+            },
+        )
+        .await;
+        let (pid1, project_payload1) = match next_event_line(&mut events).await {
+            ServerEvent::Spawned { project_id, project, .. } => (project_id, project),
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+        assert!(project_payload1.is_some(), "first spawn must auto-create project");
+
+        // Second spawn into the same cwd
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                cwd: Some(proj_path.to_string_lossy().into()),
+                model: None,
+                permission: None,
+                resume: None,
+                tags: BTreeMap::new(),
+            },
+        )
+        .await;
+        let (pid2, project_payload2) = match next_event_line(&mut events).await {
+            ServerEvent::Spawned { project_id, project, .. } => (project_id, project),
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+        assert!(project_payload2.is_none(), "second spawn must reuse project");
+        assert_eq!(pid1, pid2);
+
+        drop(client_wr);
+        drop(events);
+        let _ = serve_handle.await;
+    }
+
+    #[tokio::test]
+    async fn cascade_delete_removes_journal_files() {
+        let dir = tmp_dir();
+        let daemon =
+            Arc::new(Daemon::new(dir.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let serve_handle = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        let proj_path = dir.join("proj-cascade");
+        std::fs::create_dir_all(&proj_path).unwrap();
+
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                cwd: Some(proj_path.to_string_lossy().into()),
+                model: None,
+                permission: None,
+                resume: None,
+                tags: BTreeMap::new(),
+            },
+        )
+        .await;
+        let (project_id, session_id) = match next_event_line(&mut events).await {
+            ServerEvent::Spawned { project_id, session, .. } => (project_id, session),
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+
+        let jsonl = dir.join(format!("{session_id}.jsonl"));
+        let meta = dir.join(format!("{session_id}.meta.json"));
+        assert!(jsonl.exists(), "journal must exist after spawn");
+        assert!(meta.exists(), "meta must exist after spawn");
+
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::DeleteProject { project_id: project_id.clone() },
+        )
+        .await;
+        let deleted = match next_event_line(&mut events).await {
+            ServerEvent::ProjectDeleted { deleted_sessions, .. } => deleted_sessions,
+            other => panic!("expected ProjectDeleted, got {other:?}"),
+        };
+        assert_eq!(deleted, vec![session_id.clone()]);
+        assert!(!jsonl.exists(), "journal must be erased by cascade");
+        assert!(!meta.exists(), "meta must be erased by cascade");
+
+        drop(client_wr);
+        drop(events);
+        let _ = serve_handle.await;
+    }
 }
