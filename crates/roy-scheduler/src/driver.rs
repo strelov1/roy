@@ -13,14 +13,44 @@ use crate::plan::plan_tick;
 use crate::store::triggers;
 use crate::types::Trigger;
 
+/// A claimed trigger plus the `running` fire row already created for it.
+/// `poll_tick` inserts the fire row inside the claim txn so the FK to
+/// `triggers(id)` is still satisfied at INSERT time — without this,
+/// oneshots (which `plan_tick` deletes in the same tick) would fail with
+/// `FOREIGN KEY constraint failed` on the fire row.
+#[derive(Debug, Clone)]
+pub struct ClaimedFire {
+    pub trigger: Trigger,
+    pub fire_id: String,
+}
+
 /// One polling tick: claim due rows in a short transaction, return the
 /// rows the caller should dispatch through invoke_fire (OUTSIDE the txn).
-pub async fn poll_tick(pool: &SqlitePool, batch_limit: i64) -> Result<Vec<Trigger>> {
+pub async fn poll_tick(pool: &SqlitePool, batch_limit: i64) -> Result<Vec<ClaimedFire>> {
     let now = Utc::now();
     let mut tx = pool.begin().await?;
 
     let due = triggers::select_due(&mut tx, now, batch_limit).await?;
     let plan = plan_tick(&due, now, compute_next);
+
+    // Insert the `running` fire row for each to_fire trigger BEFORE the
+    // trigger delete fires the ON DELETE SET NULL — otherwise a oneshot's
+    // delete runs before the fire INSERT and SQLite rejects the INSERT.
+    let mut claimed: Vec<ClaimedFire> = Vec::with_capacity(plan.to_fire.len());
+    for trig in &plan.to_fire {
+        let fire_id = fires::insert_running_in_txn(
+            &mut tx,
+            fires::NewFire {
+                agent_id: trig.agent_id.clone(),
+                trigger_id: Some(trig.id.clone()),
+            },
+        )
+        .await?;
+        claimed.push(ClaimedFire {
+            trigger: trig.clone(),
+            fire_id,
+        });
+    }
 
     for id in &plan.to_delete {
         triggers::delete_in_txn(&mut tx, id).await?;
@@ -33,7 +63,7 @@ pub async fn poll_tick(pool: &SqlitePool, batch_limit: i64) -> Result<Vec<Trigge
     }
 
     tx.commit().await?;
-    Ok(plan.to_fire)
+    Ok(claimed)
 }
 
 /// croner-backed `next firing` function used by plan_tick.
@@ -110,7 +140,7 @@ pub async fn serve(opts: ServeOpts) -> Result<()> {
     loop {
         match poll_tick(&pool, opts.batch_limit).await {
             Ok(to_fire) => {
-                for trig in to_fire {
+                for ClaimedFire { trigger, fire_id } in to_fire {
                     let permit = match Arc::clone(&semaphore).acquire_owned().await {
                         Ok(p) => p,
                         Err(_) => break,
@@ -119,7 +149,9 @@ pub async fn serve(opts: ServeOpts) -> Result<()> {
                     let socket_path = Arc::clone(&socket_path);
                     let fire_timeout = opts.fire_timeout;
                     tokio::spawn(async move {
-                        if let Err(e) = invoke_fire(&pool, &socket_path, trig, fire_timeout).await {
+                        if let Err(e) =
+                            invoke_fire(&pool, &socket_path, trigger, fire_id, fire_timeout).await
+                        {
                             tracing::error!(error = %e, "invoke_fire failed");
                         }
                         drop(permit);
@@ -132,24 +164,20 @@ pub async fn serve(opts: ServeOpts) -> Result<()> {
     }
 }
 
+/// Run a fire whose `running` row was already inserted upstream by
+/// `poll_tick` (or `cmd_fire_now` for ad-hoc invocations). Fetches the
+/// agent, invokes it, then writes the terminal update + dispatches
+/// subscribers.
 pub async fn invoke_fire(
     pool: &SqlitePool,
     socket_path: &std::path::Path,
     trigger: Trigger,
+    fire_id: String,
     fire_timeout: Duration,
 ) -> Result<()> {
     let agent = agents::get_by_id(pool, &trigger.agent_id)
         .await?
         .with_context(|| format!("agent {} missing", trigger.agent_id))?;
-
-    let fire_id = fires::insert_running(
-        pool,
-        fires::NewFire {
-            agent_id: agent.id.clone(),
-            trigger_id: Some(trigger.id.clone()),
-        },
-    )
-    .await?;
 
     let mut tags = BTreeMap::new();
     tags.insert("roy-scheduler:agent_id".into(), agent.id.clone());
@@ -361,6 +389,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let agent_id = a.id.clone();
         let t = tstore::insert_oneshot(
             &pool,
             tstore::NewOneshotTrigger {
@@ -373,9 +402,20 @@ mod tests {
 
         let to_fire = poll_tick(&pool, 50).await.unwrap();
         assert_eq!(to_fire.len(), 1);
-        assert_eq!(to_fire[0].id, t.id);
+        assert_eq!(to_fire[0].trigger.id, t.id);
 
         // Trigger is gone after the tick.
         assert!(tstore::get_by_id(&pool, &t.id).await.unwrap().is_none());
+
+        // The fire row exists and its trigger_id was set NULL by the
+        // ON DELETE SET NULL fk (the oneshot trigger was deleted in the
+        // same claim txn that inserted the fire).
+        let fire = fires::get_by_id(&pool, &to_fire[0].fire_id)
+            .await
+            .unwrap()
+            .expect("fire row");
+        assert_eq!(fire.status, "running");
+        assert_eq!(fire.agent_id, agent_id);
+        assert!(fire.trigger_id.is_none());
     }
 }

@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::types::{Fire, FireStatus};
@@ -25,6 +25,29 @@ pub async fn insert_running(pool: &SqlitePool, new: NewFire) -> Result<String> {
     .bind(&new.trigger_id)
     .bind(now)
     .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+/// Transaction variant — same as `insert_running` but participates in the
+/// caller's claim txn. Used by `poll_tick` so a fire row exists before the
+/// oneshot trigger row gets `ON DELETE SET NULL`d, avoiding an FK violation
+/// on INSERT.
+pub async fn insert_running_in_txn(
+    tx: &mut Transaction<'_, Sqlite>,
+    new: NewFire,
+) -> Result<String> {
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    sqlx::query(
+        "INSERT INTO fires (id, agent_id, trigger_id, status, started_at)
+         VALUES (?, ?, ?, 'running', ?)",
+    )
+    .bind(&id)
+    .bind(&new.agent_id)
+    .bind(&new.trigger_id)
+    .bind(now)
+    .execute(&mut **tx)
     .await?;
     Ok(id)
 }
