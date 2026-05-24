@@ -193,11 +193,20 @@ pub async fn invoke_fire(
 /// `running` fire row with `trigger_id = None`, then runs the same
 /// post-insert pipeline as scheduled fires (terminal update, persistent
 /// session capture, subscriber dispatch). Returns the terminal `Fire` row.
+///
+/// `initiated_by` records the session id of the caller that issued the fire
+/// (e.g. a UI session, or another agent). When `Some`, the resulting fire
+/// session carries the reserved tag `roy-scheduler:initiated_by_session` so
+/// downstream consumers (UI, audit) can link a fire back to its initiator.
+/// This is distinct from `roy-scheduler:parent_session_id`, which is set by
+/// the `inject_parent` subscriber and names the session the result will be
+/// injected into.
 pub async fn fire_agent_ad_hoc(
     pool: &SqlitePool,
     socket_path: &std::path::Path,
     agent_id: &str,
     fire_timeout: Duration,
+    initiated_by: Option<String>,
 ) -> Result<crate::types::Fire> {
     let agent = agents::get_by_id(pool, agent_id)
         .await?
@@ -216,6 +225,9 @@ pub async fn fire_agent_ad_hoc(
     tags.insert("roy-scheduler:agent_id".into(), agent.id.clone());
     tags.insert("roy-scheduler:fire_id".into(), fire_id.clone());
     tags.insert("roy-scheduler:kind".into(), "fire_now".into());
+    if let Some(parent) = initiated_by {
+        tags.insert("roy-scheduler:initiated_by_session".into(), parent);
+    }
 
     run_fire_for_agent(pool, socket_path, &agent, fire_id, tags, fire_timeout).await
 }
@@ -498,6 +510,29 @@ mod tests {
         });
     }
 
+    /// Spawn a mock daemon that captures the raw JSON line sent by the
+    /// client into the shared `Mutex<Vec<String>>`, then replies with the
+    /// given event. Used to assert on the wire-level tag map.
+    async fn spawn_mock_daemon_capturing(
+        path: std::path::PathBuf,
+        reply: roy::ServerEvent,
+        captured: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+        let listener = UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (rd, mut wr) = sock.into_split();
+            let mut lines = BufReader::new(rd).lines();
+            let cmd_line = lines.next_line().await.unwrap().unwrap_or_default();
+            captured.lock().unwrap().push(cmd_line);
+            let out = serde_json::to_string(&reply).unwrap();
+            wr.write_all(out.as_bytes()).await.unwrap();
+            wr.write_all(b"\n").await.unwrap();
+        });
+    }
+
     #[tokio::test]
     async fn fire_agent_ad_hoc_dispatches_subscribers() {
         use crate::store::subscribers as substore;
@@ -564,7 +599,7 @@ mod tests {
         .unwrap();
 
         // 4. Fire ad-hoc. Subscribers should run.
-        let fire = fire_agent_ad_hoc(&pool, &sock_path, &a.id, Duration::from_secs(5))
+        let fire = fire_agent_ad_hoc(&pool, &sock_path, &a.id, Duration::from_secs(5), None)
             .await
             .unwrap();
         assert_eq!(fire.status, "ok");
@@ -617,12 +652,80 @@ mod tests {
         .unwrap();
         assert!(a.persistent_session_id.is_none());
 
-        fire_agent_ad_hoc(&pool, &sock_path, &a.id, Duration::from_secs(5))
+        fire_agent_ad_hoc(&pool, &sock_path, &a.id, Duration::from_secs(5), None)
             .await
             .unwrap();
 
         let back = agents::get_by_id(&pool, &a.id).await.unwrap().unwrap();
         assert_eq!(back.persistent_session_id.as_deref(), Some("captured-sid"));
+    }
+
+    #[tokio::test]
+    async fn fire_agent_ad_hoc_records_initiated_by_when_parent_provided() {
+        use roy::{ClientCommand, ServerEvent, StopReason, TurnEvent};
+
+        let dir = tempdir().unwrap();
+        let sock_path = dir.path().join("roy.sock");
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        spawn_mock_daemon_capturing(
+            sock_path.clone(),
+            ServerEvent::FireDone {
+                session: "sid-with-parent".into(),
+                seq_range: (1, 2),
+                result: TurnEvent::Result {
+                    cost_usd: None,
+                    stop_reason: StopReason::EndTurn,
+                },
+                assistant_text: "ok".into(),
+            },
+            captured.clone(),
+        )
+        .await;
+
+        let pool = db::open(&dir.path().join("t.db")).await.unwrap();
+        let a = agents::insert(
+            &pool,
+            agents::NewAgent {
+                name: "with-parent".into(),
+                preset: "claude".into(),
+                project_id: None,
+                task: "t".into(),
+                model: None,
+                persistent: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let fire = fire_agent_ad_hoc(
+            &pool,
+            &sock_path,
+            &a.id,
+            Duration::from_secs(5),
+            Some("parent-sid".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fire.status, "ok");
+
+        // The Fire command that hit the daemon must carry the
+        // initiated_by_session tag — distinct from parent_session_id, which
+        // only the inject_parent subscriber sets.
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "expected exactly one Fire command");
+        let cmd: ClientCommand = serde_json::from_str(&lines[0]).expect("parse ClientCommand");
+        let ClientCommand::Fire { tags, .. } = cmd else {
+            panic!("expected ClientCommand::Fire, got {cmd:?}");
+        };
+        assert_eq!(
+            tags.get("roy-scheduler:initiated_by_session")
+                .map(String::as_str),
+            Some("parent-sid"),
+        );
+        assert!(
+            !tags.contains_key("roy-scheduler:parent_session_id"),
+            "fire-now must not set parent_session_id (that tag belongs to inject_parent)",
+        );
     }
 
     #[tokio::test]
@@ -676,7 +779,7 @@ mod tests {
             .await
             .unwrap();
 
-        let fire = fire_agent_ad_hoc(&pool, &sock_path, &a.id, Duration::from_secs(5))
+        let fire = fire_agent_ad_hoc(&pool, &sock_path, &a.id, Duration::from_secs(5), None)
             .await
             .unwrap();
 
