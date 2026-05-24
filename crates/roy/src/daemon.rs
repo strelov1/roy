@@ -834,58 +834,102 @@ impl Daemon {
     }
 
     async fn handle_list_projects(self: &Arc<Self>, event_tx: &EventTx) {
-        // TODO: Implement list_projects handler.
-        // For now, send an error to indicate not yet implemented.
-        send_error(
-            event_tx,
-            None,
-            ErrorCode::Other("not_implemented".into()),
-            "list_projects not yet implemented",
-        );
+        let projects = self.manager.projects().list();
+        let _ = event_tx.send(ServerEvent::ProjectsListed { projects });
     }
 
     async fn handle_create_project(
         self: &Arc<Self>,
-        _path: std::path::PathBuf,
-        _name: Option<String>,
+        path: std::path::PathBuf,
+        name: Option<String>,
         event_tx: &EventTx,
     ) {
-        // TODO: Implement create_project handler.
-        send_error(
-            event_tx,
-            None,
-            ErrorCode::Other("not_implemented".into()),
-            "create_project not yet implemented",
-        );
+        match self.manager.projects().resolve_or_create(&path) {
+            Ok((_id, Some(project))) => {
+                // Auto-created. If a name was supplied, rename now.
+                let final_project = if let Some(n) = name {
+                    match self.manager.projects().rename(&project.id, &n) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            send_error(
+                                event_tx,
+                                None,
+                                ErrorCode::CreateProjectFailed,
+                                e.to_string(),
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    project
+                };
+                let _ = event_tx.send(ServerEvent::ProjectCreated {
+                    project: final_project,
+                });
+            }
+            Ok((id, None)) => {
+                // Path already owned by an existing project.
+                send_error(
+                    event_tx,
+                    None,
+                    ErrorCode::ProjectExists,
+                    format!("path already owned by project {id}"),
+                );
+            }
+            Err(e) => send_error(
+                event_tx,
+                None,
+                ErrorCode::CreateProjectFailed,
+                e.to_string(),
+            ),
+        }
     }
 
     async fn handle_rename_project(
         self: &Arc<Self>,
-        _project_id: String,
-        _name: String,
+        project_id: String,
+        name: String,
         event_tx: &EventTx,
     ) {
-        // TODO: Implement rename_project handler.
-        send_error(
-            event_tx,
-            None,
-            ErrorCode::Other("not_implemented".into()),
-            "rename_project not yet implemented",
-        );
+        match self.manager.projects().rename(&project_id, &name) {
+            Ok(project) => {
+                let _ = event_tx.send(ServerEvent::ProjectRenamed { project });
+            }
+            Err(e) => send_error(
+                event_tx,
+                None,
+                ErrorCode::RenameProjectFailed,
+                e.to_string(),
+            ),
+        }
     }
 
     async fn handle_delete_project(
         self: &Arc<Self>,
-        _project_id: String,
+        project_id: String,
         event_tx: &EventTx,
     ) {
-        // TODO: Implement delete_project handler.
-        send_error(
-            event_tx,
-            None,
-            ErrorCode::Other("not_implemented".into()),
-            "delete_project not yet implemented",
-        );
+        let session_ids = match self.manager.projects().remove_entry(&project_id) {
+            Ok(ids) => ids,
+            Err(e) => {
+                send_error(event_tx, None, ErrorCode::NoProject, e.to_string());
+                return;
+            }
+        };
+        let mut deleted = Vec::with_capacity(session_ids.len());
+        for sid in session_ids {
+            if let Err(e) = self.manager.close(&sid).await {
+                tracing::warn!(session = %sid, error = %e, "cascade close failed");
+            }
+            if let Err(e) = self.manager.delete_archive(&sid).await {
+                tracing::warn!(session = %sid, error = %e, "cascade delete failed");
+            }
+            deleted.push(sid);
+        }
+        let _ = event_tx.send(ServerEvent::ProjectDeleted {
+            project_id,
+            deleted_sessions: deleted,
+        });
     }
 
     /// Live engine → subscribe to its broadcast; otherwise fall back to a
