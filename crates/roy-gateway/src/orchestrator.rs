@@ -294,4 +294,25 @@ mod tests {
         let sent = replier.sent.lock().await.clone();
         assert_eq!(sent, vec![(1, "(empty reply)".to_string())]);
     }
+
+    #[tokio::test]
+    async fn timeout_outcome_replies_and_persists_returned_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let binder = fresh_binder(&dir).await;
+        let fire = MockFire::new();
+        *fire.on_spawn.lock().unwrap() = Some(FireOutcome::Timeout {
+            session: Some("sess-timed".into()),
+        });
+        let replier = MockReplier::default();
+
+        handle_message(&cfg(), &binder, &fire, &replier, 42, "hi".into())
+            .await
+            .unwrap();
+
+        assert_eq!(binder.get(42).await.as_deref(), Some("sess-timed"));
+        let sent = replier.sent.lock().await.clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].1.contains("⏱"));
+        assert!(sent[0].1.contains("timed out"));
+    }
 }
