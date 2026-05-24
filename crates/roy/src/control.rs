@@ -46,6 +46,16 @@ pub enum ErrorCode {
     CancelFailed,
     /// `SetModel` failed (no such session, metadata write failed).
     SetModelFailed,
+    /// The named project id is not in the registry.
+    NoProject,
+    /// `CreateProject` failed because the canonical path is already owned.
+    ProjectExists,
+    /// `CreateProject` failed (FS / canonicalize / persist).
+    CreateProjectFailed,
+    /// `DeleteProject` failed (registry write).
+    DeleteProjectFailed,
+    /// `RenameProject` failed (unknown id / persist).
+    RenameProjectFailed,
     /// Forward-compat: a code emitted by a newer server.
     Other(String),
 }
@@ -67,6 +77,11 @@ impl ErrorCode {
             ErrorCode::DeleteFailed => "delete_failed",
             ErrorCode::CancelFailed => "cancel_failed",
             ErrorCode::SetModelFailed => "set_model_failed",
+            ErrorCode::NoProject => "no_project",
+            ErrorCode::ProjectExists => "project_exists",
+            ErrorCode::CreateProjectFailed => "create_project_failed",
+            ErrorCode::DeleteProjectFailed => "delete_project_failed",
+            ErrorCode::RenameProjectFailed => "rename_project_failed",
             ErrorCode::Other(s) => s.as_str(),
         }
     }
@@ -87,6 +102,11 @@ impl ErrorCode {
             "delete_failed" => ErrorCode::DeleteFailed,
             "cancel_failed" => ErrorCode::CancelFailed,
             "set_model_failed" => ErrorCode::SetModelFailed,
+            "no_project" => ErrorCode::NoProject,
+            "project_exists" => ErrorCode::ProjectExists,
+            "create_project_failed" => ErrorCode::CreateProjectFailed,
+            "delete_project_failed" => ErrorCode::DeleteProjectFailed,
+            "rename_project_failed" => ErrorCode::RenameProjectFailed,
             other => ErrorCode::Other(other.to_string()),
         }
     }
@@ -442,6 +462,14 @@ mod tests {
             ErrorCode::ListArchivedFailed,
             ErrorCode::ResumeFailed,
             ErrorCode::ReadJournalFailed,
+            ErrorCode::DeleteFailed,
+            ErrorCode::CancelFailed,
+            ErrorCode::SetModelFailed,
+            ErrorCode::NoProject,
+            ErrorCode::ProjectExists,
+            ErrorCode::CreateProjectFailed,
+            ErrorCode::DeleteProjectFailed,
+            ErrorCode::RenameProjectFailed,
         ];
         for code in cases {
             let json = serde_json::to_string(&code).unwrap();
