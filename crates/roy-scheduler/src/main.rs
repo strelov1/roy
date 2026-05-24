@@ -265,8 +265,6 @@ fn default_db_path() -> PathBuf {
     PathBuf::from(home).join(".local/state/roy-scheduler/state.db")
 }
 
-/// First wired up by the `fire-now` and `serve` subcommands (later sub-commits).
-#[allow(dead_code)]
 fn default_socket() -> PathBuf {
     if let Ok(s) = std::env::var("ROY_SOCKET") {
         return PathBuf::from(s);
@@ -275,8 +273,6 @@ fn default_socket() -> PathBuf {
     PathBuf::from(home).join(".roy/daemon.sock")
 }
 
-/// First wired up by the `serve` subcommand (sub-commit 6 of Task 17).
-#[allow(dead_code)]
 fn default_pid_file() -> PathBuf {
     let home = std::env::var_os("HOME").unwrap_or_default();
     PathBuf::from(home).join(".local/state/roy-scheduler/serve.pid")
@@ -297,8 +293,47 @@ fn print_json(v: impl serde::Serialize) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_serve(_args: ServeArgs) -> anyhow::Result<()> {
-    Ok(())
+async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
+    use std::time::Duration;
+
+    use roy_scheduler::driver::{self, ServeOpts};
+
+    let pid_path = args.pid_file.unwrap_or_else(default_pid_file);
+    // The lock is held for the lifetime of this function — when the loop
+    // exits (currently only on a panic propagated out of driver::serve)
+    // Drop releases the pid file. A SIGINT here lets tokio cancel the
+    // future, dropping the lock the same way.
+    let _lock = pid_lock::PidLock::acquire(&pid_path)
+        .with_context(|| format!("acquiring pid lock at {}", pid_path.display()))?;
+
+    let mut opts = ServeOpts {
+        db_path: args.db.unwrap_or_else(default_db_path),
+        socket_path: args.socket.unwrap_or_else(default_socket),
+        ..ServeOpts::default()
+    };
+    if let Some(ms) = args.poll_ms {
+        opts.poll_interval = Duration::from_millis(ms);
+    }
+    if let Some(n) = args.batch_limit {
+        opts.batch_limit = n;
+    }
+    if let Some(n) = args.max_fires {
+        opts.max_fires = n;
+    }
+    if let Some(secs) = args.fire_timeout {
+        opts.fire_timeout = Duration::from_secs(secs);
+    }
+
+    tracing::info!(
+        db = %opts.db_path.display(),
+        socket = %opts.socket_path.display(),
+        pid_file = %pid_path.display(),
+        poll_ms = opts.poll_interval.as_millis() as u64,
+        max_fires = opts.max_fires,
+        "roy-scheduler serving",
+    );
+
+    driver::serve(opts).await
 }
 
 async fn cmd_migrate() -> anyhow::Result<()> {

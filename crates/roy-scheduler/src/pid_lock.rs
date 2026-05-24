@@ -3,10 +3,6 @@
 //! across crates because the boundary rule (lib.rs doc) says roy-scheduler
 //! imports only the control protocol from roy.
 
-// First wired up by the `serve` subcommand (sub-commit 6 of Task 17). Until
-// then, the skeleton dispatch doesn't call it.
-#![allow(dead_code)]
-
 use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
