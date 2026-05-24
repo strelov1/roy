@@ -1,8 +1,28 @@
 # Background agents — design spec
 
-**Status:** draft, awaiting implementation plan
-**Date:** 2026-05-23
-**Scope:** v1 of background-agent / scheduled-fires for the `roy` stack.
+> **v2 — current.** The original draft (2026-05-23) stored a literal `cwd` on
+> each agent. That changed after `feature/projects` landed in
+> `2026-05-23-projects-design.md`: `FireTarget::Spawn { preset, project_id:
+> Option<String> }` is the new wire shape (no `cwd` field). A background
+> agent now stores `project_id: Option<String>` instead — `Some(id)` fires
+> under that project's `path`, `None` fires orphan (daemon allocates a
+> per-session workspace subdir).
+>
+> **On naming.** We considered renaming our entity to `job` to avoid
+> overlap with the term "agent" used by the ACP protocol (claude / gemini /
+> opencode / codex are "ACP agents") and by `agents-config.md`
+> (`~/.config/roy/agents.toml` is a filter on those same ACP agents). We
+> kept **`agent`** because (1) "job" implies one-shot batch work, but a
+> persistent background agent holds a long-running conversation context
+> via `persistent_session_id`; (2) "agent" semantically fits — these *are*
+> AI agents performing tasks; (3) `agents.toml` and our `agents` table are
+> in different layers (preset config vs. scheduled identities) — context
+> disambiguates. In code, when disambiguation matters, prefer the qualifier
+> `background_agent` or `BgAgent`.
+
+**Status:** v2 design current; implementation plan being rewritten on top.
+**Date:** 2026-05-23 (v1) → 2026-05-24 (v2 project integration, naming retained)
+**Scope:** v1 of background-agents / scheduled-fires for the `roy` stack.
 
 ## 1. Goal
 
@@ -117,7 +137,7 @@ Wire surface:
 
 | Key                                    | Value                       |
 |----------------------------------------|-----------------------------|
-| `roy-scheduler:agent_id`               | agent ulid                  |
+| `roy-scheduler:agent_id`             | agent uuid                  |
 | `roy-scheduler:trigger_id`             | trigger ulid (omitted on ad-hoc fires) |
 | `roy-scheduler:fire_id`                | fire ulid                   |
 | `roy-scheduler:parent_session_id`      | parent roy session id (omitted if no `inject_parent` subscriber) |
@@ -155,7 +175,9 @@ Lets the scheduler track turn completion without holding a long-running
 
 ```rust
 pub enum FireTarget {
-    Spawn  { preset: String, cwd: PathBuf },
+    /// v2: spawn inside a project's `path`, or as an orphan with its own
+    /// per-session dir if `project_id` is None. See `projects-design.md`.
+    Spawn  { preset: String, project_id: Option<String> },
     Resume { session_id: SessionId },
 }
 
@@ -190,13 +212,13 @@ File: `~/.local/state/roy-scheduler/state.db` by default (overridable via
 `busy_timeout=5s`.
 
 ```sql
--- A persistent identity. The "sotrudnik".
+-- A recurring fire identity. The "sotrudnik".
 CREATE TABLE agents (
-  id                       TEXT PRIMARY KEY,                       -- ulid
+  id                       TEXT PRIMARY KEY,                       -- uuid v4
   name                     TEXT NOT NULL,
-  preset                   TEXT NOT NULL,                          -- claude | gemini | opencode | codex
-  cwd                      TEXT NOT NULL,
-  task                     TEXT NOT NULL,                          -- prompt template sent as the user turn
+  preset                   TEXT NOT NULL,                          -- claude | gemini | opencode | codex (ACP backend)
+  project_id               TEXT,                                   -- roy-side project id; NULL = orphan fires
+  task                     TEXT NOT NULL,                          -- user-turn text sent on every fire
   model                    TEXT,                                   -- optional preset-specific override
   persistent               INTEGER NOT NULL DEFAULT 0,             -- 0/1; fires reuse one child session if 1
   persistent_session_id    TEXT,                                   -- roy session id, set on the first persistent fire
@@ -267,9 +289,24 @@ CREATE TABLE fire_subscriber_runs (
 CREATE INDEX fire_subscriber_runs_fire_idx ON fire_subscriber_runs(fire_id);
 ```
 
+**Note on `agents.project_id`:** this is a free-form string the scheduler
+hands to `FireTarget::Spawn { preset, project_id }`. The scheduler does
+**not** validate it against roy's project registry — that's roy's job.
+Wrong/deleted `project_id` surfaces as `FireError` → `fires.status =
+'error'`. NULL means "always fire as orphan" — roy allocates a fresh
+per-session dir each time. For persistent agents (`persistent = 1`), only
+the FIRST fire spawns; later fires `Resume` the captured
+`persistent_session_id`, so `project_id` is relevant only on that first
+spawn.
+
 **Deliberately absent:** no `sessions` table (roy is the source of truth), no
-`users` / `teams` / `projects`, no encrypted secrets, no skills/persona file
-references. `task` carries the whole user-turn prompt.
+copies of the project registry (roy owns it), no `users` / `teams`, no
+encrypted secrets, no skills/persona file references. `task` carries the
+whole user-turn text.
+
+**Note on `chain_agent`:** the handler is reserved for v2 ("this fire
+triggers another agent"). v1 rejects with `not_implemented`. The config
+field `target_agent_id` references a row in this same `agents` table.
 
 ### 4.1 Subscriber `config` shapes (JSON)
 
@@ -278,7 +315,7 @@ references. `task` carries the whole user-turn prompt.
 | `inject_parent` | `{ "session_id": "<roy session>", "prefix": "..." }` — `prefix` optional.                                                                                                                                                                                                           | `Resume` the parent session and send the result as the next user turn (`prefix` + `assistant_text`). If parent is busy, `WaitForResult` first (5 min timeout), then send. (A future `"format": "summary"` mode is reserved; v1 rejects unknown keys at insert time so the schema stays clean.) |
 | `webhook`       | `{ "url": "...", "method": "POST", "headers": {"k":"v"}, "body_template": "..." }` — `method` defaults to `POST`, `headers` optional, `body_template` rendered with the placeholder context in §4.2.                                                                                | One HTTP request. No retry in v1. Records HTTP status and first 4 KB of body in `fire_subscriber_runs.response_snippet`. Slack / Discord / Telegram / arbitrary backends all collapse onto this.                                   |
 | `notify_native` | `{ "title": "...", "sound": "..." }` — both optional.                                                                                                                                                                                                                               | macOS: `osascript -e 'display notification ...'`. Linux: `notify-send`. Zero-config "ping me when done".                                                                                                                           |
-| `chain_agent`   | `{ "target_agent_id": "...", "prompt_template": "..." }` — placeholder.                                                                                                                                                                                                             | **v1: rejected with `not_implemented`.** Schema reserves the slot so a future migration doesn't break enum check.                                                                                                                  |
+| `chain_agent`   | `{ "target_agent_id": "<agents.id>", "prompt_template": "..." }` — placeholder.                                                                                                                                                                                                     | **v1: rejected with `not_implemented`.** Schema reserves the slot so a future migration doesn't break enum check.                                                                                                                  |
 
 Subscribers run **sequentially in `order_index` ASC, then `created_at` ASC**
 (tiebreaker is deterministic). An error in one does not abort the others.
@@ -293,7 +330,7 @@ is up to the template author). Available variables:
 
 | Placeholder                           | Source                                                                  |
 |---------------------------------------|-------------------------------------------------------------------------|
-| `{{agent.id}}` / `{{agent.name}}`     | `agents` row                                                            |
+| `{{agent.id}}` / `{{agent.name}}` | `agents` row                                                            |
 | `{{trigger.id}}`                      | `triggers.id` (empty string on ad-hoc fires)                            |
 | `{{fire.id}}`                         | `fires.id`                                                              |
 | `{{fire.started_at}}` / `{{fire.finished_at}}` | ISO-8601 UTC                                                  |
@@ -388,10 +425,11 @@ re-add).
 ```
 roy-scheduler serve                                                # run the driver loop
 
-roy-scheduler agents add --name X --preset claude --cwd ... --task '...' [--persistent]
+roy-scheduler agents add --name X --preset claude --task '...' [--project <id>] [--model M] [--persistent]
 roy-scheduler agents list
 roy-scheduler agents show <agent-id>
 roy-scheduler agents rm   <agent-id>
+# Omit --project to fire as orphan (roy allocates a per-session workspace dir).
 
 roy-scheduler triggers add --agent X --cron '0 9 * * *' [--tz Europe/Moscow]
 roy-scheduler triggers add --agent X --oneshot 2026-05-25T10:00:00+03:00
@@ -481,7 +519,7 @@ path.
 | Webhook returns 5xx or times out                             | `status='error'`, `response_snippet` populated. No retry in v1.                                                                                                                                                                                                                      |
 | Invalid cron at CLI insert                                   | CLI rejects (`croner` parse + first-fire calculation).                                                                                                                                                                                                                               |
 | Invalid cron already in DB                                   | `planTick` flags `paused=true, last_error='invalid cron'` (cannot hot-loop).                                                                                                                                                                                                         |
-| Persistent fire, `persistent_session_id` points at gone roy session | Roy returns `SessionNotFound` → scheduler falls back to `Spawn { preset, cwd }` taken from the agent row, updates `persistent_session_id` to the new id, logs a warning.                                                                                                       |
+| Persistent fire, `persistent_session_id` points at gone roy session | Roy returns `SessionNotFound` → scheduler falls back to `Spawn { preset, project_id }` taken from the agent row, updates `persistent_session_id` to the new id, logs a warning.                                                                                                |
 | Second `roy-scheduler serve` started                         | PidLock refuses with `roy-scheduler already running (pid N)`.                                                                                                                                                                                                                        |
 
 ## 8. Testing strategy
