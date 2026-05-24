@@ -126,8 +126,8 @@ impl ProjectRegistry {
             version: CURRENT_VERSION,
             projects: state.projects.clone(),
         };
-        let bytes = serde_json::to_vec_pretty(&on_disk)
-            .map_err(|e| RoyError::Protocol(e.to_string()))?;
+        let bytes =
+            serde_json::to_vec_pretty(&on_disk).map_err(|e| RoyError::Protocol(e.to_string()))?;
         let tmp = self.file_path.with_extension("json.tmp");
         std::fs::write(&tmp, &bytes).map_err(RoyError::Io)?;
         std::fs::rename(&tmp, &self.file_path).map_err(RoyError::Io)?;
@@ -135,7 +135,11 @@ impl ProjectRegistry {
     }
 
     pub fn list(&self) -> Vec<Project> {
-        self.inner.lock().expect("registry poisoned").projects.clone()
+        self.inner
+            .lock()
+            .expect("registry poisoned")
+            .projects
+            .clone()
     }
 
     /// Create a new project named `name` inside the workspace. Validates the
@@ -247,16 +251,13 @@ impl ProjectRegistry {
     /// Look up the project id (if any) for a session.
     pub fn project_of(&self, session_id: &str) -> Option<String> {
         let state = self.inner.lock().expect("registry poisoned");
-        state
-            .sessions_by_project
-            .iter()
-            .find_map(|(pid, sids)| {
-                if sids.contains(session_id) {
-                    Some(pid.clone())
-                } else {
-                    None
-                }
-            })
+        state.sessions_by_project.iter().find_map(|(pid, sids)| {
+            if sids.contains(session_id) {
+                Some(pid.clone())
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -306,19 +307,13 @@ mod tests {
             validate_project_name("has space").is_err(),
             "space must fail"
         );
-        assert!(
-            validate_project_name("has.dot").is_err(),
-            "dot must fail"
-        );
+        assert!(validate_project_name("has.dot").is_err(), "dot must fail");
     }
 
     fn tmp_dirs() -> (PathBuf, PathBuf) {
         static C: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = C.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!(
-            "roy-proj-test-{}-{n}",
-            std::process::id()
-        ));
+        let base = std::env::temp_dir().join(format!("roy-proj-test-{}-{n}", std::process::id()));
         let journal = base.join("journals");
         let workspace = base.join("workspace");
         let _ = std::fs::remove_dir_all(&base);

@@ -492,7 +492,9 @@ mod tests {
             resume_cursor: None,
             tags: Default::default(),
         };
-        crate::session_meta::write_metadata(&dir, &meta).await.unwrap();
+        crate::session_meta::write_metadata(&dir, &meta)
+            .await
+            .unwrap();
         // Write an empty journal file so it doesn't fail later scans.
         std::fs::write(dir.join(format!("{session_id}.jsonl")), "").unwrap();
 
@@ -512,7 +514,9 @@ mod tests {
             resume_cursor: None,
             tags: Default::default(),
         };
-        crate::session_meta::write_metadata(&dir, &orphan_meta).await.unwrap();
+        crate::session_meta::write_metadata(&dir, &orphan_meta)
+            .await
+            .unwrap();
         std::fs::write(dir.join(format!("{unknown_sid}.jsonl")), "").unwrap();
 
         // Should complete without error even with unknown project.

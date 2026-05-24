@@ -270,7 +270,11 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     let socket = args.socket.unwrap_or_else(default_socket);
     let journal_dir = args.journal_dir.unwrap_or_else(default_journal_dir);
     let workspace_dir = args.workspace_dir.unwrap_or_else(default_workspace_dir);
-    let daemon = Arc::new(Daemon::new(journal_dir, workspace_dir, Arc::new(DefaultTransportFactory))?);
+    let daemon = Arc::new(Daemon::new(
+        journal_dir,
+        workspace_dir,
+        Arc::new(DefaultTransportFactory),
+    )?);
     eprintln!("roy serve: listening on {}", socket.display());
     if let Some(port) = args.port {
         eprintln!("roy serve: WebSocket on 127.0.0.1:{port}");
@@ -740,7 +744,11 @@ async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<()> {
             match read_event(&mut events).await? {
                 ServerEvent::ProjectCreated { project } => {
                     println!("{}", project.id);
-                    eprintln!("created project '{}' at {}", project.name, project.path.display());
+                    eprintln!(
+                        "created project '{}' at {}",
+                        project.name,
+                        project.path.display()
+                    );
                     Ok(())
                 }
                 ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
@@ -748,8 +756,7 @@ async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<()> {
             }
         }
         ProjectsCmd::Delete { id_or_name, yes } => {
-            let project_id =
-                resolve_project_id(&mut writer, &mut events, &id_or_name).await?;
+            let project_id = resolve_project_id(&mut writer, &mut events, &id_or_name).await?;
             if !yes {
                 eprintln!(
                     "This will delete project {project_id} and all its sessions. Re-run with --yes to confirm."
@@ -758,11 +765,16 @@ async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<()> {
             }
             send_cmd(
                 &mut writer,
-                &ClientCommand::DeleteProject { project_id: project_id.clone() },
+                &ClientCommand::DeleteProject {
+                    project_id: project_id.clone(),
+                },
             )
             .await?;
             match read_event(&mut events).await? {
-                ServerEvent::ProjectDeleted { project_id, deleted_sessions } => {
+                ServerEvent::ProjectDeleted {
+                    project_id,
+                    deleted_sessions,
+                } => {
                     eprintln!(
                         "deleted project {project_id} ({} sessions)",
                         deleted_sessions.len()

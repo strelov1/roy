@@ -509,7 +509,10 @@ async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("missing 'prompt'"))?
         .to_string();
     let agent = args.get("agent").and_then(Value::as_str);
-    let project_id = args.get("project_id").and_then(Value::as_str).map(str::to_string);
+    let project_id = args
+        .get("project_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let resume = args.get("resume").and_then(Value::as_str);
     let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64);
 
@@ -883,11 +886,7 @@ async fn tool_create_project(socket_path: &Path, args: Value) -> anyhow::Result<
         .to_string();
 
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
-    send_cmd(
-        &mut writer,
-        &ClientCommand::CreateProject { name },
-    )
-    .await?;
+    send_cmd(&mut writer, &ClientCommand::CreateProject { name }).await?;
     match next_event(&mut lines).await? {
         ServerEvent::ProjectCreated { project } => Ok(serde_json::to_string(&project)?),
         ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
@@ -903,11 +902,7 @@ async fn tool_delete_project(socket_path: &Path, args: Value) -> anyhow::Result<
         .to_string();
 
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
-    send_cmd(
-        &mut writer,
-        &ClientCommand::DeleteProject { project_id },
-    )
-    .await?;
+    send_cmd(&mut writer, &ClientCommand::DeleteProject { project_id }).await?;
     match next_event(&mut lines).await? {
         ServerEvent::ProjectDeleted {
             project_id,

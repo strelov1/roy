@@ -589,6 +589,8 @@ mod tests {
 
     #[test]
     fn projects_listed_event_roundtrips() {
-        roundtrip(&ServerEvent::ProjectsListed { projects: Vec::new() });
+        roundtrip(&ServerEvent::ProjectsListed {
+            projects: Vec::new(),
+        });
     }
 }

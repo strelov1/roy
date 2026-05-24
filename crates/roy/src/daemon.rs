@@ -508,9 +508,7 @@ impl Daemon {
                 self.handle_fire(target, prompt, tags, timeout_ms, event_tx)
                     .await
             }
-            ClientCommand::ListProjects => {
-                self.handle_list_projects(event_tx).await
-            }
+            ClientCommand::ListProjects => self.handle_list_projects(event_tx).await,
             ClientCommand::CreateProject { name } => {
                 self.handle_create_project(name, event_tx).await
             }
@@ -749,19 +747,17 @@ impl Daemon {
         let engine = match target {
             FireTarget::Spawn { preset, project_id } => {
                 let (cwd, fixed_session_id) = match project_id.as_deref() {
-                    Some(pid) => {
-                        match self.manager.projects().project_path(pid) {
-                            Ok(p) => (p, None),
-                            Err(e) => {
-                                let _ = event_tx.send(ServerEvent::FireError {
-                                    session: None,
-                                    code: ErrorCode::NoProject,
-                                    message: e.to_string(),
-                                });
-                                return;
-                            }
+                    Some(pid) => match self.manager.projects().project_path(pid) {
+                        Ok(p) => (p, None),
+                        Err(e) => {
+                            let _ = event_tx.send(ServerEvent::FireError {
+                                session: None,
+                                code: ErrorCode::NoProject,
+                                message: e.to_string(),
+                            });
+                            return;
                         }
-                    }
+                    },
                     None => {
                         let sid = uuid::Uuid::new_v4().to_string();
                         match self.manager.projects().allocate_orphan_session_dir(&sid) {
@@ -880,11 +876,7 @@ impl Daemon {
         let _ = event_tx.send(ServerEvent::ProjectsListed { projects });
     }
 
-    async fn handle_create_project(
-        self: &Arc<Self>,
-        name: String,
-        event_tx: &EventTx,
-    ) {
+    async fn handle_create_project(self: &Arc<Self>, name: String, event_tx: &EventTx) {
         match self.manager.projects().create_project(&name) {
             Ok(project) => {
                 let _ = event_tx.send(ServerEvent::ProjectCreated { project });
@@ -908,11 +900,7 @@ impl Daemon {
         }
     }
 
-    async fn handle_delete_project(
-        self: &Arc<Self>,
-        project_id: String,
-        event_tx: &EventTx,
-    ) {
+    async fn handle_delete_project(self: &Arc<Self>, project_id: String, event_tx: &EventTx) {
         let session_ids = match self.manager.projects().remove_entry(&project_id) {
             Ok(ids) => ids,
             Err(e) => {
@@ -1416,7 +1404,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tmp_dir();
         let socket_path = dir.join("daemon.sock");
-        let daemon = Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
         let socket_path_for_task = socket_path.clone();
         let listener_handle = {
             let d = Arc::clone(&daemon);
@@ -1456,7 +1447,10 @@ mod tests {
     #[tokio::test]
     async fn spawn_attach_send_round_trip_over_duplex() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -1566,7 +1560,10 @@ mod tests {
     #[tokio::test]
     async fn closed_session_is_attachable_via_archive_fallback() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -1702,7 +1699,10 @@ mod tests {
     #[tokio::test]
     async fn read_journal_snapshot_paginates_a_live_session() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -1853,7 +1853,10 @@ mod tests {
     #[tokio::test]
     async fn close_then_resume_continues_the_journal() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -2034,7 +2037,10 @@ mod tests {
     #[tokio::test]
     async fn spawn_with_resume_uses_session_load() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -2098,7 +2104,10 @@ mod tests {
     #[tokio::test]
     async fn spawn_attach_send_round_trip_over_websocket() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2224,7 +2233,10 @@ mod tests {
     #[tokio::test]
     async fn wait_for_result_resolves_when_turn_finishes() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         // Connection 1: for Spawn + Send
         let (client1_side, server1_side) = tokio::io::duplex(8192);
@@ -2322,7 +2334,10 @@ mod tests {
     #[tokio::test]
     async fn fire_combo_spawns_sends_and_waits() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -2383,7 +2398,10 @@ mod tests {
     #[tokio::test]
     async fn set_tags_replaces_the_tag_map() {
         let dir = tmp_dir();
-        let daemon = Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -2453,8 +2471,10 @@ mod tests {
     #[tokio::test]
     async fn create_list_delete_roundtrip() {
         let dir = tmp_dir();
-        let daemon =
-            Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -2471,7 +2491,9 @@ mod tests {
         // CreateProject with a valid name — daemon creates the dir.
         send_cmd_line(
             &mut client_wr,
-            &ClientCommand::CreateProject { name: "proj-alpha".into() },
+            &ClientCommand::CreateProject {
+                name: "proj-alpha".into(),
+            },
         )
         .await;
         let project = match next_event_line(&mut events).await {
@@ -2493,12 +2515,18 @@ mod tests {
         // CreateProject with invalid name → InvalidProjectName
         send_cmd_line(
             &mut client_wr,
-            &ClientCommand::CreateProject { name: "bad/name".into() },
+            &ClientCommand::CreateProject {
+                name: "bad/name".into(),
+            },
         )
         .await;
         match next_event_line(&mut events).await {
             ServerEvent::Error { code, .. } => {
-                assert_eq!(code, ErrorCode::InvalidProjectName, "bad name must yield invalid_project_name");
+                assert_eq!(
+                    code,
+                    ErrorCode::InvalidProjectName,
+                    "bad name must yield invalid_project_name"
+                );
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -2506,11 +2534,16 @@ mod tests {
         // DeleteProject — no sessions, so deleted_sessions empty
         send_cmd_line(
             &mut client_wr,
-            &ClientCommand::DeleteProject { project_id: project.id.clone() },
+            &ClientCommand::DeleteProject {
+                project_id: project.id.clone(),
+            },
         )
         .await;
         match next_event_line(&mut events).await {
-            ServerEvent::ProjectDeleted { project_id, deleted_sessions } => {
+            ServerEvent::ProjectDeleted {
+                project_id,
+                deleted_sessions,
+            } => {
                 assert_eq!(project_id, project.id);
                 assert!(deleted_sessions.is_empty());
             }
@@ -2535,8 +2568,10 @@ mod tests {
     #[tokio::test]
     async fn create_project_then_spawn_attaches() {
         let dir = tmp_dir();
-        let daemon =
-            Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -2553,7 +2588,9 @@ mod tests {
         // Create project.
         send_cmd_line(
             &mut client_wr,
-            &ClientCommand::CreateProject { name: "myproj".into() },
+            &ClientCommand::CreateProject {
+                name: "myproj".into(),
+            },
         )
         .await;
         let project = match next_event_line(&mut events).await {
@@ -2575,14 +2612,21 @@ mod tests {
         )
         .await;
         let (spawned_pid, session_id) = match next_event_line(&mut events).await {
-            ServerEvent::Spawned { project_id, session, .. } => (project_id, session),
+            ServerEvent::Spawned {
+                project_id,
+                session,
+                ..
+            } => (project_id, session),
             other => panic!("expected Spawned, got {other:?}"),
         };
         assert_eq!(spawned_pid.as_deref(), Some(project.id.as_str()));
 
         // Session must be registered under the project.
         let sids = daemon.manager.projects().sessions_in(&project.id);
-        assert!(sids.contains(&session_id), "session must be in project's member list");
+        assert!(
+            sids.contains(&session_id),
+            "session must be in project's member list"
+        );
 
         drop(client_wr);
         drop(events);
@@ -2596,8 +2640,10 @@ mod tests {
     async fn spawn_without_project_creates_orphan_dir() {
         let dir = tmp_dir();
         let workspace = dir.join("workspace");
-        let daemon =
-            Arc::new(Daemon::new(dir.clone(), workspace.clone(), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), workspace.clone(), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -2624,14 +2670,22 @@ mod tests {
         )
         .await;
         let (project_id, session_id) = match next_event_line(&mut events).await {
-            ServerEvent::Spawned { project_id, session, .. } => (project_id, session),
+            ServerEvent::Spawned {
+                project_id,
+                session,
+                ..
+            } => (project_id, session),
             other => panic!("expected Spawned, got {other:?}"),
         };
         assert!(project_id.is_none(), "orphan spawn must have no project_id");
 
         // The orphan dir must exist at <workspace>/<session_id>/.
         let orphan_dir = workspace.join(&session_id);
-        assert!(orphan_dir.is_dir(), "orphan dir must exist at {}", orphan_dir.display());
+        assert!(
+            orphan_dir.is_dir(),
+            "orphan dir must exist at {}",
+            orphan_dir.display()
+        );
 
         drop(client_wr);
         drop(events);
@@ -2643,8 +2697,10 @@ mod tests {
     #[tokio::test]
     async fn cascade_delete_removes_journal_files() {
         let dir = tmp_dir();
-        let daemon =
-            Arc::new(Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory)).expect("registry load"));
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
         let (server_rd, server_wr) = tokio::io::split(server_side);
@@ -2661,7 +2717,9 @@ mod tests {
         // Create project first.
         send_cmd_line(
             &mut client_wr,
-            &ClientCommand::CreateProject { name: "cascade-proj".into() },
+            &ClientCommand::CreateProject {
+                name: "cascade-proj".into(),
+            },
         )
         .await;
         let project = match next_event_line(&mut events).await {
@@ -2694,11 +2752,15 @@ mod tests {
 
         send_cmd_line(
             &mut client_wr,
-            &ClientCommand::DeleteProject { project_id: project.id.clone() },
+            &ClientCommand::DeleteProject {
+                project_id: project.id.clone(),
+            },
         )
         .await;
         let deleted = match next_event_line(&mut events).await {
-            ServerEvent::ProjectDeleted { deleted_sessions, .. } => deleted_sessions,
+            ServerEvent::ProjectDeleted {
+                deleted_sessions, ..
+            } => deleted_sessions,
             other => panic!("expected ProjectDeleted, got {other:?}"),
         };
         assert_eq!(deleted, vec![session_id.clone()]);
