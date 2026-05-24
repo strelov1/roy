@@ -232,8 +232,44 @@ async fn run_fire_for_agent(
     fire_timeout: Duration,
 ) -> Result<crate::types::Fire> {
     let target = build_target(agent);
-    let outcome =
-        roy_client::fire(socket_path, target, agent.task.clone(), tags, fire_timeout).await;
+    let mut outcome = roy_client::fire(
+        socket_path,
+        target,
+        agent.task.clone(),
+        tags.clone(),
+        fire_timeout,
+    )
+    .await;
+
+    // Spec §7: persistent_session_id points at a roy session that's gone
+    // (daemon restart, eviction). Daemon returns NoSession. Clear the dead
+    // id and retry once as a fresh Spawn so the agent isn't stuck forever.
+    // We retry at most once; if the Spawn also fails we keep that outcome.
+    let mut did_fallback_spawn = false;
+    if let Ok(FireOutcome::Error { ref code, .. }) = outcome {
+        if code == "no_session" && agent.is_persistent() && agent.persistent_session_id.is_some() {
+            let old_sid = agent.persistent_session_id.clone().unwrap();
+            tracing::warn!(
+                agent_id = %agent.id,
+                "persistent session {} gone — falling back to fresh spawn",
+                old_sid,
+            );
+            agents::update_persistent_session_id(pool, &agent.id, None).await?;
+            did_fallback_spawn = true;
+            let retry_target = roy::FireTarget::Spawn {
+                preset: agent.preset.clone(),
+                project_id: agent.project_id.clone(),
+            };
+            outcome = roy_client::fire(
+                socket_path,
+                retry_target,
+                agent.task.clone(),
+                tags,
+                fire_timeout,
+            )
+            .await;
+        }
+    }
 
     let (terminal, success_ref, error_msg) = match outcome {
         Ok(FireOutcome::Done(s)) => (
@@ -300,7 +336,9 @@ async fn run_fire_for_agent(
     fires::update_terminal(pool, &fire_id, terminal).await?;
 
     // If we used Spawn but the agent is persistent, capture the new session id.
-    if agent.is_persistent() && agent.persistent_session_id.is_none() {
+    // `did_fallback_spawn` covers the retry case — the in-memory `agent` snapshot
+    // still has the now-stale old id even though we cleared it in the DB above.
+    if agent.is_persistent() && (agent.persistent_session_id.is_none() || did_fallback_spawn) {
         if let Some(ref s) = success_ref {
             agents::update_persistent_session_id(pool, &agent.id, Some(&s.session_id)).await?;
         }
@@ -436,6 +474,30 @@ mod tests {
         });
     }
 
+    /// Spawn a mock roy daemon that replies with `first` on the first
+    /// connection and `second` on the second. Used to drive the NoSession
+    /// fallback retry path.
+    async fn spawn_mock_daemon_seq(
+        path: std::path::PathBuf,
+        first: roy::ServerEvent,
+        second: roy::ServerEvent,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+        let listener = UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            for reply in [first, second] {
+                let (sock, _) = listener.accept().await.unwrap();
+                let (rd, mut wr) = sock.into_split();
+                let mut lines = BufReader::new(rd).lines();
+                let _cmd_line = lines.next_line().await.unwrap();
+                let out = serde_json::to_string(&reply).unwrap();
+                wr.write_all(out.as_bytes()).await.unwrap();
+                wr.write_all(b"\n").await.unwrap();
+            }
+        });
+    }
+
     #[tokio::test]
     async fn fire_agent_ad_hoc_dispatches_subscribers() {
         use crate::store::subscribers as substore;
@@ -561,6 +623,70 @@ mod tests {
 
         let back = agents::get_by_id(&pool, &a.id).await.unwrap().unwrap();
         assert_eq!(back.persistent_session_id.as_deref(), Some("captured-sid"));
+    }
+
+    #[tokio::test]
+    async fn persistent_fire_retries_as_spawn_when_session_is_gone() {
+        use roy::{ErrorCode, ServerEvent, StopReason, TurnEvent};
+
+        // Daemon replies NoSession on the first connection (the Resume
+        // attempt) and FireDone with a fresh session id on the second
+        // (the Spawn fallback). The scheduler should:
+        //   1. clear the dead persistent_session_id,
+        //   2. re-fire as Spawn,
+        //   3. capture the new id,
+        //   4. write a terminal status='ok' fire row.
+        let dir = tempdir().unwrap();
+        let sock_path = dir.path().join("roy.sock");
+        spawn_mock_daemon_seq(
+            sock_path.clone(),
+            ServerEvent::FireError {
+                session: None,
+                code: ErrorCode::NoSession,
+                message: "session not found".into(),
+            },
+            ServerEvent::FireDone {
+                session: "fresh-sid".into(),
+                seq_range: (1, 3),
+                result: TurnEvent::Result {
+                    cost_usd: Some(0.01),
+                    stop_reason: StopReason::EndTurn,
+                },
+                assistant_text: "after spawn".into(),
+            },
+        )
+        .await;
+
+        let pool = db::open(&dir.path().join("t.db")).await.unwrap();
+        let a = agents::insert(
+            &pool,
+            agents::NewAgent {
+                name: "persist".into(),
+                preset: "claude".into(),
+                project_id: None,
+                task: "t".into(),
+                model: None,
+                persistent: true,
+            },
+        )
+        .await
+        .unwrap();
+        // Seed a dead persistent_session_id (as if a previous daemon spawned it).
+        agents::update_persistent_session_id(&pool, &a.id, Some("dead-sid"))
+            .await
+            .unwrap();
+
+        let fire = fire_agent_ad_hoc(&pool, &sock_path, &a.id, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Terminal status reflects the retry's outcome, not the initial NoSession.
+        assert_eq!(fire.status, "ok");
+        assert_eq!(fire.session_id.as_deref(), Some("fresh-sid"));
+
+        // The agent's persistent_session_id was rewritten to the new id.
+        let back = agents::get_by_id(&pool, &a.id).await.unwrap().unwrap();
+        assert_eq!(back.persistent_session_id.as_deref(), Some("fresh-sid"));
     }
 
     #[tokio::test]
