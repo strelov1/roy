@@ -103,6 +103,28 @@ where
 }
 
 impl DaemonClient {
+    pub async fn fire_resume(
+        &self,
+        session_id: &str,
+        prompt: String,
+        tags: BTreeMap<String, String>,
+        timeout: Duration,
+    ) -> Result<FireOutcome> {
+        let stream = tokio::net::UnixStream::connect(&self.socket_path)
+            .await
+            .with_context(|| format!("connecting to daemon at {}", self.socket_path.display()))?;
+        fire_via_stream(
+            stream,
+            FireTarget::Resume {
+                session_id: session_id.into(),
+            },
+            prompt,
+            tags,
+            timeout,
+        )
+        .await
+    }
+
     pub async fn fire_spawn(
         &self,
         preset: &str,
@@ -205,5 +227,48 @@ mod tests {
             }
             other => panic!("expected Done, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn fire_resume_returns_done() {
+        let (client, server) = tokio::io::duplex(8192);
+        tokio::spawn(fake_daemon(
+            server,
+            ServerEvent::FireDone {
+                session: "abc".into(),
+                seq_range: (10, 15),
+                result: TurnEvent::Result {
+                    cost_usd: None,
+                    stop_reason: StopReason::EndTurn,
+                },
+                assistant_text: "resumed reply".into(),
+            },
+            |cmd| match cmd {
+                ClientCommand::Fire {
+                    target: FireTarget::Resume { session_id },
+                    prompt,
+                    ..
+                } => {
+                    assert_eq!(session_id, "abc");
+                    assert_eq!(prompt, "follow-up");
+                }
+                other => panic!("expected Fire::Resume, got {other:?}"),
+            },
+        ));
+
+        let out = fire_via_stream(
+            client,
+            FireTarget::Resume {
+                session_id: "abc".into(),
+            },
+            "follow-up".into(),
+            BTreeMap::new(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(out, FireOutcome::Done { session, assistant_text }
+            if session == "abc" && assistant_text == "resumed reply"));
     }
 }
