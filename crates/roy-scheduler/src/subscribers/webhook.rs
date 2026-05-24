@@ -110,45 +110,23 @@ pub fn render(template: &str, ctx: &HashMap<String, String>) -> String {
     out
 }
 
-pub struct ExecOutcome {
-    pub status: &'static str,
-    pub error_message: Option<String>,
-    pub response_snippet: Option<String>,
-}
-
-pub async fn execute_with_cfg(cfg: &Config, ctx: &HashMap<String, String>) -> ExecOutcome {
+pub async fn execute_with_cfg(
+    client: &reqwest::Client,
+    cfg: &Config,
+    ctx: &HashMap<String, String>,
+) -> super::Outcome {
     let body = cfg
         .body_template
         .as_deref()
         .map(|t| render(t, ctx))
         .unwrap_or_default();
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return ExecOutcome {
-                status: "error",
-                error_message: Some(format!("http client: {e}")),
-                response_snippet: None,
-            };
-        }
-    };
-
     let method = cfg.method.as_deref().unwrap_or("POST").to_uppercase();
     let mut req = match method.as_str() {
         "POST" => client.post(&cfg.url),
         "PUT" => client.put(&cfg.url),
         "PATCH" => client.patch(&cfg.url),
-        _ => {
-            return ExecOutcome {
-                status: "error",
-                error_message: Some(format!("unsupported method: {method}")),
-                response_snippet: None,
-            };
-        }
+        _ => return super::Outcome::error(format!("unsupported method: {method}")),
     };
     for (k, v) in &cfg.headers {
         req = req.header(k, v);
@@ -166,69 +144,42 @@ pub async fn execute_with_cfg(cfg: &Config, ctx: &HashMap<String, String>) -> Ex
                 Err(_) => None,
             };
             if status_code.is_success() {
-                ExecOutcome {
-                    status: "ok",
+                super::Outcome {
+                    status: super::RunStatus::Ok,
                     error_message: None,
                     response_snippet: snippet,
                 }
             } else {
-                ExecOutcome {
-                    status: "error",
+                super::Outcome {
+                    status: super::RunStatus::Error,
                     error_message: Some(format!("HTTP {status_code}")),
                     response_snippet: snippet,
                 }
             }
         }
-        Err(e) => ExecOutcome {
-            status: "error",
-            error_message: Some(format!("send: {e}")),
-            response_snippet: None,
-        },
+        Err(e) => super::Outcome::error(format!("send: {e}")),
     }
-}
-
-/// Backwards-compat wrapper used by existing tests and any callers that pass
-/// config JSON rather than a parsed `Config`.
-pub async fn execute(config_json: &str, ctx: &HashMap<String, String>) -> ExecOutcome {
-    let cfg = match parse_config(config_json) {
-        Ok(c) => c,
-        Err(e) => {
-            return ExecOutcome {
-                status: "error",
-                error_message: Some(format!("config: {e}")),
-                response_snippet: None,
-            };
-        }
-    };
-    execute_with_cfg(&cfg, ctx).await
 }
 
 pub fn build(config_json: &str) -> Result<Box<dyn super::Subscriber>> {
     let cfg = parse_config(config_json)?;
-    Ok(Box::new(WebhookSubscriber { cfg }))
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("build reqwest client")?;
+    Ok(Box::new(WebhookSubscriber { cfg, client }))
 }
 
 pub struct WebhookSubscriber {
     cfg: Config,
+    client: reqwest::Client,
 }
 
 #[async_trait]
 impl super::Subscriber for WebhookSubscriber {
     async fn run(&self, ctx: &super::FireCtx<'_>) -> super::Outcome {
         let render_ctx = build_context(ctx.fire, ctx.agent_name, ctx.success, ctx.error_message);
-        let exec = execute_with_cfg(&self.cfg, &render_ctx).await;
-        match exec.status {
-            "ok" => super::Outcome {
-                status: super::RunStatus::Ok,
-                error_message: exec.error_message,
-                response_snippet: exec.response_snippet,
-            },
-            _ => super::Outcome {
-                status: super::RunStatus::Error,
-                error_message: exec.error_message,
-                response_snippet: exec.response_snippet,
-            },
-        }
+        execute_with_cfg(&self.client, &self.cfg, &render_ctx).await
     }
 }
 
@@ -270,6 +221,13 @@ mod tests {
         assert_eq!(render("привет {{name}} 🌍", &ctx), "привет мир 🌍");
     }
 
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn execute_posts_rendered_body_to_url() {
         let server = MockServer::start().await;
@@ -280,10 +238,11 @@ mod tests {
             .await;
 
         let url = format!("{}/hook", server.uri());
-        let cfg =
+        let cfg_json =
             format!(r#"{{"url":"{url}","body_template":"text={{{{result.assistant_text}}}}"}}"#);
-        let out = execute(&cfg, &ctx_with("hello")).await;
-        assert_eq!(out.status, "ok");
+        let cfg = parse_config(&cfg_json).unwrap();
+        let out = execute_with_cfg(&test_client(), &cfg, &ctx_with("hello")).await;
+        assert_eq!(out.status, super::super::RunStatus::Ok);
         assert_eq!(out.response_snippet.as_deref(), Some("ok"));
 
         let reqs = server.received_requests().await.unwrap();
@@ -301,9 +260,9 @@ mod tests {
             .await;
 
         let url = format!("{}/hook", server.uri());
-        let cfg = format!(r#"{{"url":"{url}"}}"#);
-        let out = execute(&cfg, &ctx_with("x")).await;
-        assert_eq!(out.status, "error");
+        let cfg = parse_config(&format!(r#"{{"url":"{url}"}}"#)).unwrap();
+        let out = execute_with_cfg(&test_client(), &cfg, &ctx_with("x")).await;
+        assert_eq!(out.status, super::super::RunStatus::Error);
         assert!(out.error_message.unwrap().contains("500"));
         assert_eq!(out.response_snippet.as_deref(), Some("boom"));
     }

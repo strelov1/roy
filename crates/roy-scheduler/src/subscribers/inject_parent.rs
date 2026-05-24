@@ -29,12 +29,11 @@ pub fn parse_config(json: &str) -> Result<Config> {
     serde_json::from_str(json).context("inject_parent config")
 }
 
-pub struct ExecOutcome {
-    pub status: &'static str, // "ok" | "error"
-    pub error_message: Option<String>,
-}
-
-pub async fn execute(socket_path: &Path, cfg: &Config, fire_result: &FireSuccess) -> ExecOutcome {
+pub async fn execute(
+    socket_path: &Path,
+    cfg: &Config,
+    fire_result: &FireSuccess,
+) -> super::Outcome {
     let body = match &cfg.prefix {
         Some(p) => format!("{p}{}", fire_result.assistant_text),
         None => fire_result.assistant_text.clone(),
@@ -56,22 +55,12 @@ pub async fn execute(socket_path: &Path, cfg: &Config, fire_result: &FireSuccess
     .await;
 
     match outcome {
-        Ok(FireOutcome::Done(_)) => ExecOutcome {
-            status: "ok",
-            error_message: None,
-        },
-        Ok(FireOutcome::Timeout { .. }) => ExecOutcome {
-            status: "error",
-            error_message: Some("parent stayed busy past 5min".into()),
-        },
-        Ok(FireOutcome::Error { code, message, .. }) => ExecOutcome {
-            status: "error",
-            error_message: Some(format!("{code}: {message}")),
-        },
-        Err(e) => ExecOutcome {
-            status: "error",
-            error_message: Some(format!("roy_client: {e:#}")),
-        },
+        Ok(FireOutcome::Done(_)) => super::Outcome::ok(),
+        Ok(FireOutcome::Timeout { .. }) => super::Outcome::error("parent stayed busy past 5min"),
+        Ok(FireOutcome::Error { code, message, .. }) => {
+            super::Outcome::error(format!("{code}: {message}"))
+        }
+        Err(e) => super::Outcome::error(format!("roy_client: {e:#}")),
     }
 }
 
@@ -90,14 +79,7 @@ impl super::Subscriber for InjectParentSubscriber {
         let Some(success) = ctx.success else {
             return super::Outcome::skipped("inject_parent skipped (fire did not succeed)");
         };
-        let exec = execute(ctx.socket_path, &self.cfg, success).await;
-        match exec.status {
-            "ok" => super::Outcome::ok(),
-            _ => super::Outcome::error(
-                exec.error_message
-                    .unwrap_or_else(|| "inject_parent failed".into()),
-            ),
-        }
+        execute(ctx.socket_path, &self.cfg, success).await
     }
 }
 
@@ -164,7 +146,7 @@ mod tests {
 
         let cfg = parse_config(r#"{"session_id":"parent-sid"}"#).unwrap();
         let out = execute(&path, &cfg, &fake_success()).await;
-        assert_eq!(out.status, "ok");
+        assert_eq!(out.status, super::super::RunStatus::Ok);
     }
 
     #[tokio::test]
@@ -183,7 +165,7 @@ mod tests {
 
         let cfg = parse_config(r#"{"session_id":"parent-sid"}"#).unwrap();
         let out = execute(&path, &cfg, &fake_success()).await;
-        assert_eq!(out.status, "error");
+        assert_eq!(out.status, super::super::RunStatus::Error);
         assert!(out.error_message.unwrap().contains("no_session"));
     }
 }
