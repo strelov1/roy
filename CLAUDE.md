@@ -109,7 +109,7 @@ A short pipeline. Triggers (CLI, MCP, WebSocket) talk to a single `Daemon`; `Dae
 
 5. **Control protocol** (`src/control.rs`) — wire-level enums (`ClientCommand`, `ServerEvent`, typed `ErrorCode`) shared by every trigger. Same JSON payload over either framing (Unix socket: `\n`-delimited; WebSocket: `Message::Text`).
 
-6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `mcp`. The `mcp` subcommand (`crates/roy-cli/src/mcp.rs`) is an MCP server (JSON-RPC 2.0 over stdio) that exposes six tools (`roy_list_sessions`, `roy_list_archived`, `roy_run`, `roy_run_detached`, `roy_read_session`, `roy_close`).
+6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `status`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `set-tags`, `wait`, `fire`, `mcp`, `projects`, `agents`. `status` is a non-side-effecting health probe (exit 0 if the daemon socket accepts a connection, 2 otherwise) — prefer it over `pgrep`-ing the binary in scripts and skills. The `mcp` subcommand (`crates/roy-cli/src/mcp.rs`) is an MCP server (JSON-RPC 2.0 over stdio) that exposes six tools (`roy_list_sessions`, `roy_list_archived`, `roy_run`, `roy_run_detached`, `roy_read_session`, `roy_close`).
 
 ### TurnEvent normalization
 

@@ -22,7 +22,8 @@ use sqlx::SqlitePool;
 #[derive(Parser)]
 #[command(
     name = "roy-scheduler",
-    about = "Cron + one-shot fire dispatcher for roy"
+    about = "Cron + one-shot fire dispatcher for roy",
+    version
 )]
 struct Cli {
     #[command(subcommand)]
@@ -33,6 +34,10 @@ struct Cli {
 enum Top {
     /// Run the driver loop (poll triggers + dispatch fires + subscribers).
     Serve(ServeArgs),
+    /// Health-probe the scheduler. Reads `<pid_file>`, checks the process is
+    /// alive, prints one JSON line and exits 0 if up, 2 otherwise. Use this
+    /// in scripts instead of `pgrep`-ing for the binary.
+    Status(StatusArgs),
     /// Apply the bundled SQLite migrations and exit.
     Migrate,
     /// Manage agents (add / list / show / rm).
@@ -57,6 +62,13 @@ enum Top {
     },
     /// Ad-hoc fire — bypasses scheduling and fires the named agent NOW.
     FireNow(FireNowArgs),
+}
+
+#[derive(clap::Args)]
+struct StatusArgs {
+    /// PidLock path to probe. Defaults to `~/.local/state/roy-scheduler/serve.pid`.
+    #[arg(long)]
+    pid_file: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -242,6 +254,7 @@ fn main() -> ExitCode {
 async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
         Top::Serve(args) => cmd_serve(args).await.map(|()| ExitCode::SUCCESS),
+        Top::Status(args) => Ok(cmd_status(args)),
         Top::Migrate => cmd_migrate().await.map(|()| ExitCode::SUCCESS),
         Top::Agents { cmd } => cmd_agents(cmd).await.map(|()| ExitCode::SUCCESS),
         Top::Triggers { cmd } => cmd_triggers(cmd).await.map(|()| ExitCode::SUCCESS),
@@ -339,6 +352,29 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     );
 
     driver::serve(opts).await
+}
+
+/// Print a one-line JSON health report and return the matching exit code.
+/// Unlike `roy status`, the scheduler is purely a worker — there is no
+/// socket to connect to — so we lean on the PidLock file: present + pid
+/// alive → `up`, anything else → `down`.
+fn cmd_status(args: StatusArgs) -> ExitCode {
+    let pid_path = args.pid_file.unwrap_or_else(default_pid_file);
+    let db_path = default_db_path();
+    let pid = roy::pid_lock::peek_pid(&pid_path);
+    let alive = pid.map(roy::pid_lock::pid_alive).unwrap_or(false);
+    let payload = serde_json::json!({
+        "status": if alive { "up" } else { "down" },
+        "pid_file": pid_path.display().to_string(),
+        "pid": pid,
+        "db": db_path.display().to_string(),
+    });
+    println!("{payload}");
+    if alive {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    }
 }
 
 async fn cmd_migrate() -> anyhow::Result<()> {
