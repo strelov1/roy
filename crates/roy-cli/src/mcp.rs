@@ -246,6 +246,11 @@ fn tools_list() -> Value {
                     "required": ["project_id"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "roy_list_agents",
+                "description": "List agents configured in ~/.config/roy/agents.toml with their available models. Use to discover what `agent` string and `model` id values are valid for roy_run.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
             }
         ]
     })
@@ -269,6 +274,7 @@ async fn tools_call(id: Value, req: &Value, socket_path: &Path) -> Value {
         "roy_list_projects" => tool_list_projects(socket_path).await,
         "roy_create_project" => tool_create_project(socket_path, args).await,
         "roy_delete_project" => tool_delete_project(socket_path, args).await,
+        "roy_list_agents" => tool_list_agents(socket_path).await,
         other => Err(anyhow!("unknown tool: {other}")),
     };
 
@@ -916,6 +922,24 @@ async fn tool_delete_project(socket_path: &Path, args: Value) -> anyhow::Result<
     }
 }
 
+async fn tool_list_agents(socket_path: &Path) -> anyhow::Result<String> {
+    let (mut lines, mut writer) = open_daemon(socket_path).await?;
+    send_cmd(&mut writer, &ClientCommand::ListAgents).await?;
+    match next_event(&mut lines).await? {
+        ServerEvent::AgentsList {
+            agents,
+            config_path,
+            status,
+        } => Ok(serde_json::to_string(&json!({
+            "agents": agents,
+            "config_path": config_path,
+            "status": status,
+        }))?),
+        ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
+        other => Err(anyhow!("unexpected response: {other:?}")),
+    }
+}
+
 async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> anyhow::Result<()> {
     let line = serde_json::to_string(v)?;
     w.write_all(line.as_bytes()).await?;
@@ -955,6 +979,7 @@ mod tests {
                 "roy_list_projects",
                 "roy_create_project",
                 "roy_delete_project",
+                "roy_list_agents",
             ]
         );
     }
