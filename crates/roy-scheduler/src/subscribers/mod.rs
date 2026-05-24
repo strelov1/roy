@@ -72,11 +72,6 @@ pub async fn dispatch(
                     None,
                 ),
             },
-            SubscriberKind::ChainAgent => (
-                "error",
-                Some("chain_agent: not_implemented in v1".into()),
-                None,
-            ),
         };
 
         write_run(pool, &fire.id, &sub, status, error, snippet).await?;

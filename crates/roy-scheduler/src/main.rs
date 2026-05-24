@@ -175,7 +175,7 @@ struct SubscriberAddArgs {
     /// Agent id to attach to (XOR with `--trigger`).
     #[arg(long)]
     agent: Option<String>,
-    /// inject_parent | webhook | notify_native | chain_agent
+    /// inject_parent | webhook | notify_native
     #[arg(long)]
     kind: String,
     /// JSON config blob (per-kind shape). Stored verbatim.
@@ -482,7 +482,7 @@ async fn cmd_subscribers(cmd: SubscribersCmd) -> anyhow::Result<()> {
         SubscribersCmd::Add(a) => {
             let kind = roy_scheduler::types::SubscriberKind::parse(&a.kind).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown subscriber kind: {:?} (expected inject_parent|webhook|notify_native|chain_agent)",
+                    "unknown subscriber kind: {:?} (expected inject_parent|webhook|notify_native)",
                     a.kind
                 )
             })?;
