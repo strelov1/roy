@@ -564,11 +564,11 @@ impl Daemon {
             tags,
         };
         match self.manager.spawn(cfg, 256, 1024).await {
-            Ok(engine) => {
+            Ok((engine, created)) => {
                 let _ = event_tx.send(ServerEvent::Spawned {
                     session: engine.id().to_string(),
                     project_id: engine.project_id().to_string(),
-                    project: None,
+                    project: created,
                     resume_cursor: engine.resume_cursor(),
                 });
             }
@@ -745,7 +745,7 @@ impl Daemon {
                     tags,
                 };
                 match self.manager.spawn(cfg, 256, 1024).await {
-                    Ok(e) => e,
+                    Ok((e, _created)) => e,
                     Err(e) => {
                         let _ = event_tx.send(ServerEvent::FireError {
                             session: None,

@@ -134,6 +134,21 @@ impl ProjectRegistry {
         Ok((id, Some(project)))
     }
 
+    /// Verify a project id is in the registry. If not (e.g. recovering from
+    /// a wiped or corrupt registry file), mint a new one for `cwd`. Returns
+    /// the canonical project id to use.
+    pub fn ensure_project(&self, project_id: &str, cwd: &Path) -> Result<String> {
+        {
+            let state = self.inner.lock().expect("registry poisoned");
+            if state.projects.iter().any(|p| p.id == project_id) {
+                return Ok(project_id.to_string());
+            }
+        }
+        // Lock dropped — resolve_or_create will take its own.
+        let (id, _) = self.resolve_or_create(cwd)?;
+        Ok(id)
+    }
+
     /// Rename a project. Returns the updated Project. Errors if id unknown.
     pub fn rename(&self, id: &str, new_name: &str) -> Result<Project> {
         let mut state = self.inner.lock().expect("registry poisoned");

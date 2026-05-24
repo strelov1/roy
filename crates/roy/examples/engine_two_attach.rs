@@ -20,12 +20,12 @@ async fn main() -> anyhow::Result<()> {
     let manager = SessionManager::new(journal_dir.clone(), Arc::new(DefaultTransportFactory))?;
     let cwd = std::env::current_dir()?;
 
-    let engine = manager
+    let (engine, _project) = manager
         .spawn(
             SessionSpawnConfig {
                 agent: "opencode".into(),
                 cwd,
-                project_id: "demo".into(),
+                project_id: String::new(),
                 model: None,
                 permission: None,
                 resume_cursor: None,

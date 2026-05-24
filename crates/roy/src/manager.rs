@@ -15,7 +15,7 @@ use crate::daemon::TransportFactory;
 use crate::engine::{EngineOpts, SessionEngine, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
 use crate::journal::{JournalEntry, Seq};
-use crate::project::ProjectRegistry;
+use crate::project::{Project, ProjectRegistry};
 use crate::session_meta::read_metadata;
 
 pub struct SessionManager {
@@ -38,12 +38,20 @@ impl SessionManager {
 
     /// Open a new session. The engine is spawned and registered before this
     /// returns; observers can `attach` immediately afterwards.
+    ///
+    /// Returns `(engine, Some(project))` when the spawn auto-created a new
+    /// project for `cfg.cwd`, otherwise `(engine, None)`.
     pub async fn spawn(
         &self,
-        cfg: SessionSpawnConfig,
+        mut cfg: SessionSpawnConfig,
         broadcast_capacity: usize,
         mem_capacity: usize,
-    ) -> Result<Arc<SessionEngine>> {
+    ) -> Result<(Arc<SessionEngine>, Option<Project>)> {
+        // Resolve (or create) the project for this cwd, then stamp the id into
+        // cfg before the engine writes its metadata.
+        let (project_id, created) = self.projects.resolve_or_create(&cfg.cwd)?;
+        cfg.project_id = project_id.clone();
+
         let transport =
             self.factory
                 .build(&cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
@@ -54,8 +62,9 @@ impl SessionManager {
         };
         let engine = SessionEngine::spawn(transport, opts, cfg).await?;
         let id = engine.id().to_string();
+        self.projects.register_session(&project_id, &id);
         self.sessions.write().await.insert(id, Arc::clone(&engine));
-        Ok(engine)
+        Ok((engine, created))
     }
 
     /// Resurrect a previously-closed (or restart-survived) session: read its
@@ -73,10 +82,11 @@ impl SessionManager {
             )));
         }
         let meta = read_metadata(&self.journal_dir, session_id).await?;
+        let project_id = self.projects.ensure_project(&meta.project_id, &meta.cwd)?;
         let cfg = SessionSpawnConfig {
             agent: meta.agent,
             cwd: meta.cwd,
-            project_id: meta.project_id,
+            project_id: project_id.clone(),
             model: meta.model,
             permission: meta.permission,
             resume_cursor: meta.resume_cursor,
@@ -92,6 +102,7 @@ impl SessionManager {
         };
         let engine = SessionEngine::resume(transport, opts, session_id.to_string(), cfg).await?;
         let id = engine.id().to_string();
+        self.projects.register_session(&project_id, &id);
         self.sessions.write().await.insert(id, Arc::clone(&engine));
         Ok(engine)
     }
@@ -241,6 +252,9 @@ impl SessionManager {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(RoyError::Io(e)),
         }
+        if let Some(pid) = self.projects.project_of(id) {
+            self.projects.unregister_session(&pid, id);
+        }
         tracing::info!(session = %id, "deleted archived session");
         Ok(())
     }
@@ -307,8 +321,8 @@ mod tests {
             resume_cursor: None,
             tags: std::collections::BTreeMap::default(),
         };
-        let e1 = mgr.spawn(cfg("a"), 256, 1024).await.unwrap();
-        let e2 = mgr.spawn(cfg("b"), 256, 1024).await.unwrap();
+        let (e1, _) = mgr.spawn(cfg("a"), 256, 1024).await.unwrap();
+        let (e2, _) = mgr.spawn(cfg("b"), 256, 1024).await.unwrap();
         let id1 = e1.id().to_string();
         let id2 = e2.id().to_string();
         mgr.close(&id1).await.unwrap();
@@ -353,7 +367,7 @@ mod tests {
             resume_cursor: None,
             tags: std::collections::BTreeMap::default(),
         };
-        let engine = mgr.spawn(cfg, 256, 1024).await.unwrap();
+        let (engine, _) = mgr.spawn(cfg, 256, 1024).await.unwrap();
         let id = engine.id().to_string();
         assert_eq!(mgr.list().await, vec![id.clone()]);
 
@@ -386,7 +400,7 @@ mod tests {
             resume_cursor: None,
             tags: std::collections::BTreeMap::default(),
         };
-        let engine = mgr.spawn(cfg, 256, 1024).await.unwrap();
+        let (engine, _) = mgr.spawn(cfg, 256, 1024).await.unwrap();
         let id = engine.id().to_string();
 
         let ids = mgr.list().await;
@@ -397,6 +411,49 @@ mod tests {
         assert!(mgr.list().await.is_empty());
         assert!(mgr.get(&id).await.is_none());
         assert!(mgr.close(&id).await.is_err(), "double close should error");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn spawn_auto_creates_project_for_new_cwd() {
+        let dir = tmp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let factory: Arc<dyn TransportFactory> = Arc::new(FakeFactory);
+        let mgr = SessionManager::new(dir.clone(), factory).expect("registry load");
+
+        let proj_dir = dir.join("a");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+
+        let cfg = SessionSpawnConfig {
+            agent: "fake".into(),
+            cwd: proj_dir.clone(),
+            project_id: String::new(),
+            model: None,
+            permission: None,
+            resume_cursor: None,
+            tags: Default::default(),
+        };
+        let (engine, created) = mgr.spawn(cfg, 16, 16).await.unwrap();
+        assert!(created.is_some(), "fresh cwd must auto-create project");
+        let pid = created.unwrap().id;
+        assert_eq!(mgr.projects().sessions_in(&pid), vec![engine.id().to_string()]);
+
+        // Second spawn into same cwd reuses the same project.
+        let cfg2 = SessionSpawnConfig {
+            agent: "fake".into(),
+            cwd: proj_dir.clone(),
+            project_id: String::new(),
+            model: None,
+            permission: None,
+            resume_cursor: None,
+            tags: Default::default(),
+        };
+        let (_engine2, created2) = mgr.spawn(cfg2, 16, 16).await.unwrap();
+        assert!(created2.is_none(), "existing project must not be re-created");
+        let mut sids = mgr.projects().sessions_in(&pid);
+        sids.sort();
+        assert_eq!(sids.len(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
