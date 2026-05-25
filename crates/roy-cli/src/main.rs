@@ -77,10 +77,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ProjectsCmd,
     },
-    /// Inspect configured agents at `~/.config/roy/agents.toml`.
-    Agents {
+    /// Inspect configured engines at `~/.config/roy/agents.toml`.
+    Engines {
         #[command(subcommand)]
-        cmd: AgentsCmd,
+        cmd: EnginesCmd,
     },
 }
 
@@ -208,17 +208,17 @@ struct McpArgs {
 }
 
 #[derive(Subcommand)]
-enum AgentsCmd {
-    /// List configured agents (and optionally their models).
-    List(AgentsListArgs),
+enum EnginesCmd {
+    /// List configured engines (and optionally their models).
+    List(EnginesListArgs),
 }
 
 #[derive(clap::Args)]
-struct AgentsListArgs {
-    /// One row per (agent, model) instead of summary per agent.
+struct EnginesListArgs {
+    /// One row per (engine, model) instead of summary per engine.
     #[arg(long)]
     models: bool,
-    /// Machine-readable JSON output — the full AgentsList event.
+    /// Machine-readable JSON output — the full EnginesList event.
     #[arg(long)]
     json: bool,
 }
@@ -284,7 +284,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Scheduler(args) => roy_scheduler::cli::run(args).await,
         Cmd::Management(args) => roy_management::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
-        Cmd::Agents { cmd } => cmd_agents(cmd).await,
+        Cmd::Engines { cmd } => cmd_engines(cmd).await,
     }
 }
 
@@ -848,13 +848,13 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
     }
 }
 
-async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<ExitCode> {
+async fn cmd_engines(cmd: EnginesCmd) -> anyhow::Result<ExitCode> {
     match cmd {
-        AgentsCmd::List(args) => cmd_agents_list(args).await,
+        EnginesCmd::List(args) => cmd_engines_list(args).await,
     }
 }
 
-async fn cmd_agents_list(args: AgentsListArgs) -> anyhow::Result<ExitCode> {
+async fn cmd_engines_list(args: EnginesListArgs) -> anyhow::Result<ExitCode> {
     let (mut writer, mut events) = open_daemon().await?;
 
     send_cmd(&mut writer, &ClientCommand::ListAgents).await?;
@@ -887,7 +887,7 @@ async fn cmd_agents_list(args: AgentsListArgs) -> anyhow::Result<ExitCode> {
             return Ok(ExitCode::from(1));
         }
         AgentsConfigStatus::Ok if agents.is_empty() => {
-            eprintln!("no agents configured in {}", config_path.display());
+            eprintln!("no engines configured in {}", config_path.display());
         }
         AgentsConfigStatus::Ok => {}
     }
