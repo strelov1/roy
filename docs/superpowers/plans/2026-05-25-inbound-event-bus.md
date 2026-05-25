@@ -88,10 +88,8 @@ sqlx = { version = "0.8", default-features = false, features = [
   "migrate",
 ] }
 
-# HTTP server
-axum = { version = "0.7", features = ["macros"] }
-tower = "0.5"
-hyper = "1"
+# HTTP server (workspace pins axum 0.8 in roy-management)
+axum = { version = "0.8", features = ["macros"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
