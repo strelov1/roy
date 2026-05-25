@@ -118,7 +118,11 @@ impl ManagementClient {
     }
 
     pub async fn list(&self) -> Result<Vec<Agent>> {
-        let r = self.http.get(format!("{}/agents", self.base)).send().await?;
+        let r = self
+            .http
+            .get(format!("{}/agents", self.base))
+            .send()
+            .await?;
         self.check(r, None).await
     }
 

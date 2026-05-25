@@ -312,7 +312,9 @@ mod tests {
             w.flush().await.unwrap();
         });
 
-        let pool = roy_agents::open(&dir.path().join("agents.db")).await.unwrap();
+        let pool = roy_agents::open(&dir.path().join("agents.db"))
+            .await
+            .unwrap();
         let state = AppState {
             store: roy_agents::Store::new(pool),
             socket_path: socket,
@@ -343,8 +345,14 @@ mod tests {
         let cmd = rx.await.unwrap();
         assert_eq!(cmd["op"], "spawn");
         let sp = cmd["system_prompt"].as_str().unwrap();
-        assert!(sp.contains("Agent Builder"), "must include builder seed prompt; got: {sp}");
-        assert!(sp.contains(&agent_id), "must mention target agent id; got: {sp}");
+        assert!(
+            sp.contains("Agent Builder"),
+            "must include builder seed prompt; got: {sp}"
+        );
+        assert!(
+            sp.contains(&agent_id),
+            "must mention target agent id; got: {sp}"
+        );
         daemon.await.unwrap();
     }
 
@@ -374,7 +382,9 @@ mod tests {
             w.flush().await.unwrap();
         });
 
-        let pool = roy_agents::open(&dir.path().join("agents.db")).await.unwrap();
+        let pool = roy_agents::open(&dir.path().join("agents.db"))
+            .await
+            .unwrap();
         let state = AppState {
             store: roy_agents::Store::new(pool),
             socket_path: socket,
@@ -414,12 +424,20 @@ mod tests {
 
         // No stub was created — only the builder seed + the pre-inserted agent.
         let all = state.store.list().await.unwrap();
-        assert_eq!(all.len(), 2, "expected builder seed + pre-existing; got {}", all.len());
+        assert_eq!(
+            all.len(),
+            2,
+            "expected builder seed + pre-existing; got {}",
+            all.len()
+        );
 
         // Captured Spawn mentions the existing id in system_prompt.
         let cmd = rx.await.unwrap();
         let sp = cmd["system_prompt"].as_str().unwrap();
-        assert!(sp.contains(&existing.id), "system_prompt must mention existing id; got: {sp}");
+        assert!(
+            sp.contains(&existing.id),
+            "system_prompt must mention existing id; got: {sp}"
+        );
         daemon.await.unwrap();
     }
 }
