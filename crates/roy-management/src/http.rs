@@ -123,7 +123,7 @@ struct BuilderReq {
 #[derive(serde::Serialize)]
 struct BuilderResp {
     agent_id: String,
-    session_id: String,
+    session: String,
 }
 
 async fn start_builder(
@@ -180,7 +180,7 @@ async fn start_builder(
         StatusCode::CREATED,
         Json(BuilderResp {
             agent_id: target.id,
-            session_id: session,
+            session,
         }),
     ))
 }
@@ -334,7 +334,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let agent_id = json["agent_id"].as_str().unwrap().to_string();
         assert!(!agent_id.is_empty(), "agent_id must be non-empty");
-        assert_eq!(json["session_id"], "sess-99");
+        assert_eq!(json["session"], "sess-99");
 
         // Stub exists.
         let stub = state.store.get(&agent_id).await.unwrap();
@@ -420,7 +420,7 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["agent_id"], existing.id);
-        assert_eq!(json["session_id"], "sess-edit");
+        assert_eq!(json["session"], "sess-edit");
 
         // No stub was created — only the builder seed + the pre-inserted agent.
         let all = state.store.list().await.unwrap();
