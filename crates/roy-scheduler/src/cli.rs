@@ -27,8 +27,7 @@ use crate::{db, store};
 #[derive(Parser)]
 #[command(
     name = "roy-scheduler",
-    about = "Cron + one-shot fire dispatcher for roy",
-    version
+    about = "Cron + one-shot fire dispatcher for roy"
 )]
 pub struct Cli {
     #[command(subcommand)]
