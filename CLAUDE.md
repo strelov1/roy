@@ -112,7 +112,15 @@ A short pipeline. Triggers (CLI, MCP) talk to a single `Daemon`; `Daemon` owns a
 
 5. **Control protocol** (`src/control.rs`) — wire-level enums (`ClientCommand`, `ServerEvent`, typed `ErrorCode`) shared by every trigger. The JSON payload is identical regardless of transport; the daemon itself uses only `\n`-delimited Unix framing. The `Message::Text` framing for WebSocket clients is provided by `roy-gateway`'s WS relay.
 
-6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `status`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `set-tags`, `wait`, `fire`, `mcp`, `projects`, `agents`. `status` is a non-side-effecting health probe (exit 0 if the daemon socket accepts a connection, 2 otherwise) — prefer it over `pgrep`-ing the binary in scripts and skills. The `mcp` subcommand delegates to `roy-mcp` (`crates/roy-mcp/src/lib.rs`), an MCP server (JSON-RPC 2.0 over stdio) that exposes daemon control operations as MCP tools.
+6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `status`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `set-tags`, `wait`, `fire`, `mcp`, `projects`, `agents`, `gateway`, `scheduler`, `management`. `status` is a non-side-effecting health probe (exit 0 if the daemon socket accepts a connection, 2 otherwise) — prefer it over `pgrep`-ing the binary in scripts and skills. The `mcp` subcommand delegates to `roy-mcp` (`crates/roy-mcp/src/lib.rs`), an MCP server (JSON-RPC 2.0 over stdio) that exposes daemon control operations as MCP tools.
+
+   - `roy engines` — lists the daemon's preset+model catalog from `agents.toml` (the preset binaries like `claude-code-acp`, `gemini`, etc.).
+   - `roy agents` — full CRUD over user-defined personas in `roy-management` (`list`/`get`/`create`/`update`/`delete`/`run`); each agent binds a persona prompt to a preset+model pair and spawns a session on demand.
+   - `roy gateway` — Telegram chat-platform and WebSocket relay bridge to the daemon (dispatches to `roy-gateway` crate).
+   - `roy scheduler` — cron + one-shot fire dispatcher (dispatches to `roy-scheduler` crate).
+   - `roy management` — axum HTTP service for agent CRUD and session launch (dispatches to `roy-management` crate).
+
+   The `POST /agents/_builder` endpoint (proxied from roy-web) spawns a builder session backed by a seeded system agent that gathers requirements via conversation and edits the target via `roy agents update`.
 
 ### TurnEvent normalization
 
