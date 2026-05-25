@@ -42,6 +42,7 @@ impl From<StoreError> for ApiError {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/agents", get(list_agents).post(create_agent))
+        .route("/agents/_builder", post(start_builder))
         .route(
             "/agents/{id}",
             get(get_agent).put(update_agent).delete(delete_agent),
@@ -111,6 +112,77 @@ async fn run_agent(
     .await
     .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(json!({ "session": session, "agent_id": agent.id })))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct BuilderReq {
+    #[serde(default)]
+    existing_id: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct BuilderResp {
+    agent_id: String,
+    session_id: String,
+}
+
+async fn start_builder(
+    State(s): State<AppState>,
+    body: Option<Json<BuilderReq>>,
+) -> Result<(StatusCode, Json<BuilderResp>), ApiError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+
+    // 1. Target agent: either existing or a fresh stub.
+    let target = if let Some(id) = req.existing_id {
+        s.store.get(&id).await?
+    } else {
+        s.store
+            .create(NewAgent {
+                name: "Untitled".into(),
+                description: None,
+                preset: "claude".into(),
+                model: None,
+                prompt: String::new(),
+                task: None,
+                persistent: false,
+            })
+            .await?
+    };
+
+    // 2. Builder seed.
+    let builder = s.store.get_by_slug("builder").await.map_err(|e| match e {
+        StoreError::NotFound(_) => ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "builder seed missing — migration did not run".into(),
+        ),
+        other => other.into(),
+    })?;
+
+    // 3. Compose the per-session system prompt.
+    let system_prompt = format!(
+        "{base}\n\n## Current task\nYou are editing agent id={id}. \
+         Use only `roy agents update {id} ...` to apply changes. Never call create or delete.",
+        base = builder.prompt,
+        id = target.id,
+    );
+
+    // 4. Spawn.
+    let session = roy_client::spawn(
+        &s.socket_path,
+        &builder.preset,
+        builder.model.clone(),
+        Some(system_prompt),
+    )
+    .await
+    .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(BuilderResp {
+            agent_id: target.id,
+            session_id: session,
+        }),
+    ))
 }
 
 /// Preset must be one the daemon spawns. Kept as a const list rather than
@@ -212,5 +284,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn _builder_endpoint_creates_stub_and_returns_session() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("roy.sock");
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        let socket_for_task = socket.clone();
+        let daemon = tokio::spawn(async move {
+            let l = UnixListener::bind(&socket_for_task).unwrap();
+            let (s, _) = l.accept().await.unwrap();
+            let (r, mut w) = s.into_split();
+            let mut lines = BufReader::new(r).lines();
+            let raw = lines.next_line().await.unwrap().unwrap();
+            let _ = tx.send(serde_json::from_str(&raw).unwrap());
+            w.write_all(b"{\"kind\":\"spawning\",\"agent\":\"claude\"}\n")
+                .await
+                .unwrap();
+            w.write_all(b"{\"kind\":\"spawned\",\"session\":\"sess-99\"}\n")
+                .await
+                .unwrap();
+            w.flush().await.unwrap();
+        });
+
+        let pool = roy_agents::open(&dir.path().join("agents.db")).await.unwrap();
+        let state = AppState {
+            store: roy_agents::Store::new(pool),
+            socket_path: socket,
+        };
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::post("/agents/_builder")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let agent_id = json["agent_id"].as_str().unwrap().to_string();
+        assert!(!agent_id.is_empty(), "agent_id must be non-empty");
+        assert_eq!(json["session_id"], "sess-99");
+
+        // Stub exists.
+        let stub = state.store.get(&agent_id).await.unwrap();
+        assert_eq!(stub.name, "Untitled");
+
+        // The Spawn captured by the fake daemon must carry the builder prompt
+        // and mention the target agent id in system_prompt.
+        let cmd = rx.await.unwrap();
+        assert_eq!(cmd["op"], "spawn");
+        let sp = cmd["system_prompt"].as_str().unwrap();
+        assert!(sp.contains("Agent Builder"), "must include builder seed prompt; got: {sp}");
+        assert!(sp.contains(&agent_id), "must mention target agent id; got: {sp}");
+        daemon.await.unwrap();
     }
 }
