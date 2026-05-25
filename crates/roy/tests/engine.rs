@@ -12,6 +12,17 @@ fn fake_acp_transport() -> Arc<dyn Transport> {
 }
 
 fn fake_acp_transport_with(extra_args: &[&str]) -> Arc<dyn Transport> {
+    fake_acp_transport_with_channel(extra_args, roy::transport::SystemPromptChannel::Meta)
+}
+
+fn fake_acp_transport_first_turn() -> Arc<dyn Transport> {
+    fake_acp_transport_with_channel(&[], roy::transport::SystemPromptChannel::FirstTurn)
+}
+
+fn fake_acp_transport_with_channel(
+    extra_args: &[&str],
+    channel: roy::transport::SystemPromptChannel,
+) -> Arc<dyn Transport> {
     let mut args = vec!["tests/scripts/fake-acp-agent.py".to_string()];
     args.extend(extra_args.iter().map(|s| s.to_string()));
     Arc::new(AcpTransport::new(AcpConfig {
@@ -21,19 +32,7 @@ fn fake_acp_transport_with(extra_args: &[&str]) -> Arc<dyn Transport> {
         permission_policy: PermissionPolicy::AllowAll,
         open_timeout: Duration::from_secs(5),
         env_remove: Vec::new(),
-        system_prompt_channel: roy::transport::SystemPromptChannel::Meta,
-    }))
-}
-
-fn fake_acp_transport_first_turn() -> Arc<dyn Transport> {
-    Arc::new(AcpTransport::new(AcpConfig {
-        command: "python3".to_string(),
-        args: vec!["tests/scripts/fake-acp-agent.py".to_string()],
-        mode_id: Some("yolo".to_string()),
-        permission_policy: PermissionPolicy::AllowAll,
-        open_timeout: Duration::from_secs(5),
-        env_remove: Vec::new(),
-        system_prompt_channel: roy::transport::SystemPromptChannel::FirstTurn,
+        system_prompt_channel: channel,
     }))
 }
 
