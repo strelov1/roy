@@ -6,10 +6,6 @@ edition = "2021"
 [lib]
 path = "src/lib.rs"
 
-[[bin]]
-name = "roy-management"
-path = "src/main.rs"
-
 [dependencies]
 roy = { path = "../roy" }
 roy-agents = { path = "../roy-agents" }

@@ -3,11 +3,6 @@ name = "roy-gateway"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "roy-gateway"
-path = "src/main.rs"
-doc = false
-
 [dependencies]
 roy = { path = "../roy" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "sync", "time", "fs", "signal"] }
