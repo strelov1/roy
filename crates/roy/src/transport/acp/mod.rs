@@ -449,6 +449,7 @@ async fn run_turn(
     let emit_agent_error = |e: &dyn std::fmt::Display| {
         let _ = event_tx.send(TurnEvent::System {
             subtype: format!("agent_error: {}", e),
+            text: None,
         });
     };
     let stop_reason = tokio::select! {

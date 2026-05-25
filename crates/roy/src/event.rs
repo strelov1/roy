@@ -60,7 +60,13 @@ impl StopReason {
 /// WebSocket). See `docs/wire-protocol.md`.
 pub fn event_to_json(event: &TurnEvent) -> Value {
     match event {
-        TurnEvent::System { subtype } => json!({"type": "system", "subtype": subtype}),
+        TurnEvent::System { subtype, text } => {
+            let mut obj = json!({"type": "system", "subtype": subtype});
+            if let Some(t) = text {
+                obj["text"] = json!(t);
+            }
+            obj
+        }
         TurnEvent::UserPrompt { text } => json!({"type": "user_prompt", "text": text}),
         TurnEvent::AssistantText { text } => json!({"type": "assistant_text", "text": text}),
         TurnEvent::AssistantThought { text } => {
@@ -113,6 +119,7 @@ pub fn event_from_json(v: &Value) -> Result<TurnEvent> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
+            text: v.get("text").and_then(Value::as_str).map(|s| s.to_string()),
         }),
         "user_prompt" => Ok(TurnEvent::UserPrompt {
             text: v
@@ -195,6 +202,11 @@ impl<'de> Deserialize<'de> for TurnEvent {
 pub enum TurnEvent {
     System {
         subtype: String,
+        /// Optional human-visible body. `None` for marker-only system events
+        /// (e.g. `model_changed:<m>`); `Some(text)` when the journal needs to
+        /// stay self-contained — notably for FirstTurn-preset persona turns,
+        /// where the agent reacts to this text but doesn't echo it back.
+        text: Option<String>,
     },
     /// What the user typed on the trigger side. Journaled by the engine before
     /// the prompt is handed to the transport, so a refresh / late attach can

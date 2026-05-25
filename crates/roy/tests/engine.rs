@@ -402,8 +402,12 @@ async fn first_turn_persona_is_journaled_as_system() {
         .unwrap();
     let entries = engine.snapshot(0).await.unwrap();
     assert!(
-        matches!(entries.first().map(|e| &e.event), Some(TurnEvent::System { subtype }) if subtype == "persona"),
-        "first journal entry should be the persona System marker, got: {entries:?}"
+        matches!(
+            entries.first().map(|e| &e.event),
+            Some(TurnEvent::System { subtype, text })
+                if subtype == "persona" && text.as_deref() == Some("PERSONA")
+        ),
+        "first journal entry should be the persona System marker carrying the persona body, got: {entries:?}"
     );
     // And it must NOT be journaled as a UserPrompt.
     assert!(
