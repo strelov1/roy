@@ -347,4 +347,79 @@ mod tests {
         assert!(sp.contains(&agent_id), "must mention target agent id; got: {sp}");
         daemon.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn _builder_endpoint_with_existing_id_reuses_agent() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("roy.sock");
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        let socket_for_task = socket.clone();
+        let daemon = tokio::spawn(async move {
+            let l = UnixListener::bind(&socket_for_task).unwrap();
+            let (s, _) = l.accept().await.unwrap();
+            let (r, mut w) = s.into_split();
+            let mut lines = BufReader::new(r).lines();
+            let raw = lines.next_line().await.unwrap().unwrap();
+            let _ = tx.send(serde_json::from_str(&raw).unwrap());
+            w.write_all(b"{\"kind\":\"spawning\",\"agent\":\"claude\"}\n")
+                .await
+                .unwrap();
+            w.write_all(b"{\"kind\":\"spawned\",\"session\":\"sess-edit\"}\n")
+                .await
+                .unwrap();
+            w.flush().await.unwrap();
+        });
+
+        let pool = roy_agents::open(&dir.path().join("agents.db")).await.unwrap();
+        let state = AppState {
+            store: roy_agents::Store::new(pool),
+            socket_path: socket,
+        };
+
+        // Pre-insert an existing agent.
+        let existing = state
+            .store
+            .create(roy_agents::NewAgent {
+                name: "Pre-existing".into(),
+                description: None,
+                preset: "claude".into(),
+                model: None,
+                prompt: "already here".into(),
+                task: None,
+                persistent: false,
+            })
+            .await
+            .unwrap();
+
+        let body = serde_json::json!({ "existing_id": existing.id }).to_string();
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::post("/agents/_builder")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["agent_id"], existing.id);
+        assert_eq!(json["session_id"], "sess-edit");
+
+        // No stub was created — only the builder seed + the pre-inserted agent.
+        let all = state.store.list().await.unwrap();
+        assert_eq!(all.len(), 2, "expected builder seed + pre-existing; got {}", all.len());
+
+        // Captured Spawn mentions the existing id in system_prompt.
+        let cmd = rx.await.unwrap();
+        let sp = cmd["system_prompt"].as_str().unwrap();
+        assert!(sp.contains(&existing.id), "system_prompt must mention existing id; got: {sp}");
+        daemon.await.unwrap();
+    }
 }
