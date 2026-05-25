@@ -25,6 +25,18 @@ fn fake_acp_transport_with(extra_args: &[&str]) -> Arc<dyn Transport> {
     }))
 }
 
+fn fake_acp_transport_first_turn() -> Arc<dyn Transport> {
+    Arc::new(AcpTransport::new(AcpConfig {
+        command: "python3".to_string(),
+        args: vec!["tests/scripts/fake-acp-agent.py".to_string()],
+        mode_id: Some("yolo".to_string()),
+        permission_policy: PermissionPolicy::AllowAll,
+        open_timeout: Duration::from_secs(5),
+        env_remove: Vec::new(),
+        system_prompt_channel: roy::transport::SystemPromptChannel::FirstTurn,
+    }))
+}
+
 fn test_cfg() -> SessionSpawnConfig {
     SessionSpawnConfig {
         agent: roy::AgentPreset::Opencode,
@@ -262,6 +274,40 @@ async fn wait_for_result_concatenates_many_chunks_then_result() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn first_turn_persona_is_journaled_as_system() {
+    let journal_dir = tmp_journal_dir();
+    let mut cfg = test_cfg();
+    cfg.system_prompt = Some("PERSONA".to_string());
+    let engine = SessionEngine::spawn(
+        fake_acp_transport_first_turn(),
+        opts(journal_dir.clone()),
+        cfg,
+    )
+    .await
+    .unwrap();
+    // The engine injects the persona as the first turn automatically. Wait for
+    // that turn to reach a terminal Result so the journal is populated.
+    let _ = engine
+        .wait_for_result(0, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let entries = engine.snapshot(0).await.unwrap();
+    assert!(
+        matches!(entries.first().map(|e| &e.event), Some(TurnEvent::System { subtype }) if subtype == "persona"),
+        "first journal entry should be the persona System marker, got: {entries:?}"
+    );
+    // And it must NOT be journaled as a UserPrompt.
+    assert!(
+        !entries
+            .iter()
+            .any(|e| matches!(&e.event, TurnEvent::UserPrompt { text } if text == "PERSONA")),
+        "persona must not appear as a UserPrompt"
+    );
+    engine.close().unwrap();
+    let _ = std::fs::remove_dir_all(&journal_dir);
 }
 
 async fn collect_all(

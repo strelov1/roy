@@ -95,6 +95,9 @@ pub struct SessionEngine {
 
 enum Cmd {
     Prompt(String),
+    /// Persona/system prompt injected as the first turn (FirstTurn presets).
+    /// Journaled as `System { subtype: "persona" }` rather than `UserPrompt`.
+    Persona(String),
     /// Abort the in-flight turn. No-op if no turn is running. The actor reacts
     /// by dropping the current `TurnStream`, which makes the transport send
     /// `session/cancel` to the agent; the synthesised terminal `Result` lands
@@ -192,6 +195,14 @@ impl SessionEngine {
         )
         .await?;
 
+        // FirstTurn presets: the transport deferred the persona. Drain it now
+        // (while we still own the handle) and enqueue it as the first command,
+        // so it is injected as the first turn before any user prompt.
+        let mut handle = handle;
+        if let Some(persona) = handle.take_pending_persona() {
+            // Unbounded channel; this send precedes any external prompt.
+            let _ = engine.input_tx.send(Cmd::Persona(persona));
+        }
         let engine_for_actor = Arc::clone(&engine);
         tokio::spawn(run_actor(engine_for_actor, handle, input_rx));
 
@@ -447,33 +458,10 @@ async fn run_actor(
     while let Some(cmd) = input_rx.recv().await {
         match cmd {
             Cmd::Prompt(text) => {
-                engine.touch_activity();
-                // Journal the user's prompt before driving the turn. Agents
-                // don't echo user input over ACP, so without this step a
-                // refresh / late attach can never reconstruct the user side
-                // of the conversation.
-                if let Err(e) = publish(&engine, TurnEvent::UserPrompt { text: text.clone() }).await
-                {
-                    tracing::error!(
-                        session = %engine.session_id,
-                        error = %e,
-                        "failed to journal user prompt; turn still dispatched",
-                    );
-                }
-                drive_turn(&engine, handle.as_mut(), &text, &mut input_rx).await;
-                if let Some(cursor) = handle.resume_cursor() {
-                    *engine.resume_cursor.lock().unwrap() = Some(cursor);
-                    // Non-fatal: session keeps running, but a stale cursor
-                    // on disk means a future Resume reconnects to the wrong
-                    // agent-side session. Surface it.
-                    if let Err(e) = engine.persist_metadata().await {
-                        tracing::warn!(
-                            session = %engine.session_id,
-                            error = %e,
-                            "failed to persist session metadata after turn",
-                        );
-                    }
-                }
+                run_input_turn(&engine, handle.as_mut(), &text, &mut input_rx, false).await;
+            }
+            Cmd::Persona(text) => {
+                run_input_turn(&engine, handle.as_mut(), &text, &mut input_rx, true).await;
             }
             // Cancel outside an active turn is a no-op; the turn-driving loop
             // is the only place a cancel actually means something.
@@ -487,6 +475,53 @@ async fn run_actor(
             error = %e,
             "transport close failed; child process may be left in unknown state",
         );
+    }
+}
+
+/// Drive one input turn. `as_system` controls the journaled prelude: a persona
+/// turn is recorded as `System { subtype: "persona" }`, a normal turn as
+/// `UserPrompt`. Shared by `Cmd::Prompt` and `Cmd::Persona`.
+async fn run_input_turn(
+    engine: &Arc<SessionEngine>,
+    handle: &mut dyn Handle,
+    text: &str,
+    input_rx: &mut mpsc::UnboundedReceiver<Cmd>,
+    as_system: bool,
+) {
+    engine.touch_activity();
+    let prelude = if as_system {
+        TurnEvent::System {
+            subtype: "persona".to_string(),
+        }
+    } else {
+        // Journal the user's prompt before driving the turn. Agents
+        // don't echo user input over ACP, so without this step a
+        // refresh / late attach can never reconstruct the user side
+        // of the conversation.
+        TurnEvent::UserPrompt {
+            text: text.to_string(),
+        }
+    };
+    if let Err(e) = publish(engine, prelude).await {
+        tracing::error!(
+            session = %engine.session_id,
+            error = %e,
+            "failed to journal turn prelude; turn still dispatched",
+        );
+    }
+    drive_turn(engine, handle, text, input_rx).await;
+    if let Some(cursor) = handle.resume_cursor() {
+        *engine.resume_cursor.lock().unwrap() = Some(cursor);
+        // Non-fatal: session keeps running, but a stale cursor
+        // on disk means a future Resume reconnects to the wrong
+        // agent-side session. Surface it.
+        if let Err(e) = engine.persist_metadata().await {
+            tracing::warn!(
+                session = %engine.session_id,
+                error = %e,
+                "failed to persist session metadata after turn",
+            );
+        }
     }
 }
 
@@ -539,6 +574,12 @@ async fn drive_turn(
                     tracing::warn!(
                         session = %engine.session_id,
                         "ignoring Cmd::Prompt during active turn",
+                    );
+                }
+                Some(Cmd::Persona(_)) => {
+                    tracing::warn!(
+                        session = %engine.session_id,
+                        "ignoring Cmd::Persona during active turn",
                     );
                 }
                 Some(Cmd::Close) | None => return,
