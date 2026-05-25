@@ -137,7 +137,7 @@ where
     };
 
     let outbound = async {
-        let result = loop {
+        loop {
             match daemon_lines.next_line().await {
                 Ok(Some(line)) => {
                     if ws_sink.send(Message::Text(line.into())).await.is_err() {
@@ -147,15 +147,17 @@ where
                 Ok(None) => break Ok(()),
                 Err(e) => break Err(anyhow::Error::new(e).context("daemon read")),
             }
-        };
-        let _ = ws_sink.close().await;
-        result
+        }
     };
 
     let result = tokio::select! {
         r = inbound => r,
         r = outbound => r,
     };
+    // Echo a Close frame regardless of which side ended first (RFC 6455 §5.5.1):
+    // on client-initiated close `inbound` wins and drops `outbound`, so this is
+    // the only place the close handshake gets completed back to the client.
+    let _ = ws_sink.close().await;
     result
 }
 
