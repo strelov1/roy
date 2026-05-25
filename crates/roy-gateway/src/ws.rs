@@ -146,6 +146,38 @@ where
     Ok(())
 }
 
+/// Bind `addr` and accept authenticated WS connections forever, relaying each
+/// to the daemon at `socket_path`. One spawned task per connection.
+pub async fn run_ws_relay(
+    addr: SocketAddr,
+    token: Arc<String>,
+    socket_path: Arc<Path>,
+) -> Result<()> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding ws listener on {addr}"))?;
+    tracing::info!(%addr, "websocket relay listener up");
+    loop {
+        let (stream, peer) = listener.accept().await.context("ws accept")?;
+        let token = Arc::clone(&token);
+        let socket_path = Arc::clone(&socket_path);
+        tokio::spawn(async move {
+            let callback = ws_auth_callback(token);
+            let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+                Ok(ws) => ws,
+                Err(e) => {
+                    tracing::warn!(%peer, error = %e, "ws handshake rejected");
+                    return;
+                }
+            };
+            tracing::debug!(%peer, "ws connection accepted");
+            if let Err(e) = relay_connection(ws, &socket_path).await {
+                tracing::warn!(%peer, error = %e, "ws relay ended with error");
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +283,48 @@ mod tests {
         let eof = fake_daemon.await.unwrap();
         assert!(eof.is_none(), "daemon must observe EOF after WS closes");
         let _ = relay.await;
+    }
+
+    #[tokio::test]
+    async fn handshake_rejects_missing_or_wrong_token() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let token = Arc::new("the-real-token".to_string());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let token_for_server = Arc::clone(&token);
+        let server = tokio::spawn(async move {
+            let mut results = Vec::new();
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let cb = ws_auth_callback(Arc::clone(&token_for_server));
+                results.push(tokio_tungstenite::accept_hdr_async(stream, cb).await.is_ok());
+            }
+            results
+        });
+
+        // 1. No token → reject.
+        let url = format!("ws://{addr}");
+        assert!(tokio_tungstenite::connect_async(&url).await.is_err());
+
+        // 2. Wrong token → reject.
+        let mut req = url.as_str().into_client_request().unwrap();
+        req.headers_mut().insert(
+            WS_TOKEN_HEADER,
+            http::HeaderValue::from_static("nope"),
+        );
+        assert!(tokio_tungstenite::connect_async(req).await.is_err());
+
+        // 3. Correct token → accept.
+        let mut req = url.as_str().into_client_request().unwrap();
+        req.headers_mut().insert(
+            WS_TOKEN_HEADER,
+            http::HeaderValue::from_static("the-real-token"),
+        );
+        let ok = tokio_tungstenite::connect_async(req).await;
+        assert!(ok.is_ok(), "correct token must be accepted");
+
+        let results = server.await.unwrap();
+        assert_eq!(results, vec![false, false, true]);
     }
 }
