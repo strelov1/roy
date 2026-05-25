@@ -509,6 +509,13 @@ impl Daemon {
                 self.handle_fire(target, prompt, tags, timeout_ms, event_tx)
                     .await
             }
+            ClientCommand::Inject { .. } => {
+                let _ = event_tx.send(ServerEvent::Error {
+                    session: None,
+                    code: crate::control::ErrorCode::BadRequest,
+                    message: "Inject not yet implemented".into(),
+                });
+            }
             ClientCommand::ListProjects => self.handle_list_projects(event_tx).await,
             ClientCommand::CreateProject { name } => {
                 self.handle_create_project(name, event_tx).await

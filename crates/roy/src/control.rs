@@ -247,6 +247,23 @@ pub enum ClientCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
     },
+    /// Drop a message into a live session out-of-band. `respond = false`
+    /// (default) appends a `Note` event to the journal/broadcast without
+    /// taking the input lease — works even while an interactive client holds
+    /// it. `respond = true` delivers `text` as a real user turn the agent
+    /// answers (waits for any in-flight turn first), replying with the same
+    /// `Fire*` events as `Fire`. `source_session` links a `Note` back to the
+    /// session that produced the message (note mode only).
+    Inject {
+        session: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_session: Option<String>,
+        #[serde(default)]
+        respond: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
     /// Return all projects in the registry.
     ListProjects,
     /// Create a project with the given name inside the workspace. The name
@@ -323,6 +340,8 @@ pub enum ServerEvent {
     InputAcquired { session: String, acquired: bool },
     /// Response to `ReleaseInput`.
     InputReleased { session: String },
+    /// Response to `Inject { respond: false }`: the seq of the appended `Note`.
+    Injected { session: String, seq: Seq },
     /// Response to `Detach`.
     Detached { session: String },
     /// Per-connection ack to `SetModel`. Other attached clients learn
@@ -671,6 +690,45 @@ mod tests {
         let s = serde_json::to_string(&cmd).unwrap();
         let back: ClientCommand = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, ClientCommand::ListAgents));
+    }
+
+    #[test]
+    fn inject_command_roundtrips() {
+        roundtrip(&ClientCommand::Inject {
+            session: "sid".into(),
+            text: "result text".into(),
+            source_session: Some("child".into()),
+            respond: false,
+            timeout_ms: None,
+        });
+        roundtrip(&ClientCommand::Inject {
+            session: "sid".into(),
+            text: "do this".into(),
+            source_session: None,
+            respond: true,
+            timeout_ms: Some(60_000),
+        });
+    }
+
+    #[test]
+    fn inject_defaults_respond_false_when_absent() {
+        let cmd: ClientCommand =
+            serde_json::from_str(r#"{"op":"inject","session":"s","text":"t"}"#).unwrap();
+        match cmd {
+            ClientCommand::Inject { respond, source_session, .. } => {
+                assert!(!respond);
+                assert!(source_session.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn injected_event_roundtrips() {
+        roundtrip(&ServerEvent::Injected {
+            session: "sid".into(),
+            seq: 42,
+        });
     }
 
     #[test]
