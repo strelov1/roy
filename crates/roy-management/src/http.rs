@@ -141,15 +141,20 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_state() -> AppState {
+        use crate::meta_store::MetaStore;
+
         let dir = tempfile::tempdir().unwrap();
         let pool = roy_agents::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
+        MetaStore::apply_migrations(&pool).await.unwrap();
         // Keep the temp dir alive for the test process lifetime — dropping it
         // would invalidate the SQLite file referenced by the pool.
         std::mem::forget(dir);
         AppState {
-            store: roy_agents::Store::new(pool),
+            store: roy_agents::Store::new(pool.clone()),
+            meta: MetaStore::new(pool),
+            daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
         }
     }

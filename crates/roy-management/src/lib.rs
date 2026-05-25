@@ -28,11 +28,22 @@ pub struct Args {
 
 /// Build and serve the management HTTP API.
 pub async fn run(args: Args) -> anyhow::Result<()> {
+    use std::sync::Arc;
+
     let db_path = args.db.unwrap_or_else(roy_agents::default_db_path);
     let pool = roy_agents::open(&db_path).await?;
+
+    meta_store::MetaStore::apply_migrations(&pool).await?;
+    let socket = args.socket.unwrap_or_else(default_socket);
+    let meta = meta_store::MetaStore::new(pool.clone());
+    let daemon: Arc<dyn roy_client::DaemonClient> =
+        Arc::new(roy_client::UnixSocketDaemonClient::new(socket.clone()));
+
     let state = AppState {
         store: roy_agents::Store::new(pool),
-        socket_path: args.socket.unwrap_or_else(default_socket),
+        meta,
+        daemon,
+        socket_path: socket,
     };
 
     let app = http::router(state);
