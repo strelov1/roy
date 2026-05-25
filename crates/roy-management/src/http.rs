@@ -54,6 +54,7 @@ pub fn router(state: AppState) -> Router {
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{id}", axum::routing::delete(delete_project))
         .route("/sessions", get(list_sessions).post(create_session))
+        .route("/sessions/{id}", get(get_session))
         .with_state(state)
 }
 
@@ -251,9 +252,58 @@ async fn create_session(
     ))
 }
 
-async fn list_sessions(State(_): State<AppState>) -> Json<Vec<serde_json::Value>> {
-    // Real implementation lands in T18.
-    Json(vec![])
+async fn list_sessions(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    let live = s
+        .daemon
+        .list()
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let archived = s.daemon.list_archived().await.unwrap_or_default();
+    let mut sids: Vec<String> = live
+        .iter()
+        .cloned()
+        .chain(archived.iter().cloned())
+        .collect();
+    sids.sort();
+    sids.dedup();
+
+    let metas = s
+        .meta
+        .list_session_metas(&sids)
+        .await
+        .map_err(meta_to_api)?;
+    let meta_by_sid: std::collections::HashMap<String, _> = metas
+        .into_iter()
+        .map(|m| (m.session_id.clone(), m))
+        .collect();
+
+    let out: Vec<serde_json::Value> = sids
+        .into_iter()
+        .map(|sid| {
+            let m = meta_by_sid.get(&sid);
+            json!({
+                "session_id": sid,
+                "project_id": m.and_then(|m| m.project_id.clone()),
+                "agent_name": m.and_then(|m| m.agent_name.clone()),
+                "tags": m.map(|m| m.tags.clone()).unwrap_or_default(),
+                "live": live.contains(&sid),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::Value::Array(out)))
+}
+
+async fn get_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let meta = s.meta.get_session_meta(&id).await.map_err(meta_to_api)?;
+    let live = s.daemon.list().await.unwrap_or_default();
+    Ok(Json(json!({
+        "session_id": id,
+        "meta": meta,
+        "live": live.contains(&id),
+    })))
 }
 
 fn meta_to_api(e: crate::meta_store::MetaError) -> ApiError {
@@ -447,6 +497,46 @@ mod tests {
 
         // mock recorded one spawn
         assert_eq!(mock.recorded_spawns.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_joins_live_and_meta() {
+        use std::sync::{Arc, Mutex};
+
+        let mut st = test_state().await;
+        let mock = Arc::new(crate::roy_client::mock::MockDaemonClient {
+            spawn_response: Mutex::new(Some(Ok("sid-A".into()))),
+            list_response: Mutex::new(Some(vec!["sid-A".into(), "sid-B".into()])),
+            ..Default::default()
+        });
+        st.daemon = mock;
+        // Pre-insert meta for sid-A only; sid-B is orphan
+        st.meta
+            .upsert_session_meta(&crate::meta_store::SessionMeta {
+                session_id: "sid-A".into(),
+                project_id: None,
+                agent_id: None,
+                agent_name: Some("Rev".into()),
+                display_label: None,
+                tags: BTreeMap::from([("k".into(), "v".into())]),
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        let app = router(st);
+        let resp = app
+            .oneshot(Request::get("/sessions").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        let a = arr.iter().find(|r| r["session_id"] == "sid-A").unwrap();
+        assert_eq!(a["agent_name"], "Rev");
+        let b = arr.iter().find(|r| r["session_id"] == "sid-B").unwrap();
+        assert_eq!(b["agent_name"], serde_json::Value::Null);
     }
 
     #[tokio::test]

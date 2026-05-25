@@ -200,6 +200,72 @@ impl MetaStore {
         }
     }
 
+    /// Bulk read of session_meta rows for a known set of session ids. Tags are
+    /// included. Returns only rows that match — missing ids are omitted (the
+    /// caller is expected to fold them with empty meta).
+    pub async fn list_session_metas(
+        &self,
+        session_ids: &[String],
+    ) -> Result<Vec<SessionMeta>, MetaError> {
+        if session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // We can't easily bind a slice as `IN (?)` in sqlx — build the in-clause manually.
+        let placeholders = (0..session_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let meta_sql = format!(
+            "SELECT session_id, project_id, agent_id, agent_name, display_label, created_at FROM session_meta WHERE session_id IN ({placeholders})"
+        );
+        let tag_sql = format!(
+            "SELECT session_id, key, value FROM session_tags WHERE session_id IN ({placeholders})"
+        );
+
+        let mut meta_q = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                i64,
+            ),
+        >(&meta_sql);
+        for sid in session_ids {
+            meta_q = meta_q.bind(sid);
+        }
+        let meta_rows = meta_q.fetch_all(&self.pool).await?;
+
+        let mut tag_q = sqlx::query_as::<_, (String, String, String)>(&tag_sql);
+        for sid in session_ids {
+            tag_q = tag_q.bind(sid);
+        }
+        let tag_rows = tag_q.fetch_all(&self.pool).await?;
+
+        let mut tags_by_sid: std::collections::HashMap<String, BTreeMap<String, String>> =
+            std::collections::HashMap::new();
+        for (sid, k, v) in tag_rows {
+            tags_by_sid.entry(sid).or_default().insert(k, v);
+        }
+
+        Ok(meta_rows
+            .into_iter()
+            .map(
+                |(sid, project_id, agent_id, agent_name, display_label, created_at)| SessionMeta {
+                    tags: tags_by_sid.remove(&sid).unwrap_or_default(),
+                    session_id: sid,
+                    project_id,
+                    agent_id,
+                    agent_name,
+                    display_label,
+                    created_at,
+                },
+            )
+            .collect())
+    }
+
     pub async fn set_tags(
         &self,
         session_id: &str,
@@ -437,6 +503,26 @@ mod tests {
         assert_eq!(retrieved.tags.len(), 2);
         assert_eq!(retrieved.tags.get("x"), Some(&"y".into()));
         assert_eq!(retrieved.tags.get("p"), Some(&"q".into()));
+    }
+
+    #[tokio::test]
+    async fn list_session_metas_returns_known_only() {
+        let store = fresh_store().await;
+        store
+            .upsert_session_meta(&meta_with("a", &[("k", "v")]))
+            .await
+            .unwrap();
+        store
+            .upsert_session_meta(&meta_with("b", &[]))
+            .await
+            .unwrap();
+        let rows = store
+            .list_session_metas(&["a".into(), "b".into(), "missing".into()])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let a = rows.iter().find(|m| m.session_id == "a").unwrap();
+        assert_eq!(a.tags.get("k").unwrap(), "v");
     }
 
     #[tokio::test]
