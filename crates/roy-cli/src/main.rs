@@ -66,6 +66,11 @@ enum Cmd {
     /// Run the chat-platform gateway (Telegram + WebSocket relay).
     /// Long-running process; talks to a running `roy serve` daemon.
     Gateway(roy_gateway::Args),
+    /// Cron + one-shot fire dispatcher for roy. Has its own subcommands
+    /// (`serve`, `status`, `migrate`, `agents`, `triggers`, `subscribers`,
+    /// `fires`, `fire-now`). Same code path as the standalone
+    /// `roy-scheduler` binary.
+    Scheduler(roy_scheduler::cli::Cli),
     /// Manage projects (list / create / rename / delete).
     Projects {
         #[command(subcommand)]
@@ -275,6 +280,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
             roy_mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
         }
         Cmd::Gateway(args) => roy_gateway::run(args).await.map(|()| ExitCode::SUCCESS),
+        Cmd::Scheduler(args) => roy_scheduler::cli::run(args).await,
         Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
         Cmd::Agents { cmd } => cmd_agents(cmd).await,
     }
@@ -286,7 +292,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("roy=info,roy_cli=info,roy_mcp=info,roy_gateway=info,warn")
+        EnvFilter::new(
+            "roy=info,roy_cli=info,roy_mcp=info,roy_gateway=info,roy_scheduler=info,warn",
+        )
     });
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
