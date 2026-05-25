@@ -15,6 +15,7 @@ fn fake_config(extra: &[&str]) -> AcpConfig {
         permission_policy: PermissionPolicy::AllowAll,
         open_timeout: Duration::from_secs(5),
         env_remove: Vec::new(),
+        system_prompt_channel: roy::transport::SystemPromptChannel::Meta,
     }
 }
 
@@ -28,7 +29,7 @@ fn fake_config_with_timeout(extra: &[&str], open_timeout: Duration) -> AcpConfig
 async fn open_send_streams_until_result() {
     let transport = AcpTransport::new(fake_config(&[]));
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
         .unwrap();
 
@@ -70,7 +71,7 @@ async fn open_send_streams_until_result() {
 async fn auto_allows_permission_requests() {
     let transport = AcpTransport::new(fake_config(&["--permission"]));
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
         .unwrap();
 
@@ -98,10 +99,11 @@ async fn open_without_mode_skips_set_mode() {
         permission_policy: PermissionPolicy::Deny,
         open_timeout: Duration::from_secs(5),
         env_remove: Vec::new(),
+        system_prompt_channel: roy::transport::SystemPromptChannel::Meta,
     };
     let transport = AcpTransport::new(config);
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
         .unwrap();
 
@@ -124,7 +126,7 @@ async fn open_surfaces_error_when_agent_dies_during_initialize() {
     ));
 
     let err = match transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
     {
         Ok(_) => panic!("open should fail when the agent exits during initialize"),
@@ -147,7 +149,7 @@ async fn open_times_out_when_agent_never_replies() {
     ));
 
     let err = match transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
     {
         Ok(_) => panic!("open should fail when initialize times out"),
@@ -165,7 +167,7 @@ async fn open_surfaces_json_rpc_errors() {
     ));
 
     let err = match transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
     {
         Ok(_) => panic!("open should surface protocol errors"),
@@ -179,7 +181,7 @@ async fn open_surfaces_json_rpc_errors() {
 async fn mid_turn_exit_emits_error_result() {
     let transport = AcpTransport::new(fake_config(&["--exit-mid-turn"]));
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
         .unwrap();
 
@@ -210,7 +212,7 @@ async fn dropping_a_turn_cancels_it_and_the_next_turn_proceeds() {
     // stream actually cancelled it and freed the actor.
     let transport = AcpTransport::new(fake_config(&["--cancellable"]));
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
         .unwrap();
 
@@ -232,6 +234,28 @@ async fn dropping_a_turn_cancels_it_and_the_next_turn_proceeds() {
     handle.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn meta_channel_sends_system_prompt_on_session_new() {
+    let out = std::env::temp_dir().join(format!("roy-meta-{}.json", uuid::Uuid::new_v4()));
+    let out_arg = out.to_string_lossy().to_string();
+    // fake_config defaults to the Meta channel.
+    let transport = AcpTransport::new(fake_config(&["--meta-out", &out_arg]));
+    let _handle = transport
+        .open(
+            "sid",
+            None,
+            std::env::current_dir().unwrap(),
+            Some("PERSONA"),
+        )
+        .await
+        .expect("open");
+    // open() completes after session/new resolves, so the file is written by now.
+    let raw = std::fs::read(&out).expect("meta file written");
+    let meta: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(meta["systemPrompt"]["append"], "PERSONA");
+    let _ = std::fs::remove_file(&out);
+}
+
 // Real gemini. Ignored by default: needs the `gemini` binary, logged in.
 // Run with: cargo test --test acp_transport -- --ignored real_gemini
 #[tokio::test]
@@ -243,7 +267,7 @@ async fn real_gemini_spawn_and_turn() {
     }
     let transport = AcpTransport::new(AcpConfig::gemini());
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
         .unwrap();
 
@@ -279,7 +303,7 @@ async fn real_opencode_spawn_and_turn() {
     }
     let transport = AcpTransport::new(AcpConfig::opencode());
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
         .unwrap();
 
@@ -312,7 +336,7 @@ async fn real_codex_spawn_and_turn() {
     }
     let transport = AcpTransport::new(AcpConfig::codex());
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
         .unwrap();
 
@@ -346,7 +370,7 @@ async fn real_claude_spawn_and_turn() {
     }
     let transport = AcpTransport::new(AcpConfig::claude());
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap())
+        .open("ignored", None, std::env::current_dir().unwrap(), None)
         .await
         .unwrap();
 

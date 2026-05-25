@@ -19,6 +19,10 @@ pub struct Agent {
     /// SQLite INTEGER 0/1. Use the bool getter `is_persistent()` for clarity.
     pub persistent: i64,
     pub persistent_session_id: Option<String>,
+    /// Optional roy session id to notify. When set, the fired prompt is
+    /// augmented with a `roy inject <id> ...` instruction so the agent can
+    /// self-report into that session.
+    pub notify_session: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -123,7 +127,6 @@ pub struct Fire {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscriberKind {
-    InjectParent,
     Webhook,
     NotifyNative,
 }
@@ -131,7 +134,6 @@ pub enum SubscriberKind {
 impl SubscriberKind {
     pub fn as_db(self) -> &'static str {
         match self {
-            SubscriberKind::InjectParent => "inject_parent",
             SubscriberKind::Webhook => "webhook",
             SubscriberKind::NotifyNative => "notify_native",
         }
@@ -139,7 +141,6 @@ impl SubscriberKind {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "inject_parent" => Some(Self::InjectParent),
             "webhook" => Some(Self::Webhook),
             "notify_native" => Some(Self::NotifyNative),
             _ => None,
@@ -186,11 +187,7 @@ mod tests {
 
     #[test]
     fn subscriber_kind_roundtrips() {
-        for kind in [
-            SubscriberKind::InjectParent,
-            SubscriberKind::Webhook,
-            SubscriberKind::NotifyNative,
-        ] {
+        for kind in [SubscriberKind::Webhook, SubscriberKind::NotifyNative] {
             assert_eq!(SubscriberKind::parse(kind.as_db()), Some(kind));
         }
         assert_eq!(SubscriberKind::parse("nope"), None);

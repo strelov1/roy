@@ -198,9 +198,8 @@ pub async fn invoke_fire(
 /// (e.g. a UI session, or another agent). When `Some`, the resulting fire
 /// session carries the reserved tag `roy-scheduler:initiated_by_session` so
 /// downstream consumers (UI, audit) can link a fire back to its initiator.
-/// This is distinct from `roy-scheduler:parent_session_id`, which is set by
-/// the `inject_parent` subscriber and names the session the result will be
-/// injected into.
+/// The legacy `roy-scheduler:parent_session_id` tag is reserved and not set
+/// by the scheduler itself.
 pub async fn fire_agent_ad_hoc(
     pool: &SqlitePool,
     socket_path: &std::path::Path,
@@ -247,7 +246,7 @@ async fn run_fire_for_agent(
     let mut outcome = roy_client::fire(
         socket_path,
         target,
-        agent.task.clone(),
+        effective_prompt(agent),
         tags.clone(),
         fire_timeout,
     )
@@ -271,11 +270,12 @@ async fn run_fire_for_agent(
             let retry_target = roy::FireTarget::Spawn {
                 preset: agent.preset.clone(),
                 project_id: agent.project_id.clone(),
+                system_prompt: None,
             };
             outcome = roy_client::fire(
                 socket_path,
                 retry_target,
-                agent.task.clone(),
+                effective_prompt(agent),
                 tags,
                 fire_timeout,
             )
@@ -370,6 +370,21 @@ async fn run_fire_for_agent(
     Ok(fire)
 }
 
+/// The prompt sent to the agent on a fire. When the agent has a `notify_session`,
+/// append an instruction so it can self-report into that session via the CLI.
+fn effective_prompt(agent: &Agent) -> String {
+    match &agent.notify_session {
+        None => agent.task.clone(),
+        Some(sid) => format!(
+            "{}\n\n[notify] You are running in the background. When you have a \
+finding to report, run exactly one Bash command:\n    roy inject {} \"<your \
+concise message>\"\nIf you have nothing to report, do not call it. Do not \
+inject more than once.",
+            agent.task, sid
+        ),
+    }
+}
+
 fn build_target(agent: &Agent) -> roy::FireTarget {
     if agent.is_persistent() {
         if let Some(sid) = agent.persistent_session_id.as_ref() {
@@ -381,6 +396,7 @@ fn build_target(agent: &Agent) -> roy::FireTarget {
     roy::FireTarget::Spawn {
         preset: agent.preset.clone(),
         project_id: agent.project_id.clone(),
+        system_prompt: None,
     }
 }
 
@@ -393,6 +409,36 @@ mod tests {
     };
     use chrono::Duration as CDur;
     use tempfile::tempdir;
+
+    fn agent_with(task: &str, notify_session: Option<&str>) -> Agent {
+        Agent {
+            id: "agent-id".into(),
+            name: "n".into(),
+            preset: "claude".into(),
+            project_id: None,
+            task: task.into(),
+            model: None,
+            persistent: 0,
+            persistent_session_id: None,
+            notify_session: notify_session.map(str::to_string),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn effective_prompt_appends_notify_when_set() {
+        let agent = agent_with("t", Some("main-sid"));
+        let p = effective_prompt(&agent);
+        assert!(p.starts_with("t"), "preserves task at the start");
+        assert!(p.contains("roy inject main-sid"), "templates the notify id");
+    }
+
+    #[test]
+    fn effective_prompt_is_task_when_notify_unset() {
+        let agent = agent_with("just the task", None);
+        assert_eq!(effective_prompt(&agent), "just the task");
+    }
 
     #[tokio::test]
     async fn poll_tick_advances_cron_and_returns_to_fire() {
@@ -407,6 +453,7 @@ mod tests {
                 task: "t".into(),
                 model: None,
                 persistent: false,
+                notify_session: None,
             },
         )
         .await
@@ -444,6 +491,7 @@ mod tests {
                 task: "t".into(),
                 model: None,
                 persistent: false,
+                notify_session: None,
             },
         )
         .await
@@ -577,6 +625,7 @@ mod tests {
                 task: "task".into(),
                 model: None,
                 persistent: false,
+                notify_session: None,
             },
         )
         .await
@@ -646,6 +695,7 @@ mod tests {
                 task: "t".into(),
                 model: None,
                 persistent: true,
+                notify_session: None,
             },
         )
         .await
@@ -692,6 +742,7 @@ mod tests {
                 task: "t".into(),
                 model: None,
                 persistent: false,
+                notify_session: None,
             },
         )
         .await
@@ -709,8 +760,8 @@ mod tests {
         assert_eq!(fire.status, "ok");
 
         // The Fire command that hit the daemon must carry the
-        // initiated_by_session tag — distinct from parent_session_id, which
-        // only the inject_parent subscriber sets.
+        // initiated_by_session tag and must NOT carry the reserved
+        // parent_session_id tag (no scheduler component sets it any more).
         let lines = captured.lock().unwrap().clone();
         assert_eq!(lines.len(), 1, "expected exactly one Fire command");
         let cmd: ClientCommand = serde_json::from_str(&lines[0]).expect("parse ClientCommand");
@@ -724,7 +775,7 @@ mod tests {
         );
         assert!(
             !tags.contains_key("roy-scheduler:parent_session_id"),
-            "fire-now must not set parent_session_id (that tag belongs to inject_parent)",
+            "fire-now must not set the reserved parent_session_id tag",
         );
     }
 
@@ -770,6 +821,7 @@ mod tests {
                 task: "t".into(),
                 model: None,
                 persistent: true,
+                notify_session: None,
             },
         )
         .await
@@ -805,6 +857,7 @@ mod tests {
                 task: "t".into(),
                 model: None,
                 persistent: false,
+                notify_session: None,
             },
         )
         .await

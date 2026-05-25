@@ -103,7 +103,8 @@ session's `resume_cursor` changes:
   "model": null,
   "permission": "allow",
   "project_id": "1f7c…",
-  "resume_cursor": "sess_abc123"
+  "resume_cursor": "sess_abc123",
+  "system_prompt": "You are a terse reviewer."
 }
 ```
 
@@ -118,6 +119,8 @@ Fields:
 | `permission`    | the requested `PermissionPolicy` (`allow` / `deny`)             |
 | `project_id`    | UUID of the owning project; `null` means orphan session         |
 | `resume_cursor` | the agent-issued session id (e.g. ACP `sessionId`) most recently observed from `Handle::resume_cursor()` |
+| `system_prompt` | snapshot of the inline persona prompt the session was spawned with; re-applied on `resume`, so editing/deleting the source agent never mutates a live session. Omitted when none was set |
+| `agent_name`    | optional display label of the agent that spawned the session; omitted when unset |
 
 `cwd` is kept on `SessionMetadata` even though it mirrors the project path,
 so meta files remain self-contained (no registry lookup needed to interpret

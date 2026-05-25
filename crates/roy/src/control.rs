@@ -163,6 +163,11 @@ pub enum ClientCommand {
         resume: Option<String>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         tags: BTreeMap<String, String>,
+        /// Inline system/persona prompt. The daemon injects it (ACP
+        /// `_meta.systemPrompt` where the preset supports it, else as a first
+        /// journaled turn) and snapshots it into `SessionMetadata`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
     },
     /// Subscribe to a session's `JournalEntry` stream. Optional `from_seq` for
     /// replay-from-N (default: from the start).
@@ -247,22 +252,15 @@ pub enum ClientCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
     },
-    /// Drop a message into a live session out-of-band. `respond = false`
-    /// (default) appends a `Note` event to the journal/broadcast without
-    /// taking the input lease — works even while an interactive client holds
-    /// it. `respond = true` delivers `text` as a real user turn the agent
-    /// answers (waits for any in-flight turn first), replying with the same
-    /// `Fire*` events as `Fire`. `source_session` links a `Note` back to the
-    /// session that produced the message (note mode only).
+    /// Drop a message into a live session out-of-band. Appends a `Note` event
+    /// to the journal/broadcast without taking the input lease, so it lands
+    /// even while an interactive client holds the lease. `source_session` links
+    /// the `Note` back to the session that produced the message.
     Inject {
         session: String,
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_session: Option<String>,
-        #[serde(default)]
-        respond: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeout_ms: Option<u64>,
     },
     /// Return all projects in the registry.
     ListProjects,
@@ -288,6 +286,9 @@ pub enum FireTarget {
         /// `Some(project_id)` to spawn inside a project's dir; `None` for orphan.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
+        /// Inline system/persona prompt (see `ClientCommand::Spawn`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
     },
     Resume {
         session_id: String,
@@ -340,7 +341,7 @@ pub enum ServerEvent {
     InputAcquired { session: String, acquired: bool },
     /// Response to `ReleaseInput`.
     InputReleased { session: String },
-    /// Response to `Inject { respond: false }`: the seq of the appended `Note`.
+    /// Response to `Inject`: the seq of the appended `Note`.
     Injected { session: String, seq: Seq },
     /// Response to `Detach`.
     Detached { session: String },
@@ -481,6 +482,7 @@ mod tests {
             permission: Some("allow".into()),
             resume: None,
             tags: BTreeMap::new(),
+            system_prompt: None,
         });
         // Orphan spawn (no project)
         roundtrip(&ClientCommand::Spawn {
@@ -490,6 +492,7 @@ mod tests {
             permission: None,
             resume: None,
             tags: BTreeMap::new(),
+            system_prompt: None,
         });
     }
 
@@ -698,31 +701,20 @@ mod tests {
             session: "sid".into(),
             text: "result text".into(),
             source_session: Some("child".into()),
-            respond: false,
-            timeout_ms: None,
         });
         roundtrip(&ClientCommand::Inject {
             session: "sid".into(),
             text: "do this".into(),
             source_session: None,
-            respond: true,
-            timeout_ms: Some(60_000),
         });
     }
 
     #[test]
-    fn inject_defaults_respond_false_when_absent() {
+    fn inject_omits_optional_source_when_absent() {
         let cmd: ClientCommand =
             serde_json::from_str(r#"{"op":"inject","session":"s","text":"t"}"#).unwrap();
         match cmd {
-            ClientCommand::Inject {
-                respond,
-                source_session,
-                ..
-            } => {
-                assert!(!respond);
-                assert!(source_session.is_none());
-            }
+            ClientCommand::Inject { source_session, .. } => assert!(source_session.is_none()),
             _ => panic!("wrong variant"),
         }
     }
@@ -757,5 +749,42 @@ mod tests {
         };
         assert_eq!(agents.len(), 1);
         assert!(matches!(status, AgentsConfigStatus::Ok));
+    }
+
+    #[test]
+    fn spawn_with_system_prompt_roundtrips() {
+        roundtrip(&ClientCommand::Spawn {
+            agent: "claude".into(),
+            project_id: None,
+            model: None,
+            permission: None,
+            resume: None,
+            tags: BTreeMap::new(),
+            system_prompt: Some("You are terse.".into()),
+        });
+    }
+
+    #[test]
+    fn spawn_omits_system_prompt_when_none() {
+        let s = serde_json::to_string(&ClientCommand::Spawn {
+            agent: "claude".into(),
+            project_id: None,
+            model: None,
+            permission: None,
+            resume: None,
+            tags: BTreeMap::new(),
+            system_prompt: None,
+        })
+        .unwrap();
+        assert!(!s.contains("system_prompt"), "None must be skipped: {s}");
+    }
+
+    #[test]
+    fn fire_target_spawn_with_system_prompt_roundtrips() {
+        roundtrip(&FireTarget::Spawn {
+            preset: "claude".into(),
+            project_id: None,
+            system_prompt: Some("persona".into()),
+        });
     }
 }

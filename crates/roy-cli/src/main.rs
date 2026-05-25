@@ -17,8 +17,6 @@ use roy::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-mod mcp;
-
 #[derive(Parser)]
 #[command(
     name = "roy",
@@ -58,6 +56,9 @@ enum Cmd {
     Wait(WaitArgs),
     /// One-shot fire: spawn (or resume) a session, send a prompt, wait for the result.
     Fire(FireArgs),
+    /// Inject a message into a live session as a background note (no input
+    /// lease needed). A background agent calls this to notify a session.
+    Inject(InjectArgs),
     /// Run an MCP server (stdio JSON-RPC) that exposes roy daemon operations
     /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
     /// IDE plugin) which talks to it over stdio.
@@ -113,6 +114,12 @@ struct RunArgs {
     /// Prefix journal entries with their seq.
     #[arg(long)]
     with_seq: bool,
+    /// Inline system/persona prompt for the session.
+    #[arg(long)]
+    system_prompt: Option<String>,
+    /// Read the system/persona prompt from a file (overrides --system-prompt).
+    #[arg(long)]
+    system_prompt_file: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -132,6 +139,18 @@ struct ResumeArgs {
 #[derive(clap::Args)]
 struct CloseArgs {
     session: String,
+}
+
+#[derive(clap::Args)]
+struct InjectArgs {
+    /// The live session to inject into.
+    session: String,
+    /// The message text.
+    text: String,
+    /// Optional source session id to link the note back to (e.g. the child
+    /// background session that produced this message).
+    #[arg(long)]
+    source: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -247,9 +266,10 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::SetTags(args) => cmd_set_tags(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Wait(args) => cmd_wait(args).await,
         Cmd::Fire(args) => cmd_fire(args).await,
+        Cmd::Inject(args) => cmd_inject(args).await,
         Cmd::Mcp(args) => {
             let socket = args.socket.unwrap_or_else(default_socket);
-            mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
+            roy_mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
         }
         Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
         Cmd::Agents { cmd } => cmd_agents(cmd).await,
@@ -366,6 +386,14 @@ async fn send_cmd<W: AsyncWriteExt + Unpin>(w: &mut W, cmd: &ClientCommand) -> a
 async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     validate_flags(&args)?;
 
+    let system_prompt = match (args.system_prompt_file, args.system_prompt) {
+        (Some(path), _) => Some(
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("reading --system-prompt-file {}", path.display()))?,
+        ),
+        (None, inline) => inline,
+    };
+
     let stream = connect().await?;
     let (reader, mut writer) = stream.into_split();
     let mut events = BufReader::new(reader).lines();
@@ -380,6 +408,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
             permission: args.permission.clone(),
             resume: args.resume.clone(),
             tags: BTreeMap::default(),
+            system_prompt,
         },
     )
     .await?;
@@ -593,6 +622,38 @@ async fn cmd_close(args: CloseArgs) -> anyhow::Result<()> {
     }
 }
 
+async fn cmd_inject(args: InjectArgs) -> anyhow::Result<ExitCode> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Inject {
+            session: args.session.clone(),
+            text: args.text,
+            source_session: args.source,
+        },
+    )
+    .await?;
+    match read_event(&mut events).await? {
+        ServerEvent::Injected { session, seq } => {
+            let payload = serde_json::json!({
+                "type": "injected",
+                "session": session,
+                "seq": seq,
+            });
+            println!("{payload}");
+            Ok(ExitCode::SUCCESS)
+        }
+        ServerEvent::Error { code, message, .. } => {
+            eprintln!("roy inject: {code}: {message}");
+            Ok(ExitCode::from(2))
+        }
+        other => anyhow::bail!("unexpected response to Inject: {other:?}"),
+    }
+}
+
 async fn cmd_set_tags(args: SetTagsArgs) -> anyhow::Result<()> {
     let stream = connect().await?;
     let (reader, mut writer) = stream.into_split();
@@ -695,6 +756,7 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
         (Some(agent), None) => FireTarget::Spawn {
             preset: agent,
             project_id: args.project,
+            system_prompt: None,
         },
         (None, Some(session_id)) => FireTarget::Resume { session_id },
         (Some(_), Some(_)) => anyhow::bail!("--agent conflicts with --resume"),
@@ -1044,6 +1106,8 @@ mod tests {
             detach: false,
             resume: None,
             with_seq: false,
+            system_prompt: None,
+            system_prompt_file: None,
         }
     }
 
