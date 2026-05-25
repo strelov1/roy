@@ -88,6 +88,14 @@ pub fn event_to_json(event: &TurnEvent) -> Value {
             "stop_reason": stop_reason.as_wire(),
             "is_error": stop_reason.is_error(),
         }),
+        TurnEvent::Note {
+            text,
+            source_session,
+        } => json!({
+            "type": "note",
+            "text": text,
+            "source_session": source_session,
+        }),
         TurnEvent::Raw(v) => json!({"type": "raw", "value": v}),
     }
 }
@@ -145,6 +153,17 @@ pub fn event_from_json(v: &Value) -> Result<TurnEvent> {
             stop_reason: StopReason::from_wire(
                 v.get("stop_reason").and_then(Value::as_str).unwrap_or(""),
             ),
+        }),
+        "note" => Ok(TurnEvent::Note {
+            text: v
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            source_session: v
+                .get("source_session")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         }),
         "raw" => Ok(TurnEvent::Raw(
             v.get("value").cloned().unwrap_or(Value::Null),
@@ -210,6 +229,14 @@ pub enum TurnEvent {
         cost_usd: Option<f64>,
         stop_reason: StopReason,
     },
+    /// A message injected into the session out-of-band (e.g. a background
+    /// agent's result landing in the parent session). Not produced by the
+    /// agent and not a user turn — UIs render it as a distinct "background"
+    /// entry. `source_session` links back to the session that produced it.
+    Note {
+        text: String,
+        source_session: Option<String>,
+    },
     Raw(Value),
 }
 
@@ -263,5 +290,30 @@ mod tests {
         assert!(StopReason::Error.is_error());
         assert!(!StopReason::EndTurn.is_error());
         assert!(!StopReason::MaxTokens.is_error());
+    }
+
+    #[test]
+    fn note_round_trips_through_wire() {
+        let e = TurnEvent::Note {
+            text: "Запуск #4: 1 + 4 = 5".into(),
+            source_session: Some("child-sid".into()),
+        };
+        let v = event_to_json(&e);
+        assert_eq!(v["type"], "note");
+        assert_eq!(v["text"], "Запуск #4: 1 + 4 = 5");
+        assert_eq!(v["source_session"], "child-sid");
+        let back = event_from_json(&v).unwrap();
+        assert_eq!(back, e);
+    }
+
+    #[test]
+    fn note_round_trips_without_source() {
+        let e = TurnEvent::Note {
+            text: "hello".into(),
+            source_session: None,
+        };
+        let v = event_to_json(&e);
+        assert!(v["source_session"].is_null());
+        assert_eq!(event_from_json(&v).unwrap(), e);
     }
 }
