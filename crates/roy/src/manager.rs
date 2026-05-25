@@ -359,6 +359,7 @@ mod tests {
                 permission_policy: PermissionPolicy::AllowAll,
                 open_timeout: Duration::from_secs(5),
                 env_remove: Vec::new(),
+                system_prompt_channel: crate::transport::SystemPromptChannel::Meta,
             })))
         }
     }
