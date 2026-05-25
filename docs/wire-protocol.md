@@ -25,6 +25,7 @@ enum TurnEvent {
     ToolUse { name: String, input: serde_json::Value },
     Usage { input_tokens: Option<u64>, output_tokens: Option<u64>, cost_usd: Option<f64> },
     Result { cost_usd: Option<f64>, stop_reason: StopReason },
+    Note { text: String, source_session: Option<String> },
     Raw(serde_json::Value),
 }
 ```
@@ -41,6 +42,7 @@ control frame):
 | `ToolUse`          | `{"type":"tool_use","name":"…","input":…}`                                                   |
 | `Usage`            | `{"type":"usage","input_tokens":null|123,"output_tokens":null|456,"cost_usd":null|0.01}`     |
 | `Result`           | `{"type":"result","cost_usd":null|0.42,"stop_reason":"end_turn","is_error":false}`           |
+| `Note`             | `{"type":"note","text":"…","source_session":null|"<session_id>"}`                            |
 | `Raw`              | `{"type":"raw","value":…}`                                                                   |
 
 `UserPrompt` is journaled by the engine the moment a `send`/`Cmd::Prompt`
@@ -53,6 +55,12 @@ Notes:
 - `stop_reason` is a snake_case string. `is_error` is computed
   (`is_error = stop_reason ∉ {end_turn, max_tokens}`); it is written for
   human-readability but the source of truth is `stop_reason`.
+- `Note` is a message dropped into the session out-of-band — not produced
+  by the agent and not a user turn. It is journaled and broadcast directly
+  (no input lease, no transport round-trip), so it lands even while an
+  interactive client holds the session's input lease. `source_session`
+  (nullable) links back to the session that produced it (e.g. the child
+  background-agent fire). Emitted in response to `inject` (see below).
 - `Raw` carries any unmapped event payload verbatim. Unknown future
   event types from an upgraded agent SDK surface as `Raw` rather than
   being silently dropped.
@@ -106,6 +114,7 @@ triggers (and, indirectly, of every MCP tool result body).
 | `list_archived`   | —                                                                                               |
 | `resume`          | `session`                                                                                       |
 | `read_journal`    | `session`, optional `from_seq`, optional `max_entries`                                          |
+| `inject`          | `session`, `text`, optional `source_session`, optional `respond` (default `false`), optional `timeout_ms` |
 | `list_projects`   | —                                                                                               |
 | `create_project`  | `name`                                                                                          |
 | `delete_project`  | `project_id`                                                                                    |
@@ -126,6 +135,17 @@ on-disk path as `workspace_dir/name` and creates the directory.
 session belonging to that project has its `.jsonl` and `.meta.json` deleted.
 The on-disk `workspace_dir/<name>/` directory is **not** removed.
 
+`inject` drops a message into a **live** session (resume an archived one first;
+an unknown/non-live session replies `error` with code `no_session`):
+
+- `respond: false` (default) → appends a `note` event referencing
+  `source_session`. **No input lease required**, so it lands even while an
+  interactive client holds the lease. Reply:
+  `{"kind":"injected","session":"<sid>","seq":N}`.
+- `respond: true` → delivers `text` as a real user turn the agent answers;
+  the daemon waits for any in-flight turn to finish first. Reply: the same
+  `fire_done` / `fire_timeout` / `fire_error` events as `fire`.
+
 ### ServerEvent (server → client)
 
 `{"kind": "<name>", …}`. Variants:
@@ -138,6 +158,7 @@ The on-disk `workspace_dir/<name>/` directory is **not** removed.
 | `frame`             | `session`, `entry` (the `JournalEntry` shape above)                                                     |
 | `input_acquired`    | `session`, `acquired: bool`                                                                             |
 | `input_released`    | `session`                                                                                               |
+| `injected`          | `session`, `seq` — ack to `inject` with `respond:false` (the appended `note`'s seq)                      |
 | `detached`          | `session`                                                                                               |
 | `closed`            | `session`                                                                                               |
 | `listed`            | `sessions: [{id, project_id}]`                                                                          |
