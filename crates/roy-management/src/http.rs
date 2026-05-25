@@ -1,6 +1,9 @@
 //! axum router + handlers for agent CRUD and session launch.
 //! axum 0.8 path syntax uses `{id}` (not `:id`).
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -50,6 +53,7 @@ pub fn router(state: AppState) -> Router {
         .route("/presets", get(list_presets))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{id}", axum::routing::delete(delete_project))
+        .route("/sessions", get(list_sessions).post(create_session))
         .with_state(state)
 }
 
@@ -159,6 +163,93 @@ async fn delete_project(
 ) -> Result<StatusCode, ApiError> {
     s.meta.delete_project(&id).await.map_err(meta_to_api)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CreateSessionReq {
+    agent: String,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    permission: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    agent_name: Option<String>,
+    #[serde(default)]
+    tags: BTreeMap<String, String>,
+}
+
+async fn create_session(
+    State(s): State<AppState>,
+    Json(req): Json<CreateSessionReq>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Resolve project_id -> cwd if provided; else use req.cwd verbatim.
+    let cwd: Option<PathBuf> = if let Some(pid) = &req.project_id {
+        let projects = s.meta.list_projects().await.map_err(meta_to_api)?;
+        let p = projects
+            .into_iter()
+            .find(|p| &p.id == pid)
+            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("invalid project: {pid}")))?;
+        Some(PathBuf::from(p.path))
+    } else {
+        req.cwd.clone().map(PathBuf::from)
+    };
+
+    let sid = s
+        .daemon
+        .spawn(crate::roy_client::SpawnRequest {
+            agent: req.agent.clone(),
+            cwd,
+            model: req.model.clone(),
+            permission: req.permission.clone(),
+            system_prompt: req.system_prompt.clone(),
+        })
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("daemon: {e}")))?;
+
+    let meta = crate::meta_store::SessionMeta {
+        session_id: sid.clone(),
+        project_id: req.project_id.clone(),
+        agent_id: None,
+        agent_name: req.agent_name.clone(),
+        display_label: None,
+        tags: req.tags.clone(),
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    if let Err(meta_err) = s.meta.upsert_session_meta(&meta).await {
+        // Compensating action: the daemon already spawned the session, but
+        // we couldn't persist metadata. Close the orphaned session so it
+        // doesn't leak. Log the close error if it also fails, but propagate
+        // the original meta error to the caller.
+        tracing::error!(error = %meta_err, session = %sid, "meta persist failed; closing session");
+        if let Err(close_err) = s.daemon.close(&sid).await {
+            tracing::error!(error = %close_err, session = %sid, "compensating close failed");
+        }
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("meta_persist_failed; session was created and closed: {sid}"),
+        ));
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "session_id": sid,
+            "project_id": req.project_id,
+            "tags": req.tags,
+            "agent_name": req.agent_name,
+        })),
+    ))
+}
+
+async fn list_sessions(State(_): State<AppState>) -> Json<Vec<serde_json::Value>> {
+    // Real implementation lands in T18.
+    Json(vec![])
 }
 
 fn meta_to_api(e: crate::meta_store::MetaError) -> ApiError {
@@ -313,5 +404,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn sessions_post_happy_path() {
+        use std::sync::Arc;
+
+        let mut st = test_state().await;
+        let mock = Arc::new(crate::roy_client::mock::MockDaemonClient::new().with_spawn("sid-1"));
+        st.daemon = mock.clone();
+        let app = router(st);
+
+        let body = serde_json::to_vec(&json!({
+            "agent": "claude",
+            "tags": {"env": "prod"},
+            "agent_name": "Reviewer"
+        }))
+        .unwrap();
+        let resp = app
+            .oneshot(
+                Request::post("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let v: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(v["session_id"], "sid-1");
+        assert_eq!(v["agent_name"], "Reviewer");
+        assert_eq!(v["tags"]["env"], "prod");
+
+        // mock recorded one spawn
+        assert_eq!(mock.recorded_spawns.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sessions_post_rollback_on_meta_failure() {
+        use std::sync::Arc;
+
+        let mut st = test_state().await;
+        let mock = Arc::new(crate::roy_client::mock::MockDaemonClient::new().with_spawn("sid-X"));
+        st.daemon = mock.clone();
+        // Force the upsert_session_meta to fail by closing the pool out from
+        // under the MetaStore. The spawn happens first (mock, succeeds), then
+        // the meta write fails, which must trigger a compensating close.
+        st.meta.pool.close().await;
+        let app = router(st);
+
+        let body = serde_json::to_vec(&json!({"agent": "claude"})).unwrap();
+        let resp = app
+            .oneshot(
+                Request::post("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Mock recorded the compensating Close
+        assert_eq!(mock.recorded_closes.lock().unwrap().as_slice(), &["sid-X"]);
     }
 }

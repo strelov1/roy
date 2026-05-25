@@ -46,7 +46,7 @@ pub struct SessionMeta {
 
 #[derive(Clone)]
 pub struct MetaStore {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 impl MetaStore {
