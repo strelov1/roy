@@ -160,6 +160,7 @@ mod tests {
             FireTarget::Spawn {
                 preset: "claude".into(),
                 project_id: None,
+                system_prompt: None,
             },
             "p".into(),
             BTreeMap::new(),
@@ -195,6 +196,7 @@ mod tests {
             FireTarget::Spawn {
                 preset: "claude".into(),
                 project_id: None,
+                system_prompt: None,
             },
             "p".into(),
             BTreeMap::new(),
@@ -224,6 +226,7 @@ mod tests {
             FireTarget::Spawn {
                 preset: "claude".into(),
                 project_id: None,
+                system_prompt: None,
             },
             "p".into(),
             BTreeMap::new(),
@@ -243,6 +246,7 @@ mod tests {
             FireTarget::Spawn {
                 preset: "claude".into(),
                 project_id: None,
+                system_prompt: None,
             },
             "p".into(),
             BTreeMap::new(),

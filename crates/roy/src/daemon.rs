@@ -432,6 +432,7 @@ impl Daemon {
                 permission,
                 resume,
                 tags,
+                system_prompt: _,
             } => {
                 let preset: AgentPreset = match agent.parse() {
                     Ok(p) => p,
@@ -762,7 +763,7 @@ impl Daemon {
     ) {
         // 1. Spawn or Resume
         let engine = match target {
-            FireTarget::Spawn { preset, project_id } => {
+            FireTarget::Spawn { preset, project_id, system_prompt: _ } => {
                 let parsed: AgentPreset = match preset.parse() {
                     Ok(p) => p,
                     Err(e) => {
@@ -1553,6 +1554,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -1674,6 +1676,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -1814,6 +1817,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -1996,6 +2000,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2160,6 +2165,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2181,6 +2187,7 @@ mod tests {
                 permission: None,
                 resume: Some("prior-session-sid".into()),
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2252,6 +2259,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2377,6 +2385,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2463,6 +2472,7 @@ mod tests {
                 target: FireTarget::Spawn {
                     preset: "opencode".into(),
                     project_id: None,
+                    system_prompt: None,
                 },
                 prompt: "fire now".into(),
                 tags: BTreeMap::from([(
@@ -2533,6 +2543,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: initial,
+                system_prompt: None,
             },
         )
         .await;
@@ -2715,6 +2726,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2774,6 +2786,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2846,6 +2859,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
