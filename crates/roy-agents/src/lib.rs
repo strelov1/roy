@@ -3,8 +3,10 @@
 
 pub mod db;
 pub mod slug;
+pub mod store;
 pub mod types;
 
 pub use db::{default_db_path, open};
 pub use slug::slugify;
+pub use store::{Store, StoreError};
 pub use types::{Agent, AgentUpdate, NewAgent};
