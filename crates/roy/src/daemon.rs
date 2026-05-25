@@ -509,12 +509,15 @@ impl Daemon {
                 self.handle_fire(target, prompt, tags, timeout_ms, event_tx)
                     .await
             }
-            ClientCommand::Inject { .. } => {
-                let _ = event_tx.send(ServerEvent::Error {
-                    session: None,
-                    code: crate::control::ErrorCode::BadRequest,
-                    message: "Inject not yet implemented".into(),
-                });
+            ClientCommand::Inject {
+                session,
+                text,
+                source_session,
+                respond,
+                timeout_ms,
+            } => {
+                self.handle_inject(session, text, source_session, respond, timeout_ms, event_tx)
+                    .await
             }
             ClientCommand::ListProjects => self.handle_list_projects(event_tx).await,
             ClientCommand::CreateProject { name } => {
@@ -890,6 +893,86 @@ impl Daemon {
                     session: Some(session_id),
                     code: ErrorCode::ReadJournalFailed,
                     message: format!("wait failed: {e}"),
+                });
+            }
+        }
+    }
+
+    async fn handle_inject(
+        self: &Arc<Self>,
+        session: String,
+        text: String,
+        source_session: Option<String>,
+        respond: bool,
+        timeout_ms: Option<u64>,
+        event_tx: &EventTx,
+    ) {
+        let Some(engine) = self.manager.get(&session).await else {
+            send_error(
+                event_tx,
+                Some(session),
+                ErrorCode::NoSession,
+                "no such session",
+            );
+            return;
+        };
+
+        if !respond {
+            match engine.inject_note(text, source_session).await {
+                Ok(seq) => {
+                    let _ = event_tx.send(ServerEvent::Injected { session, seq });
+                }
+                Err(e) => {
+                    send_error(
+                        event_tx,
+                        Some(session),
+                        ErrorCode::SendFailed,
+                        format!("inject_note failed: {e}"),
+                    );
+                }
+            }
+            return;
+        }
+
+        // respond = true: deliver as a real turn. Wait for any in-flight turn
+        // to finish first — a prompt that lands mid-turn is dropped.
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(600_000));
+        if engine.is_busy() {
+            let since = engine.next_seq().await;
+            let _ = engine.wait_for_result(since, timeout).await;
+        }
+
+        let since = engine.next_seq().await;
+        if let Err(e) = engine.inject_prompt(text) {
+            let _ = event_tx.send(ServerEvent::FireError {
+                session: Some(session),
+                code: ErrorCode::SendFailed,
+                message: format!("inject_prompt failed: {e}"),
+            });
+            return;
+        }
+
+        match engine.wait_for_result(since, timeout).await {
+            Ok(Some((seq, result, assistant_text))) => {
+                let _ = event_tx.send(ServerEvent::FireDone {
+                    session,
+                    seq_range: (since, seq),
+                    result,
+                    assistant_text,
+                });
+            }
+            Ok(None) => {
+                let partial_end = engine.next_seq().await;
+                let _ = event_tx.send(ServerEvent::FireTimeout {
+                    session,
+                    partial_seq_range: (since, partial_end),
+                });
+            }
+            Err(e) => {
+                let _ = event_tx.send(ServerEvent::FireError {
+                    session: Some(session),
+                    code: ErrorCode::SendFailed,
+                    message: format!("wait_for_result failed: {e}"),
                 });
             }
         }
@@ -3056,5 +3139,134 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// A note (respond=false) must land even when ANOTHER connection holds the
+    /// input lease — this is the whole point of Inject. Reproduces the original
+    /// bug where injection needed a lease and so blocked behind an active turn.
+    #[tokio::test]
+    async fn inject_note_lands_while_lease_held_by_another_connection() {
+        let dir = tmp_dir();
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
+
+        // Connection A: spawns the session and holds the lease.
+        let (clienta_side, servera_side) = tokio::io::duplex(8192);
+        let (servera_rd, servera_wr) = tokio::io::split(servera_side);
+        let _servea = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(servera_rd, servera_wr).await;
+            })
+        };
+        let (clienta_rd, mut clienta_wr) = tokio::io::split(clienta_side);
+        let mut eventsa = BufReader::new(clienta_rd).lines();
+
+        // Connection B: injects the note.
+        let (clientb_side, serverb_side) = tokio::io::duplex(8192);
+        let (serverb_rd, serverb_wr) = tokio::io::split(serverb_side);
+        let _serveb = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(serverb_rd, serverb_wr).await;
+            })
+        };
+        let (clientb_rd, mut clientb_wr) = tokio::io::split(clientb_side);
+        let mut eventsb = BufReader::new(clientb_rd).lines();
+
+        // 1. Spawn on Connection A.
+        send_cmd_line(
+            &mut clienta_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                project_id: None,
+                model: None,
+                permission: None,
+                resume: None,
+                tags: BTreeMap::new(),
+            },
+        )
+        .await;
+        let _ = next_event_line(&mut eventsa).await; // Spawning ack
+        let session = match next_event_line(&mut eventsa).await {
+            ServerEvent::Spawned { session, .. } => session,
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+
+        // 2. Connection A acquires the input lease.
+        send_cmd_line(
+            &mut clienta_wr,
+            &ClientCommand::AcquireInput {
+                session: session.clone(),
+            },
+        )
+        .await;
+        match next_event_line(&mut eventsa).await {
+            ServerEvent::InputAcquired { acquired: true, .. } => {}
+            other => panic!("expected InputAcquired{{acquired:true}}, got {other:?}"),
+        }
+
+        // 3. Connection B injects a note (respond=false). No lease needed.
+        send_cmd_line(
+            &mut clientb_wr,
+            &ClientCommand::Inject {
+                session: session.clone(),
+                text: "bg result".into(),
+                source_session: Some("child".into()),
+                respond: false,
+                timeout_ms: None,
+            },
+        )
+        .await;
+        match next_event_line(&mut eventsb).await {
+            ServerEvent::Injected { session: s, .. } => assert_eq!(s, session),
+            other => panic!("expected Injected, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Injecting into a session that does not exist returns a NoSession error.
+    #[tokio::test]
+    async fn inject_into_unknown_session_errors() {
+        let dir = tmp_dir();
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let _serve = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Inject {
+                session: "does-not-exist".into(),
+                text: "x".into(),
+                source_session: None,
+                respond: false,
+                timeout_ms: None,
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::Error {
+                code: ErrorCode::NoSession,
+                ..
+            } => {}
+            other => panic!("expected Error{{NoSession}}, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
