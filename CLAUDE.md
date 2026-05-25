@@ -13,14 +13,16 @@ Non-negotiable expectations for any change in this repo:
 
 ## What this is
 
-A Cargo workspace with four crates:
+A Cargo workspace with six crates:
 
 - **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting metadata so sessions survive across daemon restarts.
 - **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket) plus an MCP server (`roy mcp`) that exposes the daemon to MCP-aware AI clients.
 - **`crates/roy-scheduler`** — cron + one-shot fire dispatcher. Talks to the daemon over its Unix socket using `ClientCommand::Fire`; never reaches into `SessionManager`, `Engine`, or `Journal`. Owns its own SQLite state (`~/.local/state/roy-scheduler/state.db`) for triggers, fires, and subscribers.
 - **`crates/roy-gateway`** — chat-platform and WebSocket bridge to the daemon (Telegram adapter + WS relay). Same boundary rule as `roy-scheduler`. Persists `chat_id → roy session_id` in a JSON file so chats survive restarts.
+- **`crates/roy-agents`** — library. Canonical agent store: `Agent` type (identity + persona `prompt` + optional scheduled `task`), SQLite CRUD with slug-collision suffixing. Used by `roy-management` today; `roy-scheduler` is planned to migrate onto it later. Shared DB file lives at `~/.local/state/roy/agents.db` (override with `ROY_AGENTS_DB`).
+- **`crates/roy-management`** — binary `roy-management`. axum HTTP service for agent CRUD and starting sessions. Same boundary rule as `roy-scheduler`/`roy-gateway`: talks to the daemon only over the Unix socket, passing `system_prompt = agent.prompt` inline on `Spawn`. Transitional note: `roy-scheduler` still has its own `agents` table until a future Plan C unifies it onto `roy-agents`.
 
-External crates (`roy-scheduler`, `roy-gateway`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API.
+External crates (`roy-scheduler`, `roy-gateway`, `roy-management`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API.
 
 Roy spawns agent CLIs; it does not install them. The agent's working directory comes from the client: `roy run --cwd …`, MCP `cwd` argument, or `ClientCommand::Spawn.cwd`. When no client supplies one, the daemon falls back to `ROY_CWD` (env), then its own `current_dir`. Set `ROY_CWD` on the systemd/launchd unit to pin a default project root for every default-cwd session.
 
