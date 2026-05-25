@@ -116,6 +116,12 @@ struct RunArgs {
     /// Prefix journal entries with their seq.
     #[arg(long)]
     with_seq: bool,
+    /// Inline system/persona prompt for the session.
+    #[arg(long)]
+    system_prompt: Option<String>,
+    /// Read the system/persona prompt from a file (overrides --system-prompt).
+    #[arg(long)]
+    system_prompt_file: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -377,6 +383,14 @@ async fn send_cmd<W: AsyncWriteExt + Unpin>(w: &mut W, cmd: &ClientCommand) -> a
 async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     validate_flags(&args)?;
 
+    let system_prompt = match (args.system_prompt_file, args.system_prompt) {
+        (Some(path), _) => Some(
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("reading --system-prompt-file {}", path.display()))?,
+        ),
+        (None, inline) => inline,
+    };
+
     let stream = connect().await?;
     let (reader, mut writer) = stream.into_split();
     let mut events = BufReader::new(reader).lines();
@@ -391,7 +405,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
             permission: args.permission.clone(),
             resume: args.resume.clone(),
             tags: BTreeMap::default(),
-            system_prompt: None,
+            system_prompt,
         },
     )
     .await?;
@@ -1057,6 +1071,8 @@ mod tests {
             detach: false,
             resume: None,
             with_seq: false,
+            system_prompt: None,
+            system_prompt_file: None,
         }
     }
 
