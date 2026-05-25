@@ -150,6 +150,16 @@ struct RunArgs {
     /// Read the system/persona prompt from a file (overrides --system-prompt).
     #[arg(long)]
     system_prompt_file: Option<std::path::PathBuf>,
+    /// Project to spawn into (routes through roy-management). If absent,
+    /// `--cwd` is used directly against the daemon.
+    #[arg(long)]
+    project: Option<String>,
+    /// Tag map: `--tag k=v` (repeatable). Routes through roy-management.
+    #[arg(long = "tag", value_parser = parse_tag_kv)]
+    tags: Vec<(String, String)>,
+    /// Friendly display name for the session in roy-management.
+    #[arg(long)]
+    agent_name: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -438,7 +448,7 @@ async fn send_cmd<W: AsyncWriteExt + Unpin>(w: &mut W, cmd: &ClientCommand) -> a
 async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     validate_flags(&args)?;
 
-    let system_prompt = match (args.system_prompt_file, args.system_prompt) {
+    let system_prompt = match (args.system_prompt_file.clone(), args.system_prompt.clone()) {
         (Some(path), _) => Some(
             std::fs::read_to_string(&path)
                 .with_context(|| format!("reading --system-prompt-file {}", path.display()))?,
@@ -446,53 +456,86 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         (None, inline) => inline,
     };
 
-    let (mut writer, mut events) = open_daemon().await?;
+    let needs_mgmt = args.project.is_some() || !args.tags.is_empty() || args.agent_name.is_some();
 
-    // Spawn the session.
-    send_cmd(
-        &mut writer,
-        &ClientCommand::Spawn {
+    // Phase 1: create the session. Two paths, same outcome: a session id
+    // (and, for the direct path, the agent's resume_cursor — management
+    // does not currently surface it).
+    let (session, resume_cursor) = if needs_mgmt {
+        let req = crate::management::CreateSessionReq {
             agent: args.agent.clone(),
-            cwd: args.cwd.clone(),
+            project_id: args.project.clone(),
+            cwd: args.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
             model: args.model.clone(),
             permission: args.permission.clone(),
-            resume: args.resume.clone(),
-            system_prompt,
-        },
-    )
-    .await?;
-    let (session, resume_cursor) = loop {
-        match read_event(&mut events).await? {
-            ServerEvent::Spawning { agent } => {
-                if let Some(cwd) = args.cwd.as_ref() {
-                    eprintln!("roy run: spawning {agent} in {}…", cwd.display());
-                } else {
-                    eprintln!("roy run: spawning {agent}…");
+            system_prompt: system_prompt.clone(),
+            agent_name: args.agent_name.clone(),
+            tags: args.tags.iter().cloned().collect(),
+        };
+        let created = crate::management::create_session(req).await?;
+        eprintln!("roy run: session {} (via management)", created.session_id);
+        if args.detach {
+            let payload = serde_json::json!({
+                "type": "session",
+                "id": created.session_id,
+                "resume_cursor": serde_json::Value::Null,
+            });
+            println!("{payload}");
+            return Ok(ExitCode::SUCCESS);
+        }
+        (created.session_id, None)
+    } else {
+        let (mut writer, mut events) = open_daemon().await?;
+        send_cmd(
+            &mut writer,
+            &ClientCommand::Spawn {
+                agent: args.agent.clone(),
+                cwd: args.cwd.clone(),
+                model: args.model.clone(),
+                permission: args.permission.clone(),
+                resume: args.resume.clone(),
+                system_prompt,
+            },
+        )
+        .await?;
+        loop {
+            match read_event(&mut events).await? {
+                ServerEvent::Spawning { agent } => {
+                    if let Some(cwd) = args.cwd.as_ref() {
+                        eprintln!("roy run: spawning {agent} in {}…", cwd.display());
+                    } else {
+                        eprintln!("roy run: spawning {agent}…");
+                    }
                 }
-            }
-            ServerEvent::Spawned {
-                session,
-                resume_cursor,
-                ..
-            } => {
-                eprintln!("roy run: session {session}");
-                if args.detach {
-                    let payload = serde_json::json!({
-                        "type": "session",
-                        "id": session,
-                        "resume_cursor": resume_cursor,
-                    });
-                    println!("{payload}");
-                    return Ok(ExitCode::SUCCESS);
+                ServerEvent::Spawned {
+                    session,
+                    resume_cursor,
+                    ..
+                } => {
+                    eprintln!("roy run: session {session}");
+                    if args.detach {
+                        let payload = serde_json::json!({
+                            "type": "session",
+                            "id": session,
+                            "resume_cursor": resume_cursor,
+                        });
+                        println!("{payload}");
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                    break (session, Some(resume_cursor));
                 }
-                break (session, resume_cursor);
+                ServerEvent::Error { code, message, .. } => {
+                    anyhow::bail!("spawn failed: {code}: {message}");
+                }
+                other => anyhow::bail!("unexpected response to Spawn: {other:?}"),
             }
-            ServerEvent::Error { code, message, .. } => {
-                anyhow::bail!("spawn failed: {code}: {message}");
-            }
-            other => anyhow::bail!("unexpected response to Spawn: {other:?}"),
         }
     };
+
+    // Phase 2: attach, acquire input, send, drain. Both paths use a fresh
+    // daemon connection to keep the flow uniform — the management path
+    // already closed its HTTP connection.
+    let (mut writer, mut events) = open_daemon().await?;
 
     // Attach BEFORE sending so we never miss frames.
     send_cmd(
@@ -1002,6 +1045,9 @@ mod tests {
             with_seq: false,
             system_prompt: None,
             system_prompt_file: None,
+            project: None,
+            tags: Vec::new(),
+            agent_name: None,
         }
     }
 
