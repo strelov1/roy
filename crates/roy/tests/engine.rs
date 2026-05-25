@@ -5,6 +5,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use roy::engine::{EngineOpts, SessionEngine, SessionSpawnConfig};
 use roy::event::{StopReason, TurnEvent};
+use roy::session_store::SessionStore;
 use roy::transport::{AcpConfig, AcpTransport, PermissionPolicy, Transport};
 
 fn fake_acp_transport() -> Arc<dyn Transport> {
@@ -39,13 +40,11 @@ fn fake_acp_transport_with_channel(
 fn test_cfg() -> SessionSpawnConfig {
     SessionSpawnConfig {
         agent: roy::AgentPreset::Opencode,
-        cwd: std::env::current_dir().unwrap(),
-        project_id: None,
+        cwd: Some(std::env::current_dir().unwrap()),
         model: None,
         permission: None,
         resume_cursor: None,
         fixed_session_id: None,
-        tags: std::collections::BTreeMap::new(),
         system_prompt: None,
     }
 }
@@ -65,12 +64,27 @@ fn opts(journal_dir: PathBuf) -> EngineOpts {
     }
 }
 
+async fn tmp_store() -> Arc<SessionStore> {
+    let n = TMPDIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let path = std::env::temp_dir().join(format!(
+        "roy-engine-test-store-{}-{n}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    Arc::new(SessionStore::open(&path).await.unwrap())
+}
+
 #[tokio::test]
 async fn two_attaches_see_the_same_seq_stream_until_result() {
     let journal_dir = tmp_journal_dir();
-    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
-        .await
-        .unwrap();
+    let engine = SessionEngine::spawn(
+        fake_acp_transport(),
+        opts(journal_dir.clone()),
+        test_cfg(),
+        tmp_store().await,
+    )
+    .await
+    .unwrap();
 
     let attach_a = engine.attach(None).await.unwrap();
     let attach_b = engine.attach(None).await.unwrap();
@@ -124,9 +138,14 @@ async fn two_attaches_see_the_same_seq_stream_until_result() {
 #[tokio::test]
 async fn input_lease_is_exclusive_and_released_on_drop() {
     let journal_dir = tmp_journal_dir();
-    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
-        .await
-        .unwrap();
+    let engine = SessionEngine::spawn(
+        fake_acp_transport(),
+        opts(journal_dir.clone()),
+        test_cfg(),
+        tmp_store().await,
+    )
+    .await
+    .unwrap();
 
     let lease = engine.try_acquire_input().expect("first acquire");
     assert!(
@@ -146,9 +165,14 @@ async fn input_lease_is_exclusive_and_released_on_drop() {
 #[tokio::test]
 async fn late_attach_replays_full_journal() {
     let journal_dir = tmp_journal_dir();
-    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
-        .await
-        .unwrap();
+    let engine = SessionEngine::spawn(
+        fake_acp_transport(),
+        opts(journal_dir.clone()),
+        test_cfg(),
+        tmp_store().await,
+    )
+    .await
+    .unwrap();
 
     let lease = engine.try_acquire_input().unwrap();
     lease.send("hi").unwrap();
@@ -187,6 +211,7 @@ async fn cancel_turn_yields_cancelled_result() {
         fake_acp_transport_with(&["--cancellable"]),
         opts(journal_dir.clone()),
         test_cfg(),
+        tmp_store().await,
     )
     .await
     .unwrap();
@@ -247,7 +272,7 @@ async fn wait_for_result_concatenates_many_chunks_then_result() {
     engine_opts.broadcast_capacity = 2;
 
     let transport = fake_acp_transport_with(&["--flood", "50"]);
-    let engine = SessionEngine::spawn(transport, engine_opts, test_cfg())
+    let engine = SessionEngine::spawn(transport, engine_opts, test_cfg(), tmp_store().await)
         .await
         .unwrap();
 
@@ -278,9 +303,14 @@ async fn wait_for_result_concatenates_many_chunks_then_result() {
 #[tokio::test]
 async fn inject_note_appends_without_lease() {
     let journal_dir = tmp_journal_dir();
-    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
-        .await
-        .unwrap();
+    let engine = SessionEngine::spawn(
+        fake_acp_transport(),
+        opts(journal_dir.clone()),
+        test_cfg(),
+        tmp_store().await,
+    )
+    .await
+    .unwrap();
 
     // Hold the input lease, as an interactive client would.
     let _lease = engine.try_acquire_input().expect("first lease");
@@ -312,6 +342,7 @@ async fn close_during_turn_winds_down_and_does_not_hang() {
         fake_acp_transport_with(&["--cancellable"]),
         opts(journal_dir.clone()),
         test_cfg(),
+        tmp_store().await,
     )
     .await
     .unwrap();
@@ -373,6 +404,7 @@ async fn first_turn_persona_is_journaled_as_system() {
         fake_acp_transport_first_turn(),
         opts(journal_dir.clone()),
         cfg,
+        tmp_store().await,
     )
     .await
     .unwrap();

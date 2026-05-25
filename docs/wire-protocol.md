@@ -109,7 +109,7 @@ tool result body). The JSON shapes are identical across all transports.
 
 | op                | fields                                                                                          |
 |-------------------|-------------------------------------------------------------------------------------------------|
-| `spawn`           | `agent`, optional `project_id`, `model`, `permission`, `resume`, `system_prompt`                |
+| `spawn`           | `agent`, optional `cwd`, `model`, `permission`, `resume`, `system_prompt`                       |
 | `attach`          | `session`, optional `from_seq`                                                                  |
 | `acquire_input`   | `session`                                                                                       |
 | `send`            | `session`, `text`                                                                               |
@@ -121,9 +121,6 @@ tool result body). The JSON shapes are identical across all transports.
 | `resume`          | `session`                                                                                       |
 | `read_journal`    | `session`, optional `from_seq`, optional `max_entries`                                          |
 | `inject`          | `session`, `text`, optional `source_session`                                                    |
-| `list_projects`   | —                                                                                               |
-| `create_project`  | `name`                                                                                          |
-| `delete_project`  | `project_id`                                                                                    |
 | `list_agents`     | —                                                                                               |
 
 `permission` is `"allow"` or `"deny"`. `agent` is one of `claude`,
@@ -133,20 +130,16 @@ tool result body). The JSON shapes are identical across all transports.
 an optional inline persona/system prompt. The daemon injects it via ACP
 `_meta.systemPrompt = { append }` for presets that support it (`claude`,
 `opencode`) and as a first journaled `System` turn otherwise (`gemini`,
-`codex`), and snapshots it into `SessionMetadata` so it is re-applied on
+`codex`), and snapshots it into the boot-kit row so it is re-applied on
 `resume`.
 
-`spawn.project_id` is a UUID string referencing an existing project; omit or
-set to `null` for an orphan session. When `project_id` is given, the session's
-`cwd` is the project directory (`workspace_dir/<name>/`). When absent, the
-daemon creates `workspace_dir/<session_id>/` and uses that as `cwd`.
+`spawn.cwd` is an optional working directory for the session. When omitted,
+the daemon uses the current working directory or the value of `ROY_CWD` env.
+This field replaces the previous `project_id` + implicit workspace routing.
 
-`create_project.name` must match `^[A-Za-z0-9_-]+$`. The daemon derives the
-on-disk path as `workspace_dir/name` and creates the directory.
-
-`delete_project` is a cascade: the project registry entry is removed and every
-session belonging to that project has its `.jsonl` and `.meta.json` deleted.
-The on-disk `workspace_dir/<name>/` directory is **not** removed.
+Project and tag operations now route through `roy-management` HTTP API
+(default `127.0.0.1:8079`), not the Unix socket. See `roy projects --help`
+and `roy set-tags --help` for CLI usage.
 
 `inject` appends a `note` event to a **live** session's journal/broadcast
 without taking the input lease (so it lands even while an interactive client
@@ -160,8 +153,8 @@ archived one first). Used by the `roy inject` CLI for agent self-reporting.
 
 | kind                | fields                                                                                                  |
 |---------------------|---------------------------------------------------------------------------------------------------------|
-| `spawned`           | `session`, optional `project_id`, optional `resume_cursor`                                              |
-| `spawning`          | `agent`, optional `project_id` — ack emitted at start of `spawn` before agent process launch            |
+| `spawned`           | `session`, optional `resume_cursor`                                                                     |
+| `spawning`          | `agent` — ack emitted at start of `spawn` before agent process launch                                   |
 | `attached`          | `session`, `seq_at_attach`                                                                              |
 | `frame`             | `session`, `entry` (the `JournalEntry` shape above)                                                     |
 | `input_acquired`    | `session`, `acquired: bool`                                                                             |
@@ -169,31 +162,18 @@ archived one first). Used by the `roy inject` CLI for agent self-reporting.
 | `injected`          | `session`, `seq` — ack to `inject` (the appended `note`'s seq)                                          |
 | `detached`          | `session`                                                                                               |
 | `closed`            | `session`                                                                                               |
-| `listed`            | `sessions: [{id, project_id}]`                                                                          |
-| `listed_archived`   | `sessions: [{id, project_id}]`                                                                          |
+| `listed`            | `sessions: [{id}]`                                                                                      |
+| `listed_archived`   | `sessions: [{id}]`                                                                                      |
 | `resumed`           | `session`, optional `resume_cursor`                                                                     |
 | `resuming`          | `session` — ack emitted at start of `resume` before agent process re-launch                             |
 | `journal_read`      | `session`, `entries: [JournalEntry]`, `next_seq`, `has_more: bool`                                       |
-| `projects_listed`   | `projects: [Project]`                                                                                   |
-| `project_created`   | `project: Project`                                                                                      |
-| `project_deleted`   | `project_id: string`, `deleted_sessions: [string]`                                                      |
 | `agents_list`       | `agents: [AgentInfo]`, `config_path: string`, `status: AgentsConfigStatus`                              |
 | `error`             | optional `session`, typed `code` (see below), `message`                                                 |
-
-`spawned.project_id` is `null` for an orphan session, a UUID string otherwise.
 
 `SessionInfo` shape (used in `listed` / `listed_archived`):
 
 ```json
-{"id": "<session_id>", "project_id": "<uuid>" | null}
-```
-
-`project_id: null` indicates an orphan session.
-
-`Project` shape (used in `projects_listed` / `project_created`):
-
-```json
-{"id": "<uuid>", "name": "<name>", "path": "<absolute_path>", "created_at": 1722345600}
+{"id": "<session_id>"}
 ```
 
 `spawned.resume_cursor` is the cursor to pass back to a later `spawn`'s
@@ -242,9 +222,7 @@ See [agents-config.md](./agents-config.md) for the user-facing reference.
 
 `bad_request`, `spawn_failed`, `no_session`, `attach_failed`,
 `archive_read_failed`, `no_lease`, `send_failed`, `close_failed`,
-`list_archived_failed`, `resume_failed`, `read_journal_failed`,
-`no_project`, `project_exists`, `create_project_failed`,
-`delete_project_failed`, `invalid_project_name`.
+`list_archived_failed`, `resume_failed`, `read_journal_failed`.
 
 Forward-compat: any unknown string is preserved in
 `ErrorCode::Other(s)` on parsing and round-trips verbatim — an older

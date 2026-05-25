@@ -1,6 +1,9 @@
 //! axum router + handlers for agent CRUD and session launch.
 //! axum 0.8 path syntax uses `{id}` (not `:id`).
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -49,6 +52,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/agents/{id}/run", post(run_agent))
         .route("/presets", get(list_presets))
+        .route("/projects", get(list_projects).post(create_project))
+        .route("/projects/{id}", axum::routing::delete(delete_project))
+        .route("/sessions", get(list_sessions).post(create_session))
+        .route("/sessions/{id}", get(get_session).patch(patch_session))
+        .route("/sessions/{id}/tags", axum::routing::put(put_tags))
         .with_state(state)
 }
 
@@ -132,7 +140,6 @@ async fn start_builder(
 ) -> Result<(StatusCode, Json<BuilderResp>), ApiError> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
 
-    // 1. Target agent: either existing or a fresh stub.
     let target = if let Some(id) = req.existing_id {
         s.store.get(&id).await?
     } else {
@@ -149,7 +156,6 @@ async fn start_builder(
             .await?
     };
 
-    // 2. Builder seed.
     let builder = s.store.get_by_slug("builder").await.map_err(|e| match e {
         StoreError::NotFound(_) => ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -158,7 +164,6 @@ async fn start_builder(
         other => other.into(),
     })?;
 
-    // 3. Compose the per-session system prompt.
     let system_prompt = format!(
         "{base}\n\n## Current task\nYou are editing agent id={id}. \
          Use only `roy agents update {id} ...` to apply changes. Never call create or delete.",
@@ -166,7 +171,6 @@ async fn start_builder(
         id = target.id,
     );
 
-    // 4. Spawn.
     let session = roy_client::spawn(
         &s.socket_path,
         &builder.preset,
@@ -204,6 +208,239 @@ fn validate_preset(preset: &str) -> Result<(), ApiError> {
     }
 }
 
+async fn list_projects(
+    State(s): State<AppState>,
+) -> Result<Json<Vec<crate::meta_store::Project>>, ApiError> {
+    s.meta.list_projects().await.map(Json).map_err(meta_to_api)
+}
+
+#[derive(serde::Deserialize)]
+struct NewProject {
+    name: String,
+}
+
+async fn create_project(
+    State(s): State<AppState>,
+    Json(req): Json<NewProject>,
+) -> Result<(StatusCode, Json<crate::meta_store::Project>), ApiError> {
+    let p = s
+        .meta
+        .create_project(&req.name)
+        .await
+        .map_err(meta_to_api)?;
+    Ok((StatusCode::CREATED, Json(p)))
+}
+
+async fn delete_project(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    s.meta.delete_project(&id).await.map_err(meta_to_api)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CreateSessionReq {
+    agent: String,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    permission: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    agent_name: Option<String>,
+    #[serde(default)]
+    tags: BTreeMap<String, String>,
+}
+
+async fn create_session(
+    State(s): State<AppState>,
+    Json(req): Json<CreateSessionReq>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Resolve project_id -> cwd if provided; else use req.cwd verbatim.
+    let cwd: Option<PathBuf> = if let Some(pid) = &req.project_id {
+        let projects = s.meta.list_projects().await.map_err(meta_to_api)?;
+        let p = projects
+            .into_iter()
+            .find(|p| &p.id == pid)
+            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("invalid project: {pid}")))?;
+        Some(PathBuf::from(p.path))
+    } else {
+        req.cwd.clone().map(PathBuf::from)
+    };
+
+    let sid = s
+        .daemon
+        .spawn(crate::roy_client::SpawnRequest {
+            agent: req.agent.clone(),
+            cwd,
+            model: req.model.clone(),
+            permission: req.permission.clone(),
+            system_prompt: req.system_prompt.clone(),
+        })
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("daemon: {e}")))?;
+
+    let meta = crate::meta_store::SessionMeta {
+        session_id: sid.clone(),
+        project_id: req.project_id.clone(),
+        agent_id: None,
+        agent_name: req.agent_name.clone(),
+        display_label: None,
+        tags: req.tags.clone(),
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    if let Err(meta_err) = s.meta.upsert_session_meta(&meta).await {
+        // Compensating action: the daemon already spawned the session, but
+        // we couldn't persist metadata. Close the orphaned session so it
+        // doesn't leak. Log the close error if it also fails, but propagate
+        // the original meta error to the caller.
+        tracing::error!(error = %meta_err, session = %sid, "meta persist failed; closing session");
+        if let Err(close_err) = s.daemon.close(&sid).await {
+            tracing::error!(error = %close_err, session = %sid, "compensating close failed");
+        }
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("meta_persist_failed; session was created and closed: {sid}"),
+        ));
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "session_id": sid,
+            "project_id": req.project_id,
+            "tags": req.tags,
+            "agent_name": req.agent_name,
+        })),
+    ))
+}
+
+async fn list_sessions(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    use std::collections::{HashMap, HashSet};
+
+    let (live, archived) = tokio::join!(s.daemon.list(), s.daemon.list_archived());
+    let live = live.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let archived = archived.unwrap_or_default();
+    let live_set: HashSet<&String> = live.iter().collect();
+    let mut sids: Vec<String> = live
+        .iter()
+        .cloned()
+        .chain(archived.iter().cloned())
+        .collect();
+    sids.sort();
+    sids.dedup();
+
+    let metas = s
+        .meta
+        .list_session_metas(&sids)
+        .await
+        .map_err(meta_to_api)?;
+    let meta_by_sid: HashMap<String, _> = metas
+        .into_iter()
+        .map(|m| (m.session_id.clone(), m))
+        .collect();
+
+    let out: Vec<serde_json::Value> = sids
+        .into_iter()
+        .map(|sid| {
+            let m = meta_by_sid.get(&sid);
+            json!({
+                "session_id": sid,
+                "project_id": m.and_then(|m| m.project_id.clone()),
+                "agent_name": m.and_then(|m| m.agent_name.clone()),
+                "tags": m.map(|m| m.tags.clone()).unwrap_or_default(),
+                "live": live_set.contains(&sid),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::Value::Array(out)))
+}
+
+async fn get_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let meta = s.meta.get_session_meta(&id).await.map_err(meta_to_api)?;
+    let live = s.daemon.list().await.unwrap_or_default();
+    Ok(Json(json!({
+        "session_id": id,
+        "meta": meta,
+        "live": live.contains(&id),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct TagsBody {
+    tags: BTreeMap<String, String>,
+}
+
+async fn put_tags(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<TagsBody>,
+) -> Result<StatusCode, ApiError> {
+    s.meta
+        .replace_tags(&id, &body.tags)
+        .await
+        .map_err(meta_to_api)?;
+    Ok(StatusCode::OK)
+}
+
+#[derive(serde::Deserialize)]
+struct PatchSession {
+    #[serde(default)]
+    agent_name: Option<String>,
+    #[serde(default)]
+    display_label: Option<String>,
+}
+
+async fn patch_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchSession>,
+) -> Result<StatusCode, ApiError> {
+    let mut meta = s
+        .meta
+        .get_session_meta(&id)
+        .await
+        .map_err(meta_to_api)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("session: {id}")))?;
+    if body.agent_name.is_some() {
+        meta.agent_name = body.agent_name;
+    }
+    if body.display_label.is_some() {
+        meta.display_label = body.display_label;
+    }
+    s.meta
+        .upsert_session_meta(&meta)
+        .await
+        .map_err(meta_to_api)?;
+    Ok(StatusCode::OK)
+}
+
+fn meta_to_api(e: crate::meta_store::MetaError) -> ApiError {
+    use crate::meta_store::MetaError::*;
+    match e {
+        NotFound(m) => ApiError(StatusCode::NOT_FOUND, m),
+        Conflict(m) => ApiError(StatusCode::CONFLICT, m),
+        Invalid(m) => ApiError(StatusCode::BAD_REQUEST, m),
+        Db(e) => {
+            tracing::error!(error=%e, "meta db error");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+        }
+        Io(e) => {
+            tracing::error!(error=%e, "meta io error");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,15 +450,21 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_state() -> AppState {
+        use crate::meta_store::MetaStore;
+
         let dir = tempfile::tempdir().unwrap();
         let pool = roy_agents::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
+        MetaStore::apply_migrations(&pool).await.unwrap();
+        let workspace = dir.path().join("workspace");
         // Keep the temp dir alive for the test process lifetime — dropping it
         // would invalidate the SQLite file referenced by the pool.
         std::mem::forget(dir);
         AppState {
-            store: roy_agents::Store::new(pool),
+            store: roy_agents::Store::new(pool.clone()),
+            meta: MetaStore::new(pool, workspace),
+            daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
         }
     }
@@ -287,6 +530,221 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn projects_create_list_delete() {
+        let app = router(test_state().await);
+        // create
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"name":"p1"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let p: crate::meta_store::Project =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(p.name, "p1");
+
+        // list
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/projects").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let listed: Vec<crate::meta_store::Project> =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(listed.len(), 1);
+
+        // duplicate is 409
+        let dup = app
+            .clone()
+            .oneshot(
+                Request::post("/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"name":"p1"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dup.status(), StatusCode::CONFLICT);
+
+        // delete
+        let del = app
+            .oneshot(
+                Request::delete(format!("/projects/{}", p.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn sessions_post_happy_path() {
+        use std::sync::Arc;
+
+        let mut st = test_state().await;
+        let mock = Arc::new(crate::roy_client::mock::MockDaemonClient::new().with_spawn("sid-1"));
+        st.daemon = mock.clone();
+        let app = router(st);
+
+        let body = serde_json::to_vec(&json!({
+            "agent": "claude",
+            "tags": {"env": "prod"},
+            "agent_name": "Reviewer"
+        }))
+        .unwrap();
+        let resp = app
+            .oneshot(
+                Request::post("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let v: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(v["session_id"], "sid-1");
+        assert_eq!(v["agent_name"], "Reviewer");
+        assert_eq!(v["tags"]["env"], "prod");
+
+        // mock recorded one spawn
+        assert_eq!(mock.recorded_spawns.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_joins_live_and_meta() {
+        use std::sync::{Arc, Mutex};
+
+        let mut st = test_state().await;
+        let mock = Arc::new(crate::roy_client::mock::MockDaemonClient {
+            spawn_response: Mutex::new(Some(Ok("sid-A".into()))),
+            list_response: Mutex::new(Some(vec!["sid-A".into(), "sid-B".into()])),
+            ..Default::default()
+        });
+        st.daemon = mock;
+        // Pre-insert meta for sid-A only; sid-B is orphan
+        st.meta
+            .upsert_session_meta(&crate::meta_store::SessionMeta {
+                session_id: "sid-A".into(),
+                project_id: None,
+                agent_id: None,
+                agent_name: Some("Rev".into()),
+                display_label: None,
+                tags: BTreeMap::from([("k".into(), "v".into())]),
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        let app = router(st);
+        let resp = app
+            .oneshot(Request::get("/sessions").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        let a = arr.iter().find(|r| r["session_id"] == "sid-A").unwrap();
+        assert_eq!(a["agent_name"], "Rev");
+        let b = arr.iter().find(|r| r["session_id"] == "sid-B").unwrap();
+        assert_eq!(b["agent_name"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn sessions_post_rollback_on_meta_failure() {
+        use std::sync::Arc;
+
+        let mut st = test_state().await;
+        let mock = Arc::new(crate::roy_client::mock::MockDaemonClient::new().with_spawn("sid-X"));
+        st.daemon = mock.clone();
+        // Force the upsert_session_meta to fail by closing the pool out from
+        // under the MetaStore. The spawn happens first (mock, succeeds), then
+        // the meta write fails, which must trigger a compensating close.
+        st.meta.pool().close().await;
+        let app = router(st);
+
+        let body = serde_json::to_vec(&json!({"agent": "claude"})).unwrap();
+        let resp = app
+            .oneshot(
+                Request::post("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Mock recorded the compensating Close
+        assert_eq!(mock.recorded_closes.lock().unwrap().as_slice(), &["sid-X"]);
+    }
+
+    #[tokio::test]
+    async fn put_tags_replaces() {
+        let st = test_state().await;
+        st.meta
+            .upsert_session_meta(&crate::meta_store::SessionMeta {
+                session_id: "sid".into(),
+                project_id: None,
+                agent_id: None,
+                agent_name: None,
+                display_label: None,
+                tags: BTreeMap::from([("old".into(), "1".into())]),
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        let app = router(st.clone());
+
+        let body = serde_json::to_vec(&json!({"tags": {"new": "2"}})).unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri("/sessions/sid/tags")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let back = st.meta.get_session_meta("sid").await.unwrap().unwrap();
+        assert_eq!(back.tags, BTreeMap::from([("new".into(), "2".into())]));
+    }
+
+    async fn state_for_builder_test(socket: PathBuf) -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = roy_agents::open(&dir.path().join("agents.db"))
+            .await
+            .unwrap();
+        crate::meta_store::MetaStore::apply_migrations(&pool)
+            .await
+            .unwrap();
+        let workspace = dir.path().join("workspace");
+        // Leak the tempdir: pool keeps reading from this file for the test.
+        std::mem::forget(dir);
+        AppState {
+            store: roy_agents::Store::new(pool.clone()),
+            meta: crate::meta_store::MetaStore::new(pool, workspace),
+            daemon: std::sync::Arc::new(crate::roy_client::mock::MockDaemonClient::new()),
+            socket_path: socket,
+        }
+    }
+
+    #[tokio::test]
     async fn _builder_endpoint_creates_stub_and_returns_session() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
@@ -312,13 +770,7 @@ mod tests {
             w.flush().await.unwrap();
         });
 
-        let pool = roy_agents::open(&dir.path().join("agents.db"))
-            .await
-            .unwrap();
-        let state = AppState {
-            store: roy_agents::Store::new(pool),
-            socket_path: socket,
-        };
+        let state = state_for_builder_test(socket).await;
         let app = router(state.clone());
         let resp = app
             .oneshot(
@@ -333,26 +785,17 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let agent_id = json["agent_id"].as_str().unwrap().to_string();
-        assert!(!agent_id.is_empty(), "agent_id must be non-empty");
+        assert!(!agent_id.is_empty());
         assert_eq!(json["session"], "sess-99");
 
-        // Stub exists.
         let stub = state.store.get(&agent_id).await.unwrap();
         assert_eq!(stub.name, "Untitled");
 
-        // The Spawn captured by the fake daemon must carry the builder prompt
-        // and mention the target agent id in system_prompt.
         let cmd = rx.await.unwrap();
         assert_eq!(cmd["op"], "spawn");
         let sp = cmd["system_prompt"].as_str().unwrap();
-        assert!(
-            sp.contains("Agent Builder"),
-            "must include builder seed prompt; got: {sp}"
-        );
-        assert!(
-            sp.contains(&agent_id),
-            "must mention target agent id; got: {sp}"
-        );
+        assert!(sp.contains("Agent Builder"), "got: {sp}");
+        assert!(sp.contains(&agent_id), "got: {sp}");
         daemon.await.unwrap();
     }
 
@@ -382,15 +825,7 @@ mod tests {
             w.flush().await.unwrap();
         });
 
-        let pool = roy_agents::open(&dir.path().join("agents.db"))
-            .await
-            .unwrap();
-        let state = AppState {
-            store: roy_agents::Store::new(pool),
-            socket_path: socket,
-        };
-
-        // Pre-insert an existing agent.
+        let state = state_for_builder_test(socket).await;
         let existing = state
             .store
             .create(roy_agents::NewAgent {
@@ -422,22 +857,12 @@ mod tests {
         assert_eq!(json["agent_id"], existing.id);
         assert_eq!(json["session"], "sess-edit");
 
-        // No stub was created — only the builder seed + the pre-inserted agent.
         let all = state.store.list().await.unwrap();
-        assert_eq!(
-            all.len(),
-            2,
-            "expected builder seed + pre-existing; got {}",
-            all.len()
-        );
+        assert_eq!(all.len(), 2);
 
-        // Captured Spawn mentions the existing id in system_prompt.
         let cmd = rx.await.unwrap();
         let sp = cmd["system_prompt"].as_str().unwrap();
-        assert!(
-            sp.contains(&existing.id),
-            "system_prompt must mention existing id; got: {sp}"
-        );
+        assert!(sp.contains(&existing.id), "got: {sp}");
         daemon.await.unwrap();
     }
 }

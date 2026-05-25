@@ -35,10 +35,11 @@ pub struct TelegramConfig {
     pub allowed_user_ids: Vec<u64>,
     /// roy preset to spawn for new chats (`claude` / `gemini` / `opencode` / `codex`).
     pub preset: String,
-    /// `Some(project_id)` to scope spawned sessions to that project; `None`
-    /// to use the daemon's default cwd.
+    /// Filesystem path to use as the agent's cwd when a new session is
+    /// spawned for a chat. `None` lets the daemon allocate an orphan
+    /// `<workspace>/<session_id>/` directory.
     #[serde(default)]
-    pub project_id: Option<String>,
+    pub cwd: Option<std::path::PathBuf>,
     #[serde(default = "default_turn_timeout_secs")]
     pub turn_timeout_secs: u64,
 }

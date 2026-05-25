@@ -1,14 +1,15 @@
 //! SQLite pool + auto-migrate for the shared agent store. WAL mode (so the
 //! daemon, scheduler, and management can share the file), 5s busy timeout,
-//! mode 0600 (prompts may be sensitive).
+//! mode 0600 (prompts may be sensitive). The `_sqlx_migrations` table is
+//! shared with `roy-management` (which owns v2 onward), so this crate's
+//! migrator runs with `set_ignore_missing(true)` to tolerate rows it
+//! doesn't own.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
-
-pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("migrations/sqlite");
 
 pub async fn open(path: &Path) -> Result<SqlitePool> {
     if let Some(parent) = path.parent() {
@@ -25,7 +26,9 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .connect_with(options)
         .await
         .with_context(|| format!("opening SQLite at {}", path.display()))?;
-    MIGRATOR.run(&pool).await.context("running migrations")?;
+    let mut migrator = sqlx::migrate!("migrations/sqlite");
+    migrator.set_ignore_missing(true);
+    migrator.run(&pool).await.context("running migrations")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -6,13 +6,13 @@
 //! See `docs/architecture.md`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::event::TurnEvent;
 use crate::journal::{JournalEntry, Seq};
-use crate::project::Project;
 
 /// Typed error codes emitted in `ServerEvent::Error`. Wire form is the
 /// snake_case string returned by `as_wire`; unknown strings parse as
@@ -47,17 +47,6 @@ pub enum ErrorCode {
     CancelFailed,
     /// `SetModel` failed (no such session, metadata write failed).
     SetModelFailed,
-    /// The named project id is not in the registry.
-    NoProject,
-    /// `CreateProject` failed because a project with that name already exists.
-    ProjectExists,
-    /// `CreateProject` failed (FS / persist).
-    CreateProjectFailed,
-    /// `DeleteProject` failed (registry write).
-    DeleteProjectFailed,
-    /// `CreateProject` failed because the name contains invalid characters or
-    /// is otherwise malformed (v2: name must match `^[A-Za-z0-9_-]+$`).
-    InvalidProjectName,
     /// I/O failure reading/writing `agents.toml` (permission denied, disk
     /// full, etc.). Parse and validation errors do NOT use this code —
     /// they're surfaced via `AgentsList { status: Invalid }`.
@@ -83,11 +72,6 @@ impl ErrorCode {
             ErrorCode::DeleteFailed => "delete_failed",
             ErrorCode::CancelFailed => "cancel_failed",
             ErrorCode::SetModelFailed => "set_model_failed",
-            ErrorCode::NoProject => "no_project",
-            ErrorCode::ProjectExists => "project_exists",
-            ErrorCode::CreateProjectFailed => "create_project_failed",
-            ErrorCode::DeleteProjectFailed => "delete_project_failed",
-            ErrorCode::InvalidProjectName => "invalid_project_name",
             ErrorCode::ConfigError => "config_error",
             ErrorCode::Other(s) => s.as_str(),
         }
@@ -109,11 +93,6 @@ impl ErrorCode {
             "delete_failed" => ErrorCode::DeleteFailed,
             "cancel_failed" => ErrorCode::CancelFailed,
             "set_model_failed" => ErrorCode::SetModelFailed,
-            "no_project" => ErrorCode::NoProject,
-            "project_exists" => ErrorCode::ProjectExists,
-            "create_project_failed" => ErrorCode::CreateProjectFailed,
-            "delete_project_failed" => ErrorCode::DeleteProjectFailed,
-            "invalid_project_name" => ErrorCode::InvalidProjectName,
             "config_error" => ErrorCode::ConfigError,
             other => ErrorCode::Other(other.to_string()),
         }
@@ -147,13 +126,13 @@ pub enum ClientCommand {
     /// opencode, codex). `resume` re-attaches an agent-side session via the
     /// transport's resume_cursor.
     ///
-    /// `project_id: Some(id)` — spawn inside an existing project's directory.
-    /// `project_id: None` — orphan session; daemon allocates
+    /// `cwd: Some(path)` — spawn inside the given directory.
+    /// `cwd: None` — orphan session; daemon allocates
     /// `<workspace>/<session_id>/` as the cwd.
     Spawn {
         agent: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        project_id: Option<String>,
+        cwd: Option<PathBuf>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         /// `allow` / `deny`. Overrides the preset's default `PermissionPolicy`.
@@ -161,8 +140,6 @@ pub enum ClientCommand {
         permission: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume: Option<String>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        tags: BTreeMap<String, String>,
         /// Inline system/persona prompt. The daemon injects it (ACP
         /// `_meta.systemPrompt` where the preset supports it, else as a first
         /// journaled turn) and snapshots it into `SessionMetadata`.
@@ -209,16 +186,7 @@ pub enum ClientCommand {
     /// metadata persisted beside the journal, reuses the same session id and
     /// journal, and forwards the stored cursor to `Transport::open` for the
     /// agent-side resume (e.g. ACP `session/load`).
-    Resume {
-        session: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tags: Option<BTreeMap<String, String>>,
-    },
-    /// Replace the live session's tag map; emits `ServerEvent::SessionUpdated`.
-    SetTags {
-        session: String,
-        tags: BTreeMap<String, String>,
-    },
+    Resume { session: String },
     /// Snapshot read of a session's journal — works on live AND archived
     /// sessions. Unlike `Attach`, it does not subscribe to the live broadcast;
     /// the daemon returns the current journal slice and the client decides
@@ -262,16 +230,6 @@ pub enum ClientCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_session: Option<String>,
     },
-    /// Return all projects in the registry.
-    ListProjects,
-    /// Create a project with the given name inside the workspace. The name
-    /// must match `^[A-Za-z0-9_-]+$` and must be unique. The daemon creates
-    /// `<workspace_dir>/<name>/` automatically.
-    CreateProject { name: String },
-    /// Cascade-delete a project: every session it owns is closed and its
-    /// journal + metadata files are erased, then the registry entry is
-    /// removed. Synchronous.
-    DeleteProject { project_id: String },
     /// Read `~/.config/roy/agents.toml` (creating a sample if missing) and
     /// return the configured agents + models. Pull-only: clients call this
     /// whenever they want fresh data.
@@ -283,9 +241,6 @@ pub enum ClientCommand {
 pub enum FireTarget {
     Spawn {
         preset: String,
-        /// `Some(project_id)` to spawn inside a project's dir; `None` for orphan.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        project_id: Option<String>,
         /// Inline system/persona prompt (see `ClientCommand::Spawn`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
@@ -300,12 +255,9 @@ pub enum FireTarget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ServerEvent {
-    /// Response to `Spawn`. `project_id` is `Some` when the session was
-    /// spawned inside a project, `None` for orphan sessions.
+    /// Response to `Spawn`.
     Spawned {
         session: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        project_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_cursor: Option<String>,
     },
@@ -314,11 +266,7 @@ pub enum ServerEvent {
     /// process launch + ACP `initialize` + `session/new` round-trip. The
     /// session id is not yet known at this point — clients correlate by
     /// request order on their own connection.
-    Spawning {
-        agent: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        project_id: Option<String>,
-    },
+    Spawning { agent: String },
     /// Response to `Attach`. `seq_at_attach` is the next seq after the replay.
     /// `agent` is the preset name the session was spawned with (e.g. `claude`,
     /// `gemini`) — read from the live engine or the on-disk metadata.
@@ -357,14 +305,6 @@ pub enum ServerEvent {
     Listed { sessions: Vec<SessionInfo> },
     /// Response to `ListArchived`.
     ListedArchived { sessions: Vec<SessionInfo> },
-    /// A session's metadata (model or tags) was updated.
-    SessionUpdated {
-        session: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tags: Option<BTreeMap<String, String>>,
-    },
     /// Response to `Resume`. Same session id as requested; `resume_cursor`
     /// reflects what the transport reported after resuming.
     Resumed {
@@ -423,17 +363,6 @@ pub enum ServerEvent {
         code: ErrorCode,
         message: String,
     },
-    /// Response to `ListProjects`.
-    ProjectsListed { projects: Vec<Project> },
-    /// Response to `CreateProject`.
-    ProjectCreated { project: Project },
-    /// Response to `DeleteProject`. Lists the session ids that were
-    /// cascade-deleted so the client can prune them from its caches
-    /// atomically.
-    ProjectDeleted {
-        project_id: String,
-        deleted_sessions: Vec<String>,
-    },
     /// Response to `ListAgents`. `agents` is empty when `status` is `Created`
     /// or `Invalid`; `config_path` is always the resolved path even on errors
     /// so the UI can show it.
@@ -448,8 +377,6 @@ pub enum ServerEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
     pub agent: String,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -477,21 +404,19 @@ mod tests {
     fn spawn_command_roundtrips() {
         roundtrip(&ClientCommand::Spawn {
             agent: "opencode".into(),
-            project_id: Some("proj-uuid".into()),
+            cwd: Some(PathBuf::from("/tmp/proj")),
             model: None,
             permission: Some("allow".into()),
             resume: None,
-            tags: BTreeMap::new(),
             system_prompt: None,
         });
-        // Orphan spawn (no project)
+        // Orphan spawn (no cwd)
         roundtrip(&ClientCommand::Spawn {
             agent: "claude".into(),
-            project_id: None,
+            cwd: None,
             model: None,
             permission: None,
             resume: None,
-            tags: BTreeMap::new(),
             system_prompt: None,
         });
     }
@@ -512,26 +437,6 @@ mod tests {
     fn list_command_serializes_as_bare_op() {
         let s = serde_json::to_string(&ClientCommand::List).unwrap();
         assert_eq!(s, "{\"op\":\"list\"}");
-    }
-
-    #[test]
-    fn list_projects_serializes_as_bare_op() {
-        let s = serde_json::to_string(&ClientCommand::ListProjects).unwrap();
-        assert_eq!(s, "{\"op\":\"list_projects\"}");
-    }
-
-    #[test]
-    fn create_project_roundtrips() {
-        roundtrip(&ClientCommand::CreateProject {
-            name: "demo".into(),
-        });
-    }
-
-    #[test]
-    fn delete_project_roundtrips() {
-        roundtrip(&ClientCommand::DeleteProject {
-            project_id: "abc".into(),
-        });
     }
 
     #[test]
@@ -582,11 +487,6 @@ mod tests {
             ErrorCode::DeleteFailed,
             ErrorCode::CancelFailed,
             ErrorCode::SetModelFailed,
-            ErrorCode::NoProject,
-            ErrorCode::ProjectExists,
-            ErrorCode::CreateProjectFailed,
-            ErrorCode::DeleteProjectFailed,
-            ErrorCode::InvalidProjectName,
             ErrorCode::ConfigError,
         ];
         for code in cases {
@@ -609,16 +509,12 @@ mod tests {
 
     #[test]
     fn spawned_event_roundtrips() {
-        // With project_id
         roundtrip(&ServerEvent::Spawned {
             session: "sid".into(),
-            project_id: Some("pid".into()),
             resume_cursor: None,
         });
-        // Orphan (no project_id)
         roundtrip(&ServerEvent::Spawned {
             session: "sid2".into(),
-            project_id: None,
             resume_cursor: Some("cursor-1".into()),
         });
     }
@@ -627,11 +523,9 @@ mod tests {
     fn spawning_event_roundtrips() {
         roundtrip(&ServerEvent::Spawning {
             agent: "claude".into(),
-            project_id: Some("pid".into()),
         });
         roundtrip(&ServerEvent::Spawning {
             agent: "opencode".into(),
-            project_id: None,
         });
     }
 
@@ -646,7 +540,6 @@ mod tests {
     fn spawning_event_wire_format() {
         let json = serde_json::to_string(&ServerEvent::Spawning {
             agent: "claude".into(),
-            project_id: None,
         })
         .unwrap();
         assert_eq!(json, r#"{"kind":"spawning","agent":"claude"}"#);
@@ -659,33 +552,6 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json, r#"{"kind":"resuming","session":"sid"}"#);
-    }
-
-    #[test]
-    fn project_created_event_roundtrips() {
-        use std::path::PathBuf;
-        let p = Project {
-            id: "pid".into(),
-            name: "my-proj".into(),
-            path: PathBuf::from("/home/user/.roy/workspace/my-proj"),
-            created_at: 1,
-        };
-        roundtrip(&ServerEvent::ProjectCreated { project: p });
-    }
-
-    #[test]
-    fn project_deleted_event_roundtrips() {
-        roundtrip(&ServerEvent::ProjectDeleted {
-            project_id: "pid".into(),
-            deleted_sessions: vec!["s1".into(), "s2".into()],
-        });
-    }
-
-    #[test]
-    fn projects_listed_event_roundtrips() {
-        roundtrip(&ServerEvent::ProjectsListed {
-            projects: Vec::new(),
-        });
     }
 
     #[test]
@@ -756,11 +622,10 @@ mod tests {
     fn spawn_with_system_prompt_roundtrips() {
         roundtrip(&ClientCommand::Spawn {
             agent: "claude".into(),
-            project_id: None,
+            cwd: None,
             model: None,
             permission: None,
             resume: None,
-            tags: BTreeMap::new(),
             system_prompt: Some("You are terse.".into()),
         });
     }
@@ -769,11 +634,10 @@ mod tests {
     fn spawn_omits_system_prompt_when_none() {
         let s = serde_json::to_string(&ClientCommand::Spawn {
             agent: "claude".into(),
-            project_id: None,
+            cwd: None,
             model: None,
             permission: None,
             resume: None,
-            tags: BTreeMap::new(),
             system_prompt: None,
         })
         .unwrap();
@@ -784,7 +648,6 @@ mod tests {
     fn fire_target_spawn_with_system_prompt_roundtrips() {
         roundtrip(&FireTarget::Spawn {
             preset: "claude".into(),
-            project_id: None,
             system_prompt: Some("persona".into()),
         });
     }

@@ -11,12 +11,12 @@ use anyhow::{anyhow, Context};
 use clap::{Args, Parser, Subcommand};
 use roy::{
     daemon::{Daemon, DefaultTransportFactory},
-    project::Project,
     AgentsConfigStatus, ClientCommand, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+mod management;
 mod management_client;
 
 #[derive(Parser)]
@@ -52,8 +52,6 @@ enum Cmd {
     ListArchived,
     /// Ask the daemon to close a session.
     Close(CloseArgs),
-    /// Replace the tag map on a live session. Empty `--tag` list clears all tags.
-    SetTags(SetTagsArgs),
     /// Long-poll for the next terminal Result on a session.
     Wait(WaitArgs),
     /// One-shot fire: spawn (or resume) a session, send a prompt, wait for the result.
@@ -74,11 +72,6 @@ enum Cmd {
     Scheduler(roy_scheduler::cli::Cli),
     /// Run the management HTTP API (agent CRUD + spawn endpoints).
     Management(roy_management::Args),
-    /// Manage projects (list / create / rename / delete).
-    Projects {
-        #[command(subcommand)]
-        cmd: ProjectsCmd,
-    },
     /// Inspect configured engines at `~/.config/roy/agents.toml`.
     Engines {
         #[command(subcommand)]
@@ -89,6 +82,32 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AgentsCmd,
     },
+    /// Manage projects (HTTP-routed through roy-management).
+    Projects {
+        #[command(subcommand)]
+        cmd: ProjectsCmd,
+    },
+    /// Set the tag map for a session (HTTP-routed through roy-management).
+    SetTags(SetTagsArgs),
+}
+
+#[derive(Subcommand)]
+enum ProjectsCmd {
+    /// List all projects.
+    List,
+    /// Create a new project with the given name.
+    Create { name: String },
+    /// Delete a project by id.
+    Delete { id: String },
+}
+
+#[derive(clap::Args)]
+struct SetTagsArgs {
+    /// Session id to update.
+    session: String,
+    /// Replace the tag map with these `--tag k=v` pairs (repeatable).
+    #[arg(long = "tag", value_parser = parse_tag_kv)]
+    tags: Vec<(String, String)>,
 }
 
 #[derive(clap::Args)]
@@ -114,9 +133,10 @@ struct RunArgs {
     /// claude | gemini | opencode | codex
     agent: String,
     task: String,
-    /// Project name to spawn the session under. Omit to create an orphan session.
+    /// Working directory to spawn the agent in. Omit to create an orphan
+    /// session in the daemon's workspace.
     #[arg(long)]
-    project: Option<String>,
+    cwd: Option<PathBuf>,
     #[arg(long)]
     model: Option<String>,
     /// allow | deny (ACP agents only)
@@ -136,6 +156,16 @@ struct RunArgs {
     /// Read the system/persona prompt from a file (overrides --system-prompt).
     #[arg(long)]
     system_prompt_file: Option<std::path::PathBuf>,
+    /// Project to spawn into (routes through roy-management). If absent,
+    /// `--cwd` is used directly against the daemon.
+    #[arg(long)]
+    project: Option<String>,
+    /// Tag map: `--tag k=v` (repeatable). Routes through roy-management.
+    #[arg(long = "tag", value_parser = parse_tag_kv)]
+    tags: Vec<(String, String)>,
+    /// Friendly display name for the session in roy-management.
+    #[arg(long)]
+    agent_name: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -170,14 +200,6 @@ struct InjectArgs {
 }
 
 #[derive(clap::Args)]
-struct SetTagsArgs {
-    session: String,
-    /// Repeatable: `--tag k=v --tag k2=v2`. Empty list clears all tags.
-    #[arg(long = "tag", value_parser = parse_tag_kv)]
-    tags: Vec<(String, String)>,
-}
-
-#[derive(clap::Args)]
 struct WaitArgs {
     session: String,
     #[arg(long)]
@@ -195,9 +217,6 @@ struct FireArgs {
     /// `--resume` is absent.
     #[arg(long, conflicts_with = "resume", required_unless_present = "resume")]
     agent: Option<String>,
-    /// Project name for a new session. Ignored with --resume.
-    #[arg(long, conflicts_with = "resume")]
-    project: Option<String>,
     /// Resume an existing session id instead of spawning a new one.
     #[arg(long)]
     resume: Option<String>,
@@ -328,21 +347,6 @@ struct EnginesListArgs {
     json: bool,
 }
 
-#[derive(Subcommand)]
-enum ProjectsCmd {
-    /// List projects.
-    List,
-    /// Create a new project with the given name. Roy manages the directory at
-    /// `<workspace>/<name>/`.
-    Create { name: String },
-    /// Cascade-delete a project and all its sessions.
-    Delete {
-        id_or_name: String,
-        #[arg(long)]
-        yes: bool,
-    },
-}
-
 fn main() -> ExitCode {
     init_tracing();
     let cli = Cli::parse();
@@ -377,7 +381,6 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::List => cmd_list(false).await.map(|()| ExitCode::SUCCESS),
         Cmd::ListArchived => cmd_list(true).await.map(|()| ExitCode::SUCCESS),
         Cmd::Close(args) => cmd_close(args).await.map(|()| ExitCode::SUCCESS),
-        Cmd::SetTags(args) => cmd_set_tags(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Wait(args) => cmd_wait(args).await,
         Cmd::Fire(args) => cmd_fire(args).await,
         Cmd::Inject(args) => cmd_inject(args).await,
@@ -388,10 +391,38 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Gateway(args) => roy_gateway::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Scheduler(args) => roy_scheduler::cli::run(args).await,
         Cmd::Management(args) => roy_management::run(args).await.map(|()| ExitCode::SUCCESS),
-        Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
         Cmd::Engines { cmd } => cmd_engines(cmd).await,
         Cmd::Agents { cmd } => cmd_agents(cmd).await,
+        Cmd::Projects { cmd } => cmd_projects(cmd).await,
+        Cmd::SetTags(args) => cmd_set_tags(args).await,
     }
+}
+
+async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<ExitCode> {
+    match cmd {
+        ProjectsCmd::List => {
+            let projects = crate::management::list_projects().await?;
+            for p in projects {
+                println!("{}\t{}\t{}", p.id, p.name, p.path);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProjectsCmd::Create { name } => {
+            let p = crate::management::create_project(&name).await?;
+            println!("{}\t{}\t{}", p.id, p.name, p.path);
+            Ok(ExitCode::SUCCESS)
+        }
+        ProjectsCmd::Delete { id } => {
+            crate::management::delete_project(&id).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+async fn cmd_set_tags(args: SetTagsArgs) -> anyhow::Result<ExitCode> {
+    let tags: BTreeMap<String, String> = args.tags.into_iter().collect();
+    crate::management::put_tags(&args.session, &tags).await?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Set up tracing on stderr so `roy run`/`roy mcp` keep stdout reserved for
@@ -439,11 +470,14 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     let socket = args.socket.unwrap_or_else(default_socket);
     let journal_dir = args.journal_dir.unwrap_or_else(default_journal_dir);
     let workspace_dir = args.workspace_dir.unwrap_or_else(default_workspace_dir);
-    let daemon = Arc::new(Daemon::new(
-        journal_dir,
-        workspace_dir,
-        Arc::new(DefaultTransportFactory),
-    )?);
+    let daemon = Arc::new(
+        Daemon::new(
+            journal_dir,
+            workspace_dir,
+            Arc::new(DefaultTransportFactory),
+        )
+        .await?,
+    );
     eprintln!("roy serve: listening on {}", socket.display());
     let idle_timeout = args
         .idle_timeout
@@ -519,7 +553,7 @@ async fn send_cmd<W: AsyncWriteExt + Unpin>(w: &mut W, cmd: &ClientCommand) -> a
 async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     validate_flags(&args)?;
 
-    let system_prompt = match (args.system_prompt_file, args.system_prompt) {
+    let system_prompt = match (args.system_prompt_file.clone(), args.system_prompt.clone()) {
         (Some(path), _) => Some(
             std::fs::read_to_string(&path)
                 .with_context(|| format!("reading --system-prompt-file {}", path.display()))?,
@@ -527,59 +561,86 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         (None, inline) => inline,
     };
 
-    let (mut writer, mut events) = open_daemon().await?;
+    let needs_mgmt = args.project.is_some() || !args.tags.is_empty() || args.agent_name.is_some();
 
-    // Spawn the session.
-    send_cmd(
-        &mut writer,
-        &ClientCommand::Spawn {
+    // Phase 1: create the session. Two paths, same outcome: a session id
+    // (and, for the direct path, the agent's resume_cursor — management
+    // does not currently surface it).
+    let (session, resume_cursor) = if needs_mgmt {
+        let req = crate::management::CreateSessionReq {
             agent: args.agent.clone(),
             project_id: args.project.clone(),
+            cwd: args.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
             model: args.model.clone(),
             permission: args.permission.clone(),
-            resume: args.resume.clone(),
-            tags: BTreeMap::default(),
-            system_prompt,
-        },
-    )
-    .await?;
-    let (session, resume_cursor) = loop {
-        match read_event(&mut events).await? {
-            ServerEvent::Spawning { agent, project_id } => {
-                if let Some(pid) = &project_id {
-                    eprintln!("roy run: spawning {agent} in project {pid}…");
-                } else {
-                    eprintln!("roy run: spawning {agent}…");
+            system_prompt: system_prompt.clone(),
+            agent_name: args.agent_name.clone(),
+            tags: args.tags.iter().cloned().collect(),
+        };
+        let created = crate::management::create_session(req).await?;
+        eprintln!("roy run: session {} (via management)", created.session_id);
+        if args.detach {
+            let payload = serde_json::json!({
+                "type": "session",
+                "id": created.session_id,
+                "resume_cursor": serde_json::Value::Null,
+            });
+            println!("{payload}");
+            return Ok(ExitCode::SUCCESS);
+        }
+        (created.session_id, None)
+    } else {
+        let (mut writer, mut events) = open_daemon().await?;
+        send_cmd(
+            &mut writer,
+            &ClientCommand::Spawn {
+                agent: args.agent.clone(),
+                cwd: args.cwd.clone(),
+                model: args.model.clone(),
+                permission: args.permission.clone(),
+                resume: args.resume.clone(),
+                system_prompt,
+            },
+        )
+        .await?;
+        loop {
+            match read_event(&mut events).await? {
+                ServerEvent::Spawning { agent } => {
+                    if let Some(cwd) = args.cwd.as_ref() {
+                        eprintln!("roy run: spawning {agent} in {}…", cwd.display());
+                    } else {
+                        eprintln!("roy run: spawning {agent}…");
+                    }
                 }
-            }
-            ServerEvent::Spawned {
-                session,
-                project_id,
-                resume_cursor,
-                ..
-            } => {
-                if let Some(pid) = &project_id {
-                    eprintln!("roy run: session {session} project {pid}");
-                } else {
-                    eprintln!("roy run: session {session} (orphan)");
+                ServerEvent::Spawned {
+                    session,
+                    resume_cursor,
+                    ..
+                } => {
+                    eprintln!("roy run: session {session}");
+                    if args.detach {
+                        let payload = serde_json::json!({
+                            "type": "session",
+                            "id": session,
+                            "resume_cursor": resume_cursor,
+                        });
+                        println!("{payload}");
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                    break (session, Some(resume_cursor));
                 }
-                if args.detach {
-                    let payload = serde_json::json!({
-                        "type": "session",
-                        "id": session,
-                        "resume_cursor": resume_cursor,
-                    });
-                    println!("{payload}");
-                    return Ok(ExitCode::SUCCESS);
+                ServerEvent::Error { code, message, .. } => {
+                    anyhow::bail!("spawn failed: {code}: {message}");
                 }
-                break (session, resume_cursor);
+                other => anyhow::bail!("unexpected response to Spawn: {other:?}"),
             }
-            ServerEvent::Error { code, message, .. } => {
-                anyhow::bail!("spawn failed: {code}: {message}");
-            }
-            other => anyhow::bail!("unexpected response to Spawn: {other:?}"),
         }
     };
+
+    // Phase 2: attach, acquire input, send, drain. Both paths use a fresh
+    // daemon connection to keep the flow uniform — the management path
+    // already closed its HTTP connection.
+    let (mut writer, mut events) = open_daemon().await?;
 
     // Attach BEFORE sending so we never miss frames.
     send_cmd(
@@ -697,7 +758,6 @@ async fn cmd_resume(args: ResumeArgs) -> anyhow::Result<()> {
         &mut writer,
         &ClientCommand::Resume {
             session: args.session.clone(),
-            tags: None,
         },
     )
     .await?;
@@ -775,40 +835,6 @@ async fn cmd_inject(args: InjectArgs) -> anyhow::Result<ExitCode> {
     }
 }
 
-async fn cmd_set_tags(args: SetTagsArgs) -> anyhow::Result<()> {
-    let (mut writer, mut events) = open_daemon().await?;
-
-    let tags: BTreeMap<String, String> = args.tags.into_iter().collect();
-
-    send_cmd(
-        &mut writer,
-        &ClientCommand::SetTags {
-            session: args.session.clone(),
-            tags: tags.clone(),
-        },
-    )
-    .await?;
-    match read_event(&mut events).await? {
-        ServerEvent::SessionUpdated {
-            session,
-            tags: Some(t),
-            ..
-        } => {
-            let payload = serde_json::json!({
-                "type": "session_updated",
-                "session": session,
-                "tags": t,
-            });
-            println!("{payload}");
-            Ok(())
-        }
-        ServerEvent::Error { code, message, .. } => {
-            anyhow::bail!("set-tags failed: {code}: {message}")
-        }
-        other => anyhow::bail!("unexpected response to SetTags: {other:?}"),
-    }
-}
-
 async fn cmd_wait(args: WaitArgs) -> anyhow::Result<ExitCode> {
     let (mut writer, mut events) = open_daemon().await?;
 
@@ -872,7 +898,6 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
     let target = match (args.agent, args.resume) {
         (Some(agent), None) => FireTarget::Spawn {
             preset: agent,
-            project_id: args.project,
             system_prompt: None,
         },
         (None, Some(session_id)) => FireTarget::Resume { session_id },
@@ -1165,100 +1190,6 @@ async fn cmd_engines_list(args: EnginesListArgs) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<()> {
-    let (mut writer, mut events) = open_daemon().await?;
-
-    match cmd {
-        ProjectsCmd::List => {
-            send_cmd(&mut writer, &ClientCommand::ListProjects).await?;
-            match read_event(&mut events).await? {
-                ServerEvent::ProjectsListed { projects } => {
-                    for p in projects {
-                        println!("{}\t{}\t{}", p.id, p.name, p.path.display());
-                    }
-                    Ok(())
-                }
-                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
-                other => Err(anyhow!("unexpected: {other:?}")),
-            }
-        }
-        ProjectsCmd::Create { name } => {
-            send_cmd(&mut writer, &ClientCommand::CreateProject { name }).await?;
-            match read_event(&mut events).await? {
-                ServerEvent::ProjectCreated { project } => {
-                    println!("{}", project.id);
-                    eprintln!(
-                        "created project '{}' at {}",
-                        project.name,
-                        project.path.display()
-                    );
-                    Ok(())
-                }
-                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
-                other => Err(anyhow!("unexpected: {other:?}")),
-            }
-        }
-        ProjectsCmd::Delete { id_or_name, yes } => {
-            let project_id = resolve_project_id(&mut writer, &mut events, &id_or_name).await?;
-            if !yes {
-                eprintln!(
-                    "This will delete project {project_id} and all its sessions. Re-run with --yes to confirm."
-                );
-                return Ok(());
-            }
-            send_cmd(
-                &mut writer,
-                &ClientCommand::DeleteProject {
-                    project_id: project_id.clone(),
-                },
-            )
-            .await?;
-            match read_event(&mut events).await? {
-                ServerEvent::ProjectDeleted {
-                    project_id,
-                    deleted_sessions,
-                } => {
-                    eprintln!(
-                        "deleted project {project_id} ({} sessions)",
-                        deleted_sessions.len()
-                    );
-                    Ok(())
-                }
-                ServerEvent::Error { code, message, .. } => Err(anyhow!("{code}: {message}")),
-                other => Err(anyhow!("unexpected: {other:?}")),
-            }
-        }
-    }
-}
-
-/// Resolve a user-supplied id-or-name to a project id by listing projects and
-/// matching first by id (exact), then by unique name.
-async fn resolve_project_id<B: AsyncBufReadExt + Unpin>(
-    writer: &mut (impl AsyncWriteExt + Unpin),
-    events: &mut tokio::io::Lines<B>,
-    query: &str,
-) -> anyhow::Result<String> {
-    send_cmd(writer, &ClientCommand::ListProjects).await?;
-    let projects: Vec<Project> = match read_event(events).await? {
-        ServerEvent::ProjectsListed { projects } => projects,
-        ServerEvent::Error { code, message, .. } => {
-            return Err(anyhow!("{code}: {message}"));
-        }
-        other => return Err(anyhow!("unexpected: {other:?}")),
-    };
-    if let Some(p) = projects.iter().find(|p| p.id == query) {
-        return Ok(p.id.clone());
-    }
-    let by_name: Vec<&Project> = projects.iter().filter(|p| p.name == query).collect();
-    match by_name.as_slice() {
-        [p] => Ok(p.id.clone()),
-        [] => Err(anyhow!("no project named or id `{query}`")),
-        _ => Err(anyhow!(
-            "ambiguous name `{query}` — multiple projects match; specify id"
-        )),
-    }
-}
-
 /// Parse a CLI `--tag k=v` argument. Empty key is rejected. The first `=`
 /// is the separator; subsequent `=` characters are part of the value.
 pub(crate) fn parse_tag_kv(s: &str) -> anyhow::Result<(String, String)> {
@@ -1348,7 +1279,7 @@ mod tests {
         RunArgs {
             agent: agent.into(),
             task: "noop".into(),
-            project: None,
+            cwd: None,
             model: None,
             permission: None,
             detach: false,
@@ -1356,6 +1287,9 @@ mod tests {
             with_seq: false,
             system_prompt: None,
             system_prompt_file: None,
+            project: None,
+            tags: Vec::new(),
+            agent_name: None,
         }
     }
 

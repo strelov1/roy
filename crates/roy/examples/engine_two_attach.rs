@@ -12,30 +12,32 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use roy::daemon::DefaultTransportFactory;
+use roy::session_store::{self, SessionStore};
 use roy::{Attach, SessionManager, SessionSpawnConfig, TurnEvent};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let journal_dir = std::env::temp_dir().join("roy-demo-journals");
     let workspace_dir = std::env::temp_dir().join("roy-demo-workspace");
+    let store = Arc::new(SessionStore::open(&session_store::default_db_path()).await?);
     let manager = SessionManager::new(
         journal_dir.clone(),
         workspace_dir,
         Arc::new(DefaultTransportFactory),
-    )?;
+        store,
+    )
+    .await?;
     let cwd = std::env::current_dir()?;
 
     let engine = manager
         .spawn(
             SessionSpawnConfig {
                 agent: roy::AgentPreset::Opencode,
-                cwd,
-                project_id: None,
+                cwd: Some(cwd),
                 model: None,
                 permission: None,
                 resume_cursor: None,
                 fixed_session_id: None,
-                tags: std::collections::BTreeMap::new(),
                 system_prompt: None,
             },
             256,

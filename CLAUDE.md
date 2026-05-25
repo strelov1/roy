@@ -15,13 +15,13 @@ Non-negotiable expectations for any change in this repo:
 
 A Cargo workspace with seven crates:
 
-- **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting metadata so sessions survive across daemon restarts.
+- **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting boot-kit metadata in SQLite (`~/.local/state/roy/sessions.db`) so sessions survive across daemon restarts.
 - **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket). The `roy mcp`, `roy gateway`, `roy scheduler`, and `roy management` subcommands delegate to the matching adapter crates, so a single binary covers every adapter.
 - **`crates/roy-mcp`** — library. MCP (Model Context Protocol) server: JSON-RPC 2.0 over stdio, exposes daemon control operations as MCP tools. Linked into `roy-cli` and dispatched via `roy mcp`.
 - **`crates/roy-scheduler`** — library + thin binary. Cron + one-shot fire dispatcher. Talks to the daemon over its Unix socket using `ClientCommand::Fire`; never reaches into `SessionManager`, `Engine`, or `Journal`. Owns its own SQLite state (`~/.local/state/roy-scheduler/state.db`) for triggers, fires, and subscribers. Exposes `pub async fn cli::run(cli)` so `roy-cli` can dispatch `roy scheduler` to the same code as the standalone `roy-scheduler` binary.
 - **`crates/roy-gateway`** — library. Chat-platform and WebSocket bridge to the daemon (Telegram adapter + WS relay). Exposes `pub async fn run(args)`; `roy-cli` dispatches `roy gateway` to it. Same boundary rule as `roy-scheduler`. Persists `chat_id → roy session_id` in a JSON file so chats survive restarts.
 - **`crates/roy-agents`** — library. Canonical agent store: `Agent` type (identity + persona `prompt` + optional scheduled `task`), SQLite CRUD with slug-collision suffixing. Used by `roy-management` today; `roy-scheduler` is planned to migrate onto it later. Shared DB file lives at `~/.local/state/roy/agents.db` (override with `ROY_AGENTS_DB`).
-- **`crates/roy-management`** — library. axum HTTP service for agent CRUD and starting sessions. Exposes `pub async fn run(args)`; `roy-cli` dispatches `roy management` to it. Same boundary rule as `roy-scheduler`/`roy-gateway`: talks to the daemon only over the Unix socket, passing `system_prompt = agent.prompt` inline on `Spawn`. Transitional note: `roy-scheduler` still has its own `agents` table until a future Plan C unifies it onto `roy-agents`.
+- **`crates/roy-management`** — library. axum HTTP service for agent CRUD, session coordination, and project/tag management. Exposes `pub async fn run(args)`; `roy-cli` dispatches `roy management` to it. Owns `MetaStore` (SQLite at `~/.local/state/roy/agents.db`): `projects`, `session_meta`, `session_tags` tables co-located with `roy-agents`'s `agents` table. Talks to the daemon over Unix socket via `DaemonClient` trait (for session operations that need coordination); routes project/tag operations directly to the database. Transitional note: `roy-scheduler` still has its own `agents` table until a future Plan C unifies it onto `roy-agents`.
 
 External crates (`roy-mcp`, `roy-scheduler`, `roy-gateway`, `roy-management`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API.
 
@@ -43,6 +43,10 @@ preset binaries above must still be installed and authenticated.
 ## Commands
 
 ```bash
+# Upgrade after split-store refactor: clear obsolete files once before first run.
+rm -rf ~/.roy/journals/*.meta.json
+rm -f  ~/.roy/projects.json
+
 cargo build --all-targets
 cargo fmt                # config in rustfmt.toml (edition 2021, max_width 100)
 cargo test --workspace   # unit + integration; uses a python fake ACP agent, no real CLI needed
@@ -106,7 +110,7 @@ A short pipeline. Triggers (CLI, MCP) talk to a single `Daemon`; `Daemon` owns a
 
 2. **`SessionManager`** (`src/manager.rs`) — in-process registry of live `SessionEngine`s keyed by session id, plus on-disk archive operations: `list_archived`, `open_archive`, `read_journal` (unified live-or-archive read), `resume_all`, `sweep_idle`.
 
-3. **`SessionEngine`** (`src/engine.rs`) — long-lived per-session actor. Pipes the agent's events into a `Journal` (persistent JSONL + in-memory ring) and a `broadcast` channel; gates writes via a single `InputLease`; persists `SessionMetadata` so a fresh daemon process can resurrect the session via `ACP session/load`.
+3. **`SessionEngine`** (`src/engine.rs`) — long-lived per-session actor. Pipes the agent's events into a `Journal` (persistent JSONL + in-memory ring) and a `broadcast` channel; gates writes via a single `InputLease`; persists boot-kit metadata to `SessionStore` (SQLite) so a fresh daemon process can resurrect the session via `ACP session/load`.
 
 4. **`Transport`** (`src/transport/mod.rs`) — single trait, single impl `AcpTransport` (`src/transport/acp/mod.rs`). Spawns the agent as a child, sets up the official `agent-client-protocol` SDK, handles `session/new` / `session/load`, optional `set_mode`, and auto-answers `session/request_permission` per `PermissionPolicy`.
 
