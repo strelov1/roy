@@ -715,7 +715,11 @@ mod tests {
         let cmd: ClientCommand =
             serde_json::from_str(r#"{"op":"inject","session":"s","text":"t"}"#).unwrap();
         match cmd {
-            ClientCommand::Inject { respond, source_session, .. } => {
+            ClientCommand::Inject {
+                respond,
+                source_session,
+                ..
+            } => {
                 assert!(!respond);
                 assert!(source_session.is_none());
             }
