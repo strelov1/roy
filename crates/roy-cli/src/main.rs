@@ -63,6 +63,9 @@ enum Cmd {
     /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
     /// IDE plugin) which talks to it over stdio.
     Mcp(McpArgs),
+    /// Run the chat-platform gateway (Telegram + WebSocket relay).
+    /// Long-running process; talks to a running `roy serve` daemon.
+    Gateway(roy_gateway::Args),
     /// Manage projects (list / create / rename / delete).
     Projects {
         #[command(subcommand)]
@@ -271,18 +274,20 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
             let socket = args.socket.unwrap_or_else(default_socket);
             roy_mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
         }
+        Cmd::Gateway(args) => roy_gateway::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
         Cmd::Agents { cmd } => cmd_agents(cmd).await,
     }
 }
 
 /// Set up tracing on stderr so `roy run`/`roy mcp` keep stdout reserved for
-/// their JSON payload. `RUST_LOG` overrides the default ("info" for roy,
-/// "warn" for everything else).
+/// their JSON payload. `RUST_LOG` overrides the default ("info" for roy and
+/// every linked-in adapter crate, "warn" for everything else).
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("roy=info,roy_cli=info,warn"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("roy=info,roy_cli=info,roy_mcp=info,roy_gateway=info,warn")
+    });
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
