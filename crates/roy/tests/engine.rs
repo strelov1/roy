@@ -262,6 +262,113 @@ async fn wait_for_result_concatenates_many_chunks_then_result() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn inject_note_appends_without_lease() {
+    let journal_dir = tmp_journal_dir();
+    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
+        .await
+        .unwrap();
+
+    // Hold the input lease, as an interactive client would.
+    let _lease = engine.try_acquire_input().expect("first lease");
+
+    // Inject still succeeds despite the held lease.
+    let seq = engine
+        .inject_note("background result".into(), Some("child-sid".into()))
+        .await
+        .expect("inject_note");
+
+    let entries = engine.snapshot(seq).await.unwrap();
+    let note = entries.iter().find(|e| e.seq == seq).expect("note entry");
+    assert_eq!(
+        note.event,
+        TurnEvent::Note {
+            text: "background result".into(),
+            source_session: Some("child-sid".into()),
+        }
+    );
+
+    engine.close().unwrap();
+    let _ = std::fs::remove_dir_all(&journal_dir);
+}
+
+#[tokio::test]
+async fn inject_prompt_receiver_resolves_with_this_turns_result() {
+    let journal_dir = tmp_journal_dir();
+    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
+        .await
+        .unwrap();
+
+    // The receiver returned by inject_prompt resolves with THIS turn's own
+    // terminal outcome — no external seq guessing, so it's correct even when
+    // other turns run first.
+    let rx = engine.inject_prompt("hello".into()).expect("inject_prompt");
+    let outcome = rx
+        .await
+        .expect("actor kept the sender alive")
+        .expect("journal read ok");
+    let (_start, _seq, result, _text) = outcome.expect("turn produced a terminal Result");
+    assert!(
+        matches!(result, TurnEvent::Result { .. }),
+        "outcome carries the terminal Result, got {result:?}",
+    );
+
+    engine.close().unwrap();
+    let _ = std::fs::remove_dir_all(&journal_dir);
+}
+
+/// A `Close` arriving mid-turn is consumed inside `drive_turn`; the actor must
+/// still wind down instead of blocking forever on the next `recv` (it holds its
+/// own `input_tx`, so the channel never closes on its own). We prove it by
+/// queuing an inject during a held turn, then closing: the inject's receiver
+/// resolving (with a closed error) means the actor reached shutdown.
+#[tokio::test]
+async fn close_during_turn_winds_down_and_does_not_hang() {
+    let journal_dir = tmp_journal_dir();
+    let engine = SessionEngine::spawn(
+        fake_acp_transport_with(&["--cancellable"]),
+        opts(journal_dir.clone()),
+        test_cfg(),
+    )
+    .await
+    .unwrap();
+
+    let lease = engine.try_acquire_input().expect("free lease");
+    let attach = engine.attach(None).await.unwrap();
+    lease.send("hold").unwrap();
+
+    // Wait until the turn is genuinely active (the cancellable fake streams one
+    // chunk then waits) so the inject/close land mid-turn, not while idle.
+    let mut stream = attach.stream;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut active = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(entry)) => {
+                if matches!(entry.event, TurnEvent::AssistantText { .. }) {
+                    active = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(active, "turn should be active before inject/close");
+
+    let rx = engine.inject_prompt("queued".into()).expect("inject");
+    drop(lease);
+    engine.close().unwrap();
+
+    let resolved = tokio::time::timeout(Duration::from_secs(3), rx).await;
+    assert!(
+        matches!(resolved, Ok(Err(_))),
+        "inject receiver must resolve with a closed error once the actor winds \
+         down; a timeout means the actor hung. got {resolved:?}",
+    );
+
+    let _ = std::fs::remove_dir_all(&journal_dir);
+}
+
 async fn collect_all(
     mut stream: std::pin::Pin<Box<dyn futures::Stream<Item = roy::JournalEntry> + Send>>,
 ) -> Vec<roy::JournalEntry> {
