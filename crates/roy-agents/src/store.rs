@@ -100,6 +100,15 @@ impl Store {
             .ok_or_else(|| StoreError::NotFound(id.to_string()))
     }
 
+    /// Look up an agent by its slug. Returns `NotFound` when absent.
+    pub async fn get_by_slug(&self, slug: &str) -> Result<Agent, StoreError> {
+        sqlx::query_as::<_, Agent>("SELECT * FROM agents WHERE slug = ?")
+            .bind(slug)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("slug={slug}")))
+    }
+
     pub async fn list(&self) -> Result<Vec<Agent>, StoreError> {
         Ok(
             sqlx::query_as::<_, Agent>("SELECT * FROM agents ORDER BY created_at DESC")
@@ -188,7 +197,8 @@ mod tests {
         let a = s.create(sample("Reviewer")).await.unwrap();
         assert_eq!(a.slug, "reviewer");
         assert_eq!(s.get(&a.id).await.unwrap().prompt, "You are terse.");
-        assert_eq!(s.list().await.unwrap().len(), 1);
+        // builder seed is always present, so list length is seed + 1
+        assert_eq!(s.list().await.unwrap().len(), 2);
 
         let up = AgentUpdate {
             prompt: Some("Be blunt.".into()),
@@ -213,5 +223,23 @@ mod tests {
         let b = s.create(sample("Reviewer")).await.unwrap();
         assert_eq!(a.slug, "reviewer");
         assert_eq!(b.slug, "reviewer-2");
+    }
+
+    #[tokio::test]
+    async fn builder_seed_is_present() {
+        let s = store().await;
+        let b = s.get_by_slug("builder").await.expect("builder seed");
+        assert_eq!(b.name, "Agent Builder");
+        assert_eq!(b.slug, "builder");
+        assert_eq!(b.preset, "claude");
+        assert!(b.prompt.contains("Agent Builder"));
+        assert!(b.prompt.contains("roy agents update"));
+    }
+
+    #[tokio::test]
+    async fn get_by_slug_returns_not_found_for_missing() {
+        let s = store().await;
+        let err = s.get_by_slug("does-not-exist").await.unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(_)));
     }
 }
