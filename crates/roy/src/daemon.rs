@@ -2785,8 +2785,8 @@ mod tests {
         .await;
     }
 
-    /// A note (respond=false) must land even when ANOTHER connection holds the
-    /// input lease — this is the whole point of Inject. Reproduces the original
+    /// A note must land even when ANOTHER connection holds the input lease —
+    /// this is the whole point of Inject. Reproduces the original
     /// bug where injection needed a lease and so blocked behind an active turn.
     #[tokio::test]
     async fn inject_note_lands_while_lease_held_by_another_connection() {
@@ -2853,7 +2853,7 @@ mod tests {
             other => panic!("expected InputAcquired{{acquired:true}}, got {other:?}"),
         }
 
-        // 3. Connection B injects a note (respond=false). No lease needed.
+        // 3. Connection B injects a note. No lease needed.
         send_cmd_line(
             &mut clientb_wr,
             &ClientCommand::Inject {
