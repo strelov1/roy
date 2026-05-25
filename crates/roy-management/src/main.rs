@@ -1,3 +1,4 @@
+mod roy_client;
 mod state;
 
 #[allow(unused_imports)]
