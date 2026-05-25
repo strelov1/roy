@@ -4,12 +4,12 @@
 //!
 //! See `docs/architecture.md` for the design.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::error::{Result, RoyError};
 use crate::event::{StopReason, TurnEvent};
 use crate::journal::{Journal, JournalEntry, Seq};
-use crate::session_meta::{write_metadata, SessionMetadata};
+use crate::session_store::{SessionRow, SessionStore};
 use crate::transport::{Handle, Transport};
 
 /// Tunables for `SessionEngine::spawn`.
@@ -41,19 +41,19 @@ impl EngineOpts {
     }
 }
 
-/// Inputs that uniquely identify a session at spawn (or resume) time. Stored
-/// as `SessionMetadata` beside the journal so the daemon can resurrect a live
+/// Inputs that uniquely identify a session at spawn (or resume) time. Persisted
+/// as a `SessionRow` in the session store so the daemon can resurrect a live
 /// session after a restart.
 ///
-/// `project_id = None` means the session is orphan (lives at
-/// `<workspace>/<session_id>/`). `fixed_session_id` pins the UUID when the
-/// daemon needs to know it before the engine mints one — required for orphan
-/// sessions where the dir is pre-created as `<workspace>/<session_id>/`.
+/// `cwd = None` means the caller wants an orphan session: the manager allocates
+/// `<workspace>/<session_id>/` for it and rewrites `cwd` to that path before
+/// the engine is constructed. `fixed_session_id` pins the UUID when the daemon
+/// needs to know it before the engine mints one — required for orphan sessions
+/// where the dir is pre-created as `<workspace>/<session_id>/`.
 #[derive(Debug, Clone)]
 pub struct SessionSpawnConfig {
     pub agent: crate::agents_config::AgentPreset,
-    pub cwd: PathBuf,
-    pub project_id: Option<String>,
+    pub cwd: Option<PathBuf>,
     pub model: Option<String>,
     pub permission: Option<String>,
     /// Forwarded to `Transport::open` so the agent side resumes via its
@@ -64,26 +64,21 @@ pub struct SessionSpawnConfig {
     /// minting a fresh one. Used by orphan spawn so the daemon can name the
     /// workspace dir after the session id before the engine is constructed.
     pub fixed_session_id: Option<String>,
-    pub tags: BTreeMap<String, String>,
     /// Inline persona prompt. Forwarded to `Transport::open`; later snapshotted
-    /// into `SessionMetadata` and (for FirstTurn presets) injected as a first turn.
+    /// into the session store and (for FirstTurn presets) injected as a first turn.
     pub system_prompt: Option<String>,
 }
 
 /// Owned by `SessionManager` (or directly by callers in single-session use).
 pub struct SessionEngine {
     session_id: String,
-    journal_dir: PathBuf,
     agent: String,
     cwd: PathBuf,
-    project_id: Option<String>,
     /// Display label only; the daemon doesn't feed it back into the
-    /// transport. `set_model` mutates it and rewrites on-disk metadata.
+    /// transport. `set_model` mutates it and rewrites the row in the
+    /// session store.
     model: StdMutex<Option<String>>,
-    permission: Option<String>,
-    system_prompt: Option<String>,
     resume_cursor: StdMutex<Option<String>>,
-    tags: StdMutex<BTreeMap<String, String>>,
     journal: Arc<Journal>,
     broadcast_tx: broadcast::Sender<JournalEntry>,
     input_tx: mpsc::UnboundedSender<Cmd>,
@@ -92,6 +87,10 @@ pub struct SessionEngine {
     /// (`publish`) or an incoming prompt (`Cmd::Prompt` arriving at the
     /// actor). Used by `SessionManager::sweep_idle` to GC quiet sessions.
     last_activity: StdMutex<Instant>,
+    /// Persistent row backing this engine: cursor + model updates flow
+    /// through `update_cursor` / `update_model`; the initial row is written
+    /// once in `spawn` (resume keeps the existing row untouched).
+    session_store: Arc<SessionStore>,
 }
 
 enum Cmd {
@@ -116,6 +115,7 @@ impl SessionEngine {
         transport: Arc<dyn Transport>,
         opts: EngineOpts,
         cfg: SessionSpawnConfig,
+        session_store: Arc<SessionStore>,
     ) -> Result<Arc<Self>> {
         let session_id = cfg
             .fixed_session_id
@@ -123,22 +123,42 @@ impl SessionEngine {
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let journal =
             Arc::new(Journal::open(&opts.journal_dir, &session_id, opts.mem_capacity).await?);
-        Self::start(transport, opts, session_id, journal, cfg).await
+        Self::start(
+            transport,
+            opts,
+            session_id,
+            journal,
+            cfg,
+            session_store,
+            /* is_resume */ false,
+        )
+        .await
     }
 
     /// Resurrect a previously-closed session: open its existing journal in
     /// append mode and re-spawn the actor with the same id. The supplied
-    /// `cfg.resume_cursor` is what the daemon retrieved from the on-disk
-    /// metadata and is forwarded to `Transport::open`.
+    /// `cfg.resume_cursor` is what the daemon retrieved from the session
+    /// store and is forwarded to `Transport::open`. The existing row in the
+    /// store is left untouched until the first turn updates its cursor.
     pub async fn resume(
         transport: Arc<dyn Transport>,
         opts: EngineOpts,
         session_id: String,
         cfg: SessionSpawnConfig,
+        session_store: Arc<SessionStore>,
     ) -> Result<Arc<Self>> {
         let journal =
             Arc::new(Journal::resume(&opts.journal_dir, &session_id, opts.mem_capacity).await?);
-        Self::start(transport, opts, session_id, journal, cfg).await
+        Self::start(
+            transport,
+            opts,
+            session_id,
+            journal,
+            cfg,
+            session_store,
+            /* is_resume */ true,
+        )
+        .await
     }
 
     async fn start(
@@ -147,15 +167,24 @@ impl SessionEngine {
         session_id: String,
         journal: Arc<Journal>,
         cfg: SessionSpawnConfig,
+        session_store: Arc<SessionStore>,
+        is_resume: bool,
     ) -> Result<Arc<Self>> {
         let (broadcast_tx, _) = broadcast::channel::<JournalEntry>(opts.broadcast_capacity);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
+
+        // The manager always resolves `cfg.cwd` (allocating an orphan dir when
+        // the caller passed `None`) before handing the config to the engine.
+        let cwd = cfg
+            .cwd
+            .clone()
+            .expect("SessionManager must resolve cwd before SessionEngine::spawn/resume");
 
         let handle = transport
             .open(
                 &session_id,
                 cfg.resume_cursor.as_deref(),
-                cfg.cwd.clone(),
+                cwd.clone(),
                 cfg.system_prompt.as_deref(),
             )
             .await?;
@@ -163,41 +192,38 @@ impl SessionEngine {
 
         let engine = Arc::new(Self {
             session_id: session_id.clone(),
-            journal_dir: opts.journal_dir.clone(),
             agent: cfg.agent.to_string(),
-            cwd: cfg.cwd.clone(),
-            project_id: cfg.project_id.clone(),
+            cwd: cwd.clone(),
             model: StdMutex::new(cfg.model.clone()),
-            permission: cfg.permission.clone(),
-            system_prompt: cfg.system_prompt.clone(),
             resume_cursor: StdMutex::new(initial_cursor.clone()),
-            tags: StdMutex::new(cfg.tags.clone()),
             journal,
             broadcast_tx,
             input_tx,
             input_lease_held: StdMutex::new(false),
             last_activity: StdMutex::new(Instant::now()),
+            session_store,
         });
 
-        // Persist initial metadata so a daemon restart can find this session.
-        // Propagate the error: without metadata on disk the session can't be
-        // resumed, so a silent half-spawned state would be worse than failing.
-        write_metadata(
-            &opts.journal_dir,
-            &SessionMetadata {
-                session_id,
+        // Spawn path: persist the initial session row so a daemon restart can
+        // find this session. Resume path: the row already exists in the store
+        // (that's how the daemon located the session) — leave it untouched
+        // and let the first turn's cursor update flow through `persist_cursor`.
+        // Errors on insert propagate: a half-spawned session without a row
+        // would silently fail to resume across daemon restarts.
+        if !is_resume {
+            let row = SessionRow {
+                session_id: session_id.clone(),
                 agent: cfg.agent.to_string(),
-                cwd: cfg.cwd,
-                project_id: cfg.project_id, // Option<String> — None = orphan
-                model: cfg.model,
-                permission: cfg.permission,
-                resume_cursor: initial_cursor,
-                tags: cfg.tags,
+                cwd: cwd.clone(),
+                model: cfg.model.clone(),
+                permission: cfg.permission.clone(),
+                resume_cursor: initial_cursor.clone(),
                 system_prompt: cfg.system_prompt.clone(),
-                agent_name: None,
-            },
-        )
-        .await?;
+                created_at: Utc::now().timestamp(),
+                closed_at: None,
+            };
+            engine.session_store.insert(&row).await?;
+        }
 
         // FirstTurn presets: the transport deferred the persona. Drain it now
         // (while we still own the handle) and enqueue it as the first command,
@@ -231,10 +257,6 @@ impl SessionEngine {
         &self.cwd
     }
 
-    pub fn project_id(&self) -> Option<&str> {
-        self.project_id.as_deref()
-    }
-
     /// LLM label currently associated with the session (e.g.
     /// `claude-opus-4-7`). Can change mid-session via `set_model`.
     pub fn model(&self) -> Option<String> {
@@ -246,7 +268,9 @@ impl SessionEngine {
     /// Returns the new value so callers can echo it on the wire reply.
     pub async fn set_model(&self, model: String) -> Result<String> {
         *self.model.lock().unwrap() = Some(model.clone());
-        self.persist_metadata().await?;
+        self.session_store
+            .update_model(&self.session_id, Some(&model))
+            .await?;
         // Per-connection `ServerEvent::ModelChanged` is only the ack to
         // the requester; this is what reaches every other attached
         // client in lock-step via `ServerEvent::Frame`.
@@ -291,20 +315,6 @@ impl SessionEngine {
 
     pub async fn next_seq(&self) -> Seq {
         self.journal.next_seq().await
-    }
-
-    pub fn tags(&self) -> BTreeMap<String, String> {
-        self.tags.lock().unwrap().clone()
-    }
-
-    /// Replace the session's tag map and persist it.
-    pub async fn set_tags(&self, tags: BTreeMap<String, String>) -> Result<()> {
-        {
-            let mut current = self.tags.lock().unwrap();
-            *current = tags;
-        }
-        self.persist_metadata().await?;
-        Ok(())
     }
 
     /// Wait for the next terminal `Result` event with `seq >= since_seq`.
@@ -424,23 +434,14 @@ impl SessionEngine {
             .map_err(|_| RoyError::Protocol("engine actor gone".into()))
     }
 
-    fn metadata_snapshot(&self) -> SessionMetadata {
-        SessionMetadata {
-            session_id: self.session_id.clone(),
-            agent: self.agent.clone(),
-            cwd: self.cwd.clone(),
-            project_id: self.project_id.clone(), // Option<String> — None = orphan
-            model: self.model.lock().unwrap().clone(),
-            permission: self.permission.clone(),
-            system_prompt: self.system_prompt.clone(),
-            resume_cursor: self.resume_cursor.lock().unwrap().clone(),
-            tags: self.tags.lock().unwrap().clone(),
-            agent_name: None,
-        }
-    }
-
-    async fn persist_metadata(&self) -> Result<()> {
-        write_metadata(&self.journal_dir, &self.metadata_snapshot()).await
+    /// Write the current `resume_cursor` to the session store. Called after
+    /// every turn that yields a fresh cursor; cheap (`UPDATE` on a primary
+    /// key) and safe to invoke even when the value didn't change.
+    async fn persist_cursor(&self) -> Result<()> {
+        let cursor = self.resume_cursor.lock().unwrap().clone();
+        self.session_store
+            .update_cursor(&self.session_id, cursor.as_deref())
+            .await
     }
 }
 
@@ -541,15 +542,24 @@ async fn run_one_turn(
     }
     let closed = drive_turn(engine, handle, text, input_rx).await;
     if let Some(cursor) = handle.resume_cursor() {
-        *engine.resume_cursor.lock().unwrap() = Some(cursor);
-        // Non-fatal: session keeps running, but a stale cursor on disk means a
-        // future Resume reconnects to the wrong agent-side session. Surface it.
-        if let Err(e) = engine.persist_metadata().await {
-            tracing::warn!(
-                session = %engine.session_id,
-                error = %e,
-                "failed to persist session metadata after turn",
-            );
+        let changed = {
+            let mut guard = engine.resume_cursor.lock().unwrap();
+            let differs = guard.as_ref() != Some(&cursor);
+            if differs {
+                *guard = Some(cursor);
+            }
+            differs
+        };
+        if changed {
+            // Non-fatal: session keeps running, but a stale cursor on disk means
+            // a future Resume reconnects to the wrong agent-side session.
+            if let Err(e) = engine.persist_cursor().await {
+                tracing::warn!(
+                    session = %engine.session_id,
+                    error = %e,
+                    "failed to persist session cursor after turn",
+                );
+            }
         }
     }
     closed

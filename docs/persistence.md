@@ -1,65 +1,42 @@
 # Persistence and resume
 
-## Workspace layout
+## Database layout
 
-All project and orphan-session working directories live under
-`workspace_dir` (default `~/.roy/workspace/`; override via `ROY_WORKSPACE`
-env var or `roy serve --workspace-dir <path>`):
+Session boot-kit and project metadata are now split across two SQLite databases.
 
-```
-<workspace_dir>/
-  <project_name>/      # one per project; created at CreateProject
-  <session_id>/        # one per orphan session; created at spawn-without-project
-```
+**Core sessions** (`~/.local/state/roy/sessions.db`):
+- `sessions` table: `session_id` (PK), `agent`, `cwd`, `model`, `permission`,
+  `resume_cursor`, `system_prompt`, `created_at`, `closed_at`.
+- Owned by `roy::SessionStore`. Written during spawn and cursor updates.
+- Each row is resurrectable: the daemon can rebuild a live `SessionEngine`
+  from the boot-kit columns without losing journal continuity.
 
-The daemon creates these directories but does not own their contents after
-creation — the agent and the user write to them freely.
-
-**Cascade delete of a project removes the registry entry and each session's
-`.jsonl` / `.meta.json` files, but does NOT remove `<workspace>/<name>/`.
-The user may have committed work in that directory.**
-
-## Project registry
-
-`<journal_dir>/projects.json` lists every project:
-
-```json
-{
-  "version": 1,
-  "projects": [
-    {
-      "id": "1f7c…",
-      "name": "roy",
-      "path": "/Users/alice/.roy/workspace/roy",
-      "created_at": 1722345600
-    }
-  ]
-}
-```
-
-Written atomically (temp file in same directory + `rename`) after every
-mutation. Missing `version` is treated as `v1`. Unknown `version` is a
-hard error.
-
-At startup, `index_existing_sessions` scans all `.meta.json` files and
-rebuilds `sessions_by_project`. If a meta references a `project_id` that
-is not in the registry, the session is logged as a warning and skipped
-from the index — no auto-create. The user must clean up by hand (delete
-the `.jsonl` / `.meta.json` pair or restore `projects.json`).
+**Management metadata** (`~/.local/state/roy/agents.db`):
+- `projects` table: `id` (PK), `name` (unique), `path`, `created_at`.
+- `session_meta` table: `session_id` (PK, FK to sessions), `project_id`,
+  `agent_id`, `agent_name`, `display_label`.
+- `session_tags` table: `session_id`, `key`, `value` (composite PK).
+- Owned by `roy-management::MetaStore`, co-located with `roy-agents`'s
+  `agents` table.
+- Written by HTTP API (`POST /sessions`, `PUT /sessions/{id}/tags`, etc.).
+- Migrations: both databases use SQLite `_sqlx_migrations` with
+  `set_ignore_missing(true)` so partial updates don't fail. `roy-agents`
+  owns v1 of agents.db migrations; `roy-management` adds v2 for the three
+  new tables. `sessions.db` has its own migration track.
 
 ---
 
-Each session writes two files under `journal_dir` (defaults to
+Each session writes one file under `journal_dir` (defaults to
 `~/.roy/journals/`):
 
 ```
 <session_id>.jsonl       — append-only event log
-<session_id>.meta.json   — sidecar metadata, rewritten on cursor change
 ```
 
-Both survive daemon restarts. Together they make a session
-**resurrectable**: a fresh `roy serve` process can rebuild a live
-`SessionEngine` from disk without losing journal continuity.
+This survives daemon restarts. Together with the boot-kit row in
+`sessions.db`, it makes a session **resurrectable**: a fresh `roy serve`
+process can rebuild a live `SessionEngine` from disk without losing journal
+continuity.
 
 ## Journal file
 
@@ -90,45 +67,40 @@ truth.
 on-disk format is exactly the same JSON shape that goes onto CLI stdout
 and into trigger frames.
 
-## Metadata file
+## Boot-kit row (sessions.db)
 
-JSON, rewritten atomically (temp file + `rename`) every time the
+SQLite row in the `sessions` table, updated atomically each time the
 session's `resume_cursor` changes:
 
-```json
-{
-  "session_id": "0a91…",
-  "agent": "opencode",
-  "cwd": "/Users/alice/.roy/workspace/myproject",
-  "model": null,
-  "permission": "allow",
-  "project_id": "1f7c…",
-  "resume_cursor": "sess_abc123",
-  "system_prompt": "You are a terse reviewer."
-}
-```
+| column          | type        | source                                                         |
+|-----------------|-------------|------------------------------------------------------------------------|
+| `session_id`    | text PK     | roy-side UUID minted at first spawn; stable across restarts     |
+| `agent`         | text        | the preset name (`claude`, `gemini`, `opencode`, `codex`)       |
+| `cwd`           | text        | the working directory for this session                          |
+| `model`         | text        | the `--model` flag, if applicable (claude only); null if unset  |
+| `permission`    | text        | the requested `PermissionPolicy` (`allow` / `deny`)             |
+| `resume_cursor` | text        | the agent-issued session id (e.g. ACP `sessionId`) most recently observed |
+| `system_prompt` | text        | snapshot of the inline persona prompt; re-applied on `resume`. null when none was set |
+| `created_at`    | integer     | unix timestamp of spawn time                                    |
+| `closed_at`     | integer     | unix timestamp of close time; null while live                   |
 
-Fields:
+The SQLite transaction is atomic — partial writes never leave the database
+in an inconsistent state.
 
-| field           | source                                                         |
-|-----------------|-----------------------------------------------------------------|
-| `session_id`    | roy-side UUID minted at first spawn; stable across restarts     |
-| `agent`         | the preset name (`claude`, `gemini`, `opencode`, `codex`)       |
-| `cwd`           | the working directory for this session                          |
-| `model`         | the `--model` flag, if applicable (claude only)                 |
-| `permission`    | the requested `PermissionPolicy` (`allow` / `deny`)             |
-| `project_id`    | UUID of the owning project; `null` means orphan session         |
-| `resume_cursor` | the agent-issued session id (e.g. ACP `sessionId`) most recently observed from `Handle::resume_cursor()` |
-| `system_prompt` | snapshot of the inline persona prompt the session was spawned with; re-applied on `resume`, so editing/deleting the source agent never mutates a live session. Omitted when none was set |
-| `agent_name`    | optional display label of the agent that spawned the session; omitted when unset |
+## Enriched metadata (agents.db)
 
-`cwd` is kept on `SessionMetadata` even though it mirrors the project path,
-so meta files remain self-contained (no registry lookup needed to interpret
-one file in isolation).
+Project and session-level rich metadata live in separate tables, joined at
+query time via HTTP APIs in `roy-management`:
 
-The atomic write is a temp file inside the same directory plus
-`tokio::fs::rename` — partial writes never replace the canonical file,
-so a crash mid-write leaves the previous valid metadata intact.
+**projects**: `id`, `name` (unique), `path`, `created_at`.
+
+**session_meta**: per-session enrichment — `session_id` (FK to sessions.db),
+`project_id` (FK to projects), `agent_id`, `agent_name`, `display_label`.
+Allows sessions to be tagged with a project and display label without
+mutating the immutable boot-kit.
+
+**session_tags**: key-value tags — `session_id`, `key`, `value` (composite
+PK). Queryable and editable via HTTP APIs for organizing sessions.
 
 ## Two ids: roy-side vs agent-side
 
@@ -147,27 +119,30 @@ agent-side cursor is replayed into `Transport::open`.
 ## Resume flow
 
 ```
-┌─ on disk ─────────────────┐         ┌─ live ─────────────────────┐
-│  <id>.jsonl   (history)   │         │  SessionEngine             │
-│  <id>.meta.json (cursor)  │ ──────► │   reads cursor → passes to │
-│                            │ resume  │   Transport::open ──► ACP  │
-│                            │         │     session/load           │
+┌─ on disk ──────────────────┐         ┌─ live ─────────────────────┐
+│  sessions.db (boot-kit)    │         │  SessionEngine             │
+│   ├ session_id (PK)        │         │   reads boot-kit row       │
+│   ├ agent, cwd, model      │ ─────► │   → passes to              │
+│   ├ resume_cursor          │ resume  │   Transport::open ──► ACP  │
+│   └ ...                    │         │     session/load           │
+│  <id>.jsonl (history)      │         │                            │
 └────────────────────────────┘         └────────────────────────────┘
 ```
 
 Triggered by either:
 
 - `roy resume <session_id>` — explicit one-session resurrect.
-- `roy serve --resume-all` — daemon scans `journal_dir` at startup and
-  brings back every archived session.
+- `roy serve --resume-all` — daemon queries `sessions.db` at startup and
+  brings back every session with `closed_at IS NULL`.
 
 What survives:
 
 | thing                    | survives restart? | how                                        |
 |--------------------------|--------------------|--------------------------------------------|
-| roy session id           | yes                | persisted as the journal filename          |
-| journal contents         | yes                | append-only file on disk                   |
-| `resume_cursor`          | yes                | persisted in `.meta.json`                  |
+| roy session id           | yes                | persisted in `sessions.session_id` (PK)   |
+| journal contents         | yes                | append-only JSONL file on disk             |
+| boot-kit (agent, cwd)    | yes                | persisted in `sessions` row                |
+| `resume_cursor`          | yes                | persisted in `sessions.resume_cursor`      |
 | agent process            | **no**             | killed with the previous daemon            |
 | in-memory broadcast      | no                 | bounded ring, rebuilt empty on resume      |
 | input lease state        | no                 | resets to "no holder" on resume            |

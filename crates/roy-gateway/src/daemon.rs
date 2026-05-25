@@ -2,7 +2,6 @@
 //! that walks through Spawn/Resume → AcquireInput → Send → Frame loop →
 //! ReleaseInput for a single turn.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
@@ -20,14 +19,9 @@ use tokio::net::UnixStream;
 /// because it opened and closed its own connection inside the daemon call.
 #[async_trait]
 pub trait Conn: Send {
-    async fn spawn(
-        &mut self,
-        preset: &str,
-        project_id: Option<String>,
-        tags: BTreeMap<String, String>,
-    ) -> Result<String>;
+    async fn spawn(&mut self, preset: &str, cwd: Option<PathBuf>) -> Result<String>;
 
-    async fn resume(&mut self, session_id: &str, tags: BTreeMap<String, String>) -> Result<String>;
+    async fn resume(&mut self, session_id: &str) -> Result<String>;
 
     async fn acquire_input(&mut self, session: &str) -> Result<()>;
 
@@ -110,19 +104,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TurnConn<S> {
 
 #[async_trait]
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Conn for TurnConn<S> {
-    async fn spawn(
-        &mut self,
-        preset: &str,
-        project_id: Option<String>,
-        tags: BTreeMap<String, String>,
-    ) -> Result<String> {
+    async fn spawn(&mut self, preset: &str, cwd: Option<PathBuf>) -> Result<String> {
         self.send_cmd(&ClientCommand::Spawn {
             agent: preset.into(),
-            project_id,
+            cwd,
             model: None,
             permission: None,
             resume: None,
-            tags,
             system_prompt: None,
         })
         .await?;
@@ -138,10 +126,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Conn for TurnConn<S> {
         }
     }
 
-    async fn resume(&mut self, session_id: &str, tags: BTreeMap<String, String>) -> Result<String> {
+    async fn resume(&mut self, session_id: &str) -> Result<String> {
         self.send_cmd(&ClientCommand::Resume {
             session: session_id.into(),
-            tags: Some(tags),
         })
         .await?;
         loop {
@@ -266,23 +253,20 @@ mod tests {
             server,
             vec![(
                 Box::new(|cmd| match cmd {
-                    ClientCommand::Spawn {
-                        agent, project_id, ..
-                    } => {
+                    ClientCommand::Spawn { agent, cwd, .. } => {
                         assert_eq!(agent, "claude");
-                        assert_eq!(project_id.as_deref(), None);
+                        assert!(cwd.is_none());
                     }
                     other => panic!("expected Spawn, got {other:?}"),
                 }),
                 ServerEvent::Spawned {
                     session: "sid-1".into(),
-                    project_id: None,
                     resume_cursor: None,
                 },
             )],
         ));
         let mut conn = turn_conn_from_duplex(client);
-        let sid = conn.spawn("claude", None, BTreeMap::new()).await.unwrap();
+        let sid = conn.spawn("claude", None).await.unwrap();
         assert_eq!(sid, "sid-1");
     }
 
