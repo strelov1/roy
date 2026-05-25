@@ -115,7 +115,7 @@ tool result body). The JSON shapes are identical across all transports.
 | `list_archived`   | —                                                                                               |
 | `resume`          | `session`                                                                                       |
 | `read_journal`    | `session`, optional `from_seq`, optional `max_entries`                                          |
-| `inject`          | `session`, `text`, optional `source_session`, optional `respond` (default `false`), optional `timeout_ms` |
+| `inject`          | `session`, `text`, optional `source_session`                                                    |
 | `list_projects`   | —                                                                                               |
 | `create_project`  | `name`                                                                                          |
 | `delete_project`  | `project_id`                                                                                    |
@@ -143,16 +143,11 @@ on-disk path as `workspace_dir/name` and creates the directory.
 session belonging to that project has its `.jsonl` and `.meta.json` deleted.
 The on-disk `workspace_dir/<name>/` directory is **not** removed.
 
-`inject` drops a message into a **live** session (resume an archived one first;
-an unknown/non-live session replies `error` with code `no_session`):
-
-- `respond: false` (default) → appends a `note` event referencing
-  `source_session`. **No input lease required**, so it lands even while an
-  interactive client holds the lease. Reply:
-  `{"kind":"injected","session":"<sid>","seq":N}`.
-- `respond: true` → delivers `text` as a real user turn the agent answers;
-  the daemon waits for any in-flight turn to finish first. Reply: the same
-  `fire_done` / `fire_timeout` / `fire_error` events as `fire`.
+`inject` appends a `note` event to a **live** session's journal/broadcast
+without taking the input lease (so it lands even while an interactive client
+holds it). Reply: `{"kind":"injected","session":"<sid>","seq":N}`. An
+unknown/non-live session replies `error` with code `no_session` (resume an
+archived one first). Used by the `roy inject` CLI for agent self-reporting.
 
 ### ServerEvent (server → client)
 
@@ -166,7 +161,7 @@ an unknown/non-live session replies `error` with code `no_session`):
 | `frame`             | `session`, `entry` (the `JournalEntry` shape above)                                                     |
 | `input_acquired`    | `session`, `acquired: bool`                                                                             |
 | `input_released`    | `session`                                                                                               |
-| `injected`          | `session`, `seq` — ack to `inject` with `respond:false` (the appended `note`'s seq)                      |
+| `injected`          | `session`, `seq` — ack to `inject` (the appended `note`'s seq)                                          |
 | `detached`          | `session`                                                                                               |
 | `closed`            | `session`                                                                                               |
 | `listed`            | `sessions: [{id, project_id}]`                                                                          |
