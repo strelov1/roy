@@ -70,6 +70,8 @@ enum Cmd {
     /// (`serve`, `status`, `migrate`, `agents`, `triggers`, `subscribers`,
     /// `fires`, `fire-now`).
     Scheduler(roy_scheduler::cli::Cli),
+    /// Run the management HTTP API (agent CRUD + spawn endpoints).
+    Management(roy_management::Args),
     /// Manage projects (list / create / rename / delete).
     Projects {
         #[command(subcommand)]
@@ -280,6 +282,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Cmd::Gateway(args) => roy_gateway::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Scheduler(args) => roy_scheduler::cli::run(args).await,
+        Cmd::Management(args) => roy_management::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
         Cmd::Agents { cmd } => cmd_agents(cmd).await,
     }
@@ -292,7 +295,7 @@ fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(
-            "roy=info,roy_cli=info,roy_mcp=info,roy_gateway=info,roy_scheduler=info,warn",
+            "roy=info,roy_cli=info,roy_mcp=info,roy_gateway=info,roy_scheduler=info,roy_management=info,warn",
         )
     });
     let _ = tracing_subscriber::fmt()
