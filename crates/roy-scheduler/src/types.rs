@@ -19,6 +19,10 @@ pub struct Agent {
     /// SQLite INTEGER 0/1. Use the bool getter `is_persistent()` for clarity.
     pub persistent: i64,
     pub persistent_session_id: Option<String>,
+    /// Optional roy session id to notify. When set, the fired prompt is
+    /// augmented with a `roy inject <id> ...` instruction so the agent can
+    /// self-report into that session.
+    pub notify_session: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

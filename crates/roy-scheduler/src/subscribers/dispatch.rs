@@ -92,6 +92,7 @@ mod tests {
                 task: "t".into(),
                 model: None,
                 persistent: false,
+                notify_session: None,
             },
         )
         .await

@@ -165,6 +165,7 @@ mod tests {
                 task: "do".into(),
                 model: None,
                 persistent: false,
+                notify_session: None,
             },
         )
         .await
