@@ -527,6 +527,7 @@ async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         (Some(a), None) => FireTarget::Spawn {
             preset: a.to_string(),
             project_id,
+            system_prompt: None,
         },
         (None, Some(sid)) => FireTarget::Resume {
             session_id: sid.to_string(),
@@ -635,6 +636,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
             permission,
             resume,
             tags: BTreeMap::default(),
+            system_prompt: None,
         },
     )
     .await?;
@@ -747,6 +749,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
             permission,
             resume,
             tags: BTreeMap::default(),
+            system_prompt: None,
         },
     )
     .await?;

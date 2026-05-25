@@ -391,6 +391,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
             permission: args.permission.clone(),
             resume: args.resume.clone(),
             tags: BTreeMap::default(),
+            system_prompt: None,
         },
     )
     .await?;
@@ -706,6 +707,7 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
         (Some(agent), None) => FireTarget::Spawn {
             preset: agent,
             project_id: args.project,
+            system_prompt: None,
         },
         (None, Some(session_id)) => FireTarget::Resume { session_id },
         (Some(_), Some(_)) => anyhow::bail!("--agent conflicts with --resume"),

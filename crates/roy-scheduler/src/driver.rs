@@ -271,6 +271,7 @@ async fn run_fire_for_agent(
             let retry_target = roy::FireTarget::Spawn {
                 preset: agent.preset.clone(),
                 project_id: agent.project_id.clone(),
+                system_prompt: None,
             };
             outcome = roy_client::fire(
                 socket_path,
@@ -381,6 +382,7 @@ fn build_target(agent: &Agent) -> roy::FireTarget {
     roy::FireTarget::Spawn {
         preset: agent.preset.clone(),
         project_id: agent.project_id.clone(),
+        system_prompt: None,
     }
 }
 
