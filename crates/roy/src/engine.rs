@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -88,6 +89,9 @@ pub struct SessionEngine {
     /// (`publish`) or an incoming prompt (`Cmd::Prompt` arriving at the
     /// actor). Used by `SessionManager::sweep_idle` to GC quiet sessions.
     last_activity: StdMutex<Instant>,
+    /// True while a turn is being driven. Lets an out-of-band injector decide
+    /// whether to wait for the in-flight turn before pushing its own prompt.
+    turn_active: AtomicBool,
 }
 
 enum Cmd {
@@ -164,6 +168,7 @@ impl SessionEngine {
             input_tx,
             input_lease_held: StdMutex::new(false),
             last_activity: StdMutex::new(Instant::now()),
+            turn_active: AtomicBool::new(false),
         });
 
         // Persist initial metadata so a daemon restart can find this session.
@@ -247,6 +252,23 @@ impl SessionEngine {
     ) -> Result<Seq> {
         let entry = publish(self, TurnEvent::Note { text, source_session }).await?;
         Ok(entry.seq)
+    }
+
+    /// True while a turn is in flight. An out-of-band injector waits on this
+    /// before pushing a prompt, because a prompt that arrives mid-turn is
+    /// dropped by the actor (`drive_turn`).
+    pub fn is_busy(&self) -> bool {
+        self.turn_active.load(Ordering::SeqCst)
+    }
+
+    /// Queue a prompt without holding the input lease. The actor journals it
+    /// as a `UserPrompt` and drives a turn, exactly like a leased `send`. Used
+    /// by `Inject { respond: true }`; the caller must ensure the session is
+    /// idle (see `is_busy`) or the prompt is dropped mid-turn.
+    pub fn inject_prompt(&self, text: String) -> Result<()> {
+        self.input_tx
+            .send(Cmd::Prompt(text))
+            .map_err(|_| RoyError::Protocol("engine actor gone".into()))
     }
 
     /// Most recent activity timestamp. Used by `SessionManager::sweep_idle`.
@@ -464,7 +486,9 @@ async fn run_actor(
                         "failed to journal user prompt; turn still dispatched",
                     );
                 }
+                engine.turn_active.store(true, Ordering::SeqCst);
                 drive_turn(&engine, handle.as_mut(), &text, &mut input_rx).await;
+                engine.turn_active.store(false, Ordering::SeqCst);
                 if let Some(cursor) = handle.resume_cursor() {
                     *engine.resume_cursor.lock().unwrap() = Some(cursor);
                     // Non-fatal: session keeps running, but a stale cursor
