@@ -263,6 +263,22 @@ enum AgentsCmd {
         #[arg(long)]
         persistent: Option<bool>,
     },
+    /// Delete an agent persona. Requires --yes (deletion is permanent).
+    Delete {
+        #[command(flatten)]
+        base: MgmtBaseArgs,
+        /// Agent id or slug.
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Spawn a session for this agent. Prints {"session":"<uuid>","agent_id":"<id>"} JSON.
+    Run {
+        #[command(flatten)]
+        base: MgmtBaseArgs,
+        /// Agent id or slug.
+        id: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -922,6 +938,8 @@ async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<ExitCode> {
             cmd_agents_create(base, name, preset, model, prompt_file, description, persistent).await,
         AgentsCmd::Update { base, id, name, preset, model, prompt_file, description, persistent } =>
             cmd_agents_update(base, id, name, preset, model, prompt_file, description, persistent).await,
+        AgentsCmd::Delete { base, id, yes } => cmd_agents_delete(base, id, yes).await,
+        AgentsCmd::Run { base, id } => cmd_agents_run(base, id).await,
     }
 }
 
@@ -996,6 +1014,27 @@ async fn cmd_agents_update(
     };
     let updated = c.update(&resolved, &patch).await?;
     println!("{}", serde_json::to_string_pretty(&updated)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_agents_delete(args: MgmtBaseArgs, id: String, yes: bool) -> anyhow::Result<ExitCode> {
+    if !yes {
+        return Err(anyhow::anyhow!(
+            "refusing without --yes (deletion is permanent)"
+        ));
+    }
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let resolved = c.resolve(&id).await?;
+    c.delete(&resolved).await?;
+    eprintln!("deleted {resolved}");
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_agents_run(args: MgmtBaseArgs, id: String) -> anyhow::Result<ExitCode> {
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let resolved = c.resolve(&id).await?;
+    let resp = c.run(&resolved).await?;
+    println!("{}", serde_json::to_string_pretty(&resp)?);
     Ok(ExitCode::SUCCESS)
 }
 
