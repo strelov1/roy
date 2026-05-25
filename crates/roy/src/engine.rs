@@ -254,6 +254,7 @@ impl SessionEngine {
             self,
             TurnEvent::System {
                 subtype: format!("model_changed:{model}"),
+                text: None,
             },
         )
         .await?;
@@ -520,8 +521,11 @@ async fn run_one_turn(
     // reconstruct the user side of the conversation. A persona turn is
     // journaled as System so the UI doesn't render it as a user message.
     let prelude = if as_system {
+        // Keep the journal self-contained: include the persona body so a late
+        // attach can reconstruct what the agent reacted to (it never echoes it).
         TurnEvent::System {
             subtype: "persona".to_string(),
+            text: Some(text.to_string()),
         }
     } else {
         TurnEvent::UserPrompt {

@@ -871,8 +871,9 @@ async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<St
                     TurnEvent::ToolUse { name, .. } => {
                         rendered.push(format!("[{}] tool_use: {name}", entry.seq));
                     }
-                    TurnEvent::System { subtype } => {
-                        rendered.push(format!("[{}] system: {subtype}", entry.seq));
+                    TurnEvent::System { subtype, text } => {
+                        let body = text.as_deref().map(|t| format!(" {t}")).unwrap_or_default();
+                        rendered.push(format!("[{}] system: {subtype}{body}", entry.seq));
                     }
                     TurnEvent::Result { stop_reason, .. } => {
                         rendered.push(format!("[{}] result: {}", entry.seq, stop_reason.as_wire()));
