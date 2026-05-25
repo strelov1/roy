@@ -1,26 +1,21 @@
 //! `roy serve` daemon: owns one `SessionManager` and serves connections from
-//! triggers (Unix socket and WebSocket today, more later) speaking the control
-//! protocol defined in `crate::control`.
+//! triggers over a Unix socket, speaking the control protocol defined in
+//! `crate::control`. WebSocket clients are served by `roy-gateway`, which
+//! relays them to this socket.
 //!
-//! Wire format is the same JSON payload on both transports. Each transport
-//! gets its own writer task that drains a per-connection `mpsc<ServerEvent>`
-//! and serializes events to its native framing — `\n`-delimited bytes on Unix
-//! socket, `Message::Text` on WebSocket. The command-dispatch loop is shared.
+//! Each connection gets its own writer task that drains a per-connection
+//! `mpsc<ServerEvent>` and serializes events as `\n`-delimited JSON lines.
+//! The command-dispatch loop is shared.
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::UnixListener;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tokio_tungstenite::tungstenite::http;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::WebSocketStream;
 
 use crate::agents_config::AgentPreset;
 use crate::control::{ClientCommand, ErrorCode, FireTarget, ServerEvent};
@@ -38,58 +33,6 @@ type SubsMap = HashMap<String, tokio::task::JoinHandle<()>>;
 
 /// Per-connection input leases, keyed by session id.
 type LeasesMap = HashMap<String, InputLease>;
-
-/// Browsers can't set arbitrary headers on `new WebSocket(url, [protocols])`,
-/// so the auth token rides the subprotocol slot instead.
-const WS_TOKEN_HEADER: &str = "sec-websocket-protocol";
-
-/// Load the WS auth token from `<socket>.token` or mint a fresh UUID and write
-/// it. File is owner-only (`0600`); see [`crate::pid_lock::create_owner_only_file`].
-pub fn load_or_create_ws_token(token_path: &Path) -> Result<String> {
-    if let Some(parent) = token_path.parent() {
-        std::fs::create_dir_all(parent).map_err(RoyError::Io)?;
-    }
-    match std::fs::read_to_string(token_path) {
-        Ok(s) => Ok(s.trim().to_string()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let token = uuid::Uuid::new_v4().to_string();
-            crate::pid_lock::create_owner_only_file(token_path, token.as_bytes())
-                .map_err(RoyError::Io)?;
-            Ok(token)
-        }
-        Err(e) => Err(RoyError::Io(e)),
-    }
-}
-
-fn ws_auth_callback(
-    expected: Arc<String>,
-) -> impl FnOnce(&Request, Response) -> std::result::Result<Response, ErrorResponse> {
-    move |req, mut resp| {
-        let provided = req
-            .headers()
-            .get(WS_TOKEN_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if provided != expected.as_str() {
-            let body = if provided.is_empty() {
-                "missing roy ws token (set Sec-WebSocket-Protocol)"
-            } else {
-                "invalid roy ws token"
-            };
-            return Err(http::Response::builder()
-                .status(http::StatusCode::UNAUTHORIZED)
-                .body(Some(body.into()))
-                .expect("valid http response"));
-        }
-        // WS spec: when the server selects a subprotocol it must echo it back,
-        // or the browser's handshake fails.
-        resp.headers_mut().insert(
-            WS_TOKEN_HEADER,
-            http::HeaderValue::from_str(provided).expect("token is ascii uuid"),
-        );
-        Ok(resp)
-    }
-}
 
 /// Tiny helper to factor away the repetitive error-event send.
 fn send_error(tx: &EventTx, session: Option<String>, code: ErrorCode, message: impl Into<String>) {
@@ -148,7 +91,6 @@ impl TransportFactory for DefaultTransportFactory {
 #[derive(Debug, Clone)]
 pub struct ServeOpts {
     pub socket_path: PathBuf,
-    pub ws_port: Option<u16>,
     /// Auto-close any session quiet past this threshold. `None` disables GC.
     pub idle_timeout: Option<std::time::Duration>,
     /// Resurrect every archived session in `journal_dir` at startup.
@@ -156,9 +98,8 @@ pub struct ServeOpts {
 }
 
 /// The daemon. Holds the shared manager and the transport factory; you can
-/// drive it over a Unix listener (`run_unix`), a TCP-WebSocket listener
-/// (`run_ws`), or pump a single connection by hand (`serve_connection` /
-/// `serve_ws_connection`, useful in tests). High-level entry point is
+/// drive it over a Unix listener (`run_unix`) or pump a single connection by
+/// hand (`serve_connection`, useful in tests). High-level entry point is
 /// `run_with_opts`.
 pub struct Daemon {
     pub manager: Arc<SessionManager>,
@@ -176,9 +117,8 @@ impl Daemon {
     }
 
     /// High-level entry: resume-all (if requested), spawn the idle-GC task
-    /// (if configured), then run the Unix listener and optionally the WS
-    /// listener concurrently. Returns whichever side errors first; on
-    /// graceful shutdown the calling process exits.
+    /// (if configured), then run the Unix listener. Returns only on error;
+    /// on graceful shutdown the calling process exits.
     pub async fn run_with_opts(self: Arc<Self>, opts: ServeOpts) -> Result<()> {
         if opts.resume_all {
             tracing::info!("resume-all: scanning archives");
@@ -208,36 +148,7 @@ impl Daemon {
             });
         }
 
-        let unix = {
-            let me = Arc::clone(&self);
-            let path = opts.socket_path.clone();
-            tokio::spawn(async move { me.run_unix(&path).await })
-        };
-        let ws = if let Some(port) = opts.ws_port {
-            // Load (or create) the shared-secret token clients must present
-            // during the WS handshake. Stored at `<socket>.token`, mode 0600.
-            let token_path = opts.socket_path.with_extension("token");
-            let token = Arc::new(load_or_create_ws_token(&token_path)?);
-            tracing::info!(path = %token_path.display(), "ws auth token");
-            let me = Arc::clone(&self);
-            let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("valid addr");
-            Some(tokio::spawn(async move { me.run_ws(addr, token).await }))
-        } else {
-            None
-        };
-
-        match ws {
-            Some(ws_handle) => {
-                let (u, w) = tokio::join!(unix, ws_handle);
-                u.map_err(|e| RoyError::Protocol(e.to_string()))??;
-                w.map_err(|e| RoyError::Protocol(e.to_string()))??;
-                Ok(())
-            }
-            None => unix
-                .await
-                .map_err(|e| RoyError::Protocol(e.to_string()))?
-                .map(|_| ()),
-        }
+        self.run_unix(&opts.socket_path).await
     }
 
     /// Listen on a Unix socket, accept connections forever. Refuses to start
@@ -284,32 +195,6 @@ impl Daemon {
         }
     }
 
-    /// Accept WS connections on `addr`. Clients must present `token` via
-    /// [`WS_TOKEN_HEADER`]; the upgrade returns HTTP 401 otherwise.
-    pub async fn run_ws(self: Arc<Self>, addr: SocketAddr, token: Arc<String>) -> Result<()> {
-        let listener = TcpListener::bind(addr).await.map_err(RoyError::Io)?;
-        tracing::info!(%addr, "websocket listener up");
-        loop {
-            let (stream, peer) = listener.accept().await.map_err(RoyError::Io)?;
-            let me = Arc::clone(&self);
-            let token_for_conn = Arc::clone(&token);
-            tokio::spawn(async move {
-                let callback = ws_auth_callback(token_for_conn);
-                let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
-                    Ok(ws) => ws,
-                    Err(e) => {
-                        tracing::warn!(%peer, error = %e, "ws handshake rejected");
-                        return;
-                    }
-                };
-                tracing::debug!(%peer, "ws connection accepted");
-                if let Err(e) = me.serve_ws_connection(ws).await {
-                    tracing::warn!(%peer, error = %e, "ws connection ended with error");
-                }
-            });
-        }
-    }
-
     /// Drive one byte-stream client connection (Unix socket or duplex test).
     pub async fn serve_connection<R, W>(self: &Arc<Self>, reader: R, writer: W) -> Result<()>
     where
@@ -320,19 +205,6 @@ impl Daemon {
         let writer_handle = tokio::spawn(line_writer_loop(writer, event_rx));
         let result = self.dispatch_lines(reader, event_tx).await;
         // event_tx dropped → writer_loop sees None → exits cleanly.
-        log_writer_join(writer_handle.await);
-        result
-    }
-
-    /// Drive one WebSocket client connection.
-    pub async fn serve_ws_connection<S>(self: &Arc<Self>, ws: WebSocketStream<S>) -> Result<()>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-        let (ws_sink, ws_stream) = ws.split();
-        let writer_handle = tokio::spawn(ws_writer_loop(ws_sink, event_rx));
-        let result = self.dispatch_ws(ws_stream, event_tx).await;
         log_writer_join(writer_handle.await);
         result
     }
@@ -351,43 +223,6 @@ impl Daemon {
                 continue;
             }
             self.dispatch_one_command(line, &event_tx, &mut subs, &mut leases)
-                .await;
-        }
-
-        for handle in subs.into_values() {
-            handle.abort();
-        }
-        Ok(())
-    }
-
-    async fn dispatch_ws<S>(
-        self: &Arc<Self>,
-        mut stream: futures_util::stream::SplitStream<WebSocketStream<S>>,
-        event_tx: EventTx,
-    ) -> Result<()>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send,
-    {
-        let mut subs: SubsMap = HashMap::new();
-        let mut leases: LeasesMap = HashMap::new();
-
-        while let Some(msg) = stream.next().await {
-            let msg = match msg {
-                Ok(m) => m,
-                Err(_) => break,
-            };
-            let text = match msg {
-                Message::Text(t) => t,
-                Message::Close(_) => break,
-                // Ignore binary / ping / pong frames; tungstenite handles
-                // ping/pong itself.
-                _ => continue,
-            };
-            let text = text.trim();
-            if text.is_empty() {
-                continue;
-            }
-            self.dispatch_one_command(text, &event_tx, &mut subs, &mut leases)
                 .await;
         }
 
@@ -1341,24 +1176,6 @@ where
     }
 }
 
-async fn ws_writer_loop<S>(
-    mut sink: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
-    mut rx: mpsc::UnboundedReceiver<ServerEvent>,
-) where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    while let Some(event) = rx.recv().await {
-        let json = match serde_json::to_string(&event) {
-            Ok(j) => j,
-            Err(_) => continue,
-        };
-        if sink.send(Message::Text(json.into())).await.is_err() {
-            break;
-        }
-    }
-    let _ = sink.close().await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1405,74 +1222,6 @@ mod tests {
     ) -> ServerEvent {
         let line = lines.next_line().await.unwrap().expect("server hung up");
         serde_json::from_str(line.trim()).unwrap()
-    }
-
-    /// `load_or_create_ws_token` creates the file with `0600` on first call and
-    /// returns the same value on subsequent calls.
-    #[cfg(unix)]
-    #[test]
-    fn ws_token_is_persistent_and_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tmp_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        let token_path = dir.join("daemon.token");
-        let t1 = load_or_create_ws_token(&token_path).unwrap();
-        assert!(!t1.is_empty(), "token must not be empty");
-        let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "token file must be 0600, got {mode:o}");
-        let t2 = load_or_create_ws_token(&token_path).unwrap();
-        assert_eq!(t1, t2, "second call must return the persisted token");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Client that omits the token (or sends the wrong one) must be rejected at
-    /// the WS upgrade — `accept_hdr_async` returns an Err and the stream never
-    /// reaches `serve_ws_connection`.
-    #[tokio::test]
-    async fn ws_handshake_rejects_missing_or_wrong_token() {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-
-        let token = Arc::new("the-real-token".to_string());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let token_for_server = Arc::clone(&token);
-        let server_task = tokio::spawn(async move {
-            // Accept three handshakes; only the third (correct token) succeeds.
-            let mut results = Vec::new();
-            for _ in 0..3 {
-                let (stream, _) = listener.accept().await.unwrap();
-                let cb = ws_auth_callback(Arc::clone(&token_for_server));
-                let r = tokio_tungstenite::accept_hdr_async(stream, cb).await;
-                results.push(r.is_ok());
-            }
-            results
-        });
-
-        // 1. No token → fail.
-        let url = format!("ws://{addr}");
-        let r1 = tokio_tungstenite::connect_async(&url).await;
-        assert!(r1.is_err(), "handshake without token must be rejected");
-
-        // 2. Wrong token → fail.
-        let mut req = url.as_str().into_client_request().unwrap();
-        req.headers_mut().insert(
-            WS_TOKEN_HEADER,
-            http::HeaderValue::from_static("wrong-token"),
-        );
-        let r2 = tokio_tungstenite::connect_async(req).await;
-        assert!(r2.is_err(), "handshake with wrong token must be rejected");
-
-        // 3. Correct token → success.
-        let mut req = url.as_str().into_client_request().unwrap();
-        req.headers_mut().insert(
-            WS_TOKEN_HEADER,
-            http::HeaderValue::from_str(&token).unwrap(),
-        );
-        let r3 = tokio_tungstenite::connect_async(req).await;
-        assert!(r3.is_ok(), "handshake with correct token must succeed");
-
-        let server_results = server_task.await.unwrap();
-        assert_eq!(server_results, vec![false, false, true]);
     }
 
     /// Unix socket and its parent directory must be created with owner-only
@@ -2194,144 +1943,6 @@ mod tests {
         drop(client_wr);
         drop(events);
         let _ = serve_handle.await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// End-to-end through the daemon over a real TCP WebSocket. Validates
-    /// that the same control protocol works over WS framing.
-    #[tokio::test]
-    async fn spawn_attach_send_round_trip_over_websocket() {
-        let dir = tmp_dir();
-        let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
-        );
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server_task = {
-            let d = Arc::clone(&daemon);
-            tokio::spawn(async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-                let _ = d.serve_ws_connection(ws).await;
-            })
-        };
-
-        let url = format!("ws://{addr}");
-        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-
-        async fn ws_send(
-            ws: &mut tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            cmd: &ClientCommand,
-        ) {
-            let json = serde_json::to_string(cmd).unwrap();
-            ws.send(Message::Text(json.into())).await.unwrap();
-        }
-        async fn ws_recv(
-            ws: &mut tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-        ) -> ServerEvent {
-            loop {
-                let msg = ws.next().await.expect("ws closed").unwrap();
-                if let Message::Text(text) = msg {
-                    return serde_json::from_str(text.as_str()).unwrap();
-                }
-            }
-        }
-
-        ws_send(
-            &mut ws,
-            &ClientCommand::Spawn {
-                agent: "opencode".into(),
-                project_id: None,
-                model: None,
-                permission: None,
-                resume: None,
-                tags: BTreeMap::new(),
-            },
-        )
-        .await;
-        match ws_recv(&mut ws).await {
-            ServerEvent::Spawning { agent, project_id } => {
-                assert_eq!(agent, "opencode");
-                assert_eq!(project_id, None);
-            }
-            other => panic!("expected Spawning ack, got {other:?}"),
-        }
-        let session = match ws_recv(&mut ws).await {
-            ServerEvent::Spawned { session, .. } => session,
-            other => panic!("expected Spawned, got {other:?}"),
-        };
-
-        ws_send(
-            &mut ws,
-            &ClientCommand::Attach {
-                session: session.clone(),
-                from_seq: None,
-            },
-        )
-        .await;
-        match ws_recv(&mut ws).await {
-            ServerEvent::Attached { .. } => {}
-            other => panic!("expected Attached, got {other:?}"),
-        }
-
-        ws_send(
-            &mut ws,
-            &ClientCommand::AcquireInput {
-                session: session.clone(),
-            },
-        )
-        .await;
-        match ws_recv(&mut ws).await {
-            ServerEvent::InputAcquired { acquired: true, .. } => {}
-            other => panic!("expected InputAcquired, got {other:?}"),
-        }
-
-        ws_send(
-            &mut ws,
-            &ClientCommand::Send {
-                session: session.clone(),
-                text: "hello".into(),
-            },
-        )
-        .await;
-
-        let mut got_end_turn = false;
-        for _ in 0..32 {
-            if let ServerEvent::Frame { entry, .. } = ws_recv(&mut ws).await {
-                if matches!(
-                    entry.event,
-                    TurnEvent::Result {
-                        stop_reason: StopReason::EndTurn,
-                        ..
-                    }
-                ) {
-                    got_end_turn = true;
-                    break;
-                }
-            }
-        }
-        assert!(got_end_turn, "expected terminal Result{{EndTurn}} over WS");
-
-        ws_send(
-            &mut ws,
-            &ClientCommand::Close {
-                session: session.clone(),
-            },
-        )
-        .await;
-        match ws_recv(&mut ws).await {
-            ServerEvent::Closed { .. } => {}
-            other => panic!("expected Closed, got {other:?}"),
-        }
-
-        let _ = ws.close(None).await;
-        let _ = server_task.await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
