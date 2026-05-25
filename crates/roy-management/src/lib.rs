@@ -42,11 +42,29 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let daemon: Arc<dyn roy_client::DaemonClient> =
         Arc::new(roy_client::UnixSocketDaemonClient::new(socket.clone()));
 
+    // We don't create the scheduler DB file from this process — that's
+    // roy-scheduler's job. The exists() guard prevents sqlx's
+    // create_if_missing default from materializing an empty (un-migrated) DB
+    // that would then permanently shadow the real one.
+    let scheduler_db_path = roy_scheduler::default_db_path();
+    let scheduler_pool = if scheduler_db_path.exists() {
+        match roy_scheduler::db::open(&scheduler_db_path).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(error = %e, db = %scheduler_db_path.display(), "scheduler DB present but failed to open");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let state = AppState {
         store: roy_agents::Store::new(pool),
         meta,
         daemon,
         socket_path: socket,
+        scheduler_pool,
     };
 
     orphan_sweep::spawn(state.meta.clone(), Arc::clone(&state.daemon));

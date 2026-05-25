@@ -136,6 +136,14 @@ pub async fn list_for_agent(pool: &SqlitePool, agent_id: &str, limit: i64) -> Re
     Ok(v)
 }
 
+pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<Fire>> {
+    let v = sqlx::query_as::<_, Fire>("SELECT * FROM fires ORDER BY started_at DESC LIMIT ?")
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
