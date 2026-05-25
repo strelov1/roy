@@ -114,6 +114,136 @@ impl MetaStore {
         }
         Ok(())
     }
+
+    pub async fn upsert_session_meta(&self, meta: &SessionMeta) -> Result<(), MetaError> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            "INSERT INTO session_meta \
+            (session_id, project_id, agent_id, agent_name, display_label, created_at) \
+            VALUES (?, ?, ?, ?, ?, ?) \
+            ON CONFLICT(session_id) DO UPDATE SET \
+                project_id = excluded.project_id, \
+                agent_id = excluded.agent_id, \
+                agent_name = excluded.agent_name, \
+                display_label = excluded.display_label, \
+                created_at = excluded.created_at",
+        )
+        .bind(&meta.session_id)
+        .bind(&meta.project_id)
+        .bind(&meta.agent_id)
+        .bind(&meta.agent_name)
+        .bind(&meta.display_label)
+        .bind(meta.created_at)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("DELETE FROM session_tags WHERE session_id = ?")
+            .bind(&meta.session_id)
+            .execute(&mut *tx)
+            .await?;
+
+        for (key, value) in &meta.tags {
+            sqlx::query("INSERT INTO session_tags (session_id, key, value) VALUES (?, ?, ?)")
+                .bind(&meta.session_id)
+                .bind(key)
+                .bind(value)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_session_meta(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionMeta>, MetaError> {
+        let row: Option<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        )> = sqlx::query_as(
+            "SELECT session_id, project_id, agent_id, agent_name, display_label, created_at \
+            FROM session_meta WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            None => Ok(None),
+            Some((sid, proj_id, agent_id, agent_name, display_label, created_at)) => {
+                let tag_rows: Vec<(String, String)> = sqlx::query_as(
+                    "SELECT key, value FROM session_tags WHERE session_id = ? ORDER BY key",
+                )
+                .bind(session_id)
+                .fetch_all(&self.pool)
+                .await?;
+
+                let tags = tag_rows.into_iter().collect();
+
+                Ok(Some(SessionMeta {
+                    session_id: sid,
+                    project_id: proj_id,
+                    agent_id,
+                    agent_name,
+                    display_label,
+                    tags,
+                    created_at,
+                }))
+            }
+        }
+    }
+
+    pub async fn set_tags(
+        &self,
+        session_id: &str,
+        tags: &BTreeMap<String, String>,
+    ) -> Result<(), MetaError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM session_tags WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+
+        for (key, value) in tags {
+            sqlx::query("INSERT INTO session_tags (session_id, key, value) VALUES (?, ?, ?)")
+                .bind(session_id)
+                .bind(key)
+                .bind(value)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn delete_session_meta(&self, session_id: &str) -> Result<(), MetaError> {
+        let mut tx = self.pool.begin().await?;
+
+        let res = sqlx::query("DELETE FROM session_meta WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+
+        if res.rows_affected() == 0 {
+            return Err(MetaError::NotFound(session_id.into()));
+        }
+
+        sqlx::query("DELETE FROM session_tags WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 fn validate_project_name(name: &str) -> Result<(), MetaError> {
@@ -216,5 +346,132 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(versions, vec![(1,), (2,)]);
+    }
+
+    fn meta_with(session_id: &str, tags: &[(&str, &str)]) -> SessionMeta {
+        SessionMeta {
+            session_id: session_id.into(),
+            project_id: None,
+            agent_id: None,
+            agent_name: Some("claude-sonnet-4-6".into()),
+            display_label: Some("test session".into()),
+            tags: tags
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect(),
+            created_at: 1_700_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_then_get_session_meta() {
+        let store = fresh_store().await;
+        let meta = meta_with("sess1", &[("env", "prod"), ("team", "platform")]);
+        store.upsert_session_meta(&meta).await.unwrap();
+
+        let retrieved = store
+            .get_session_meta("sess1")
+            .await
+            .unwrap()
+            .expect("should exist");
+        assert_eq!(retrieved.session_id, "sess1");
+        assert_eq!(retrieved.agent_name, Some("claude-sonnet-4-6".into()));
+        assert_eq!(retrieved.display_label, Some("test session".into()));
+        assert_eq!(retrieved.tags.len(), 2);
+        assert_eq!(retrieved.tags.get("env"), Some(&"prod".into()));
+        assert_eq!(retrieved.tags.get("team"), Some(&"platform".into()));
+    }
+
+    #[tokio::test]
+    async fn upsert_is_idempotent_and_replaces_tags() {
+        let store = fresh_store().await;
+        let meta1 = meta_with("sess2", &[("a", "1"), ("b", "2")]);
+        store.upsert_session_meta(&meta1).await.unwrap();
+
+        let meta2 = meta_with("sess2", &[("a", "9"), ("c", "3")]);
+        store.upsert_session_meta(&meta2).await.unwrap();
+
+        let retrieved = store
+            .get_session_meta("sess2")
+            .await
+            .unwrap()
+            .expect("should exist");
+        assert_eq!(retrieved.tags.len(), 2);
+        assert_eq!(retrieved.tags.get("a"), Some(&"9".into()));
+        assert_eq!(retrieved.tags.get("c"), Some(&"3".into()));
+        assert!(!retrieved.tags.contains_key("b"));
+    }
+
+    #[tokio::test]
+    async fn get_session_meta_missing_returns_none() {
+        let store = fresh_store().await;
+        let result = store.get_session_meta("nonexistent").await.unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn set_tags_replaces_atomically() {
+        let store = fresh_store().await;
+        let meta = meta_with("sess3", &[("a", "1")]);
+        store.upsert_session_meta(&meta).await.unwrap();
+
+        // Replace with empty tags
+        store.set_tags("sess3", &BTreeMap::new()).await.unwrap();
+        let retrieved = store
+            .get_session_meta("sess3")
+            .await
+            .unwrap()
+            .expect("session should still exist");
+        assert_eq!(retrieved.tags.len(), 0);
+
+        // Replace with new tags
+        let mut new_tags = BTreeMap::new();
+        new_tags.insert("x".into(), "y".into());
+        new_tags.insert("p".into(), "q".into());
+        store.set_tags("sess3", &new_tags).await.unwrap();
+        let retrieved = store
+            .get_session_meta("sess3")
+            .await
+            .unwrap()
+            .expect("session should still exist");
+        assert_eq!(retrieved.tags.len(), 2);
+        assert_eq!(retrieved.tags.get("x"), Some(&"y".into()));
+        assert_eq!(retrieved.tags.get("p"), Some(&"q".into()));
+    }
+
+    #[tokio::test]
+    async fn delete_session_meta_removes_row_and_tags() {
+        let store = fresh_store().await;
+        let meta = meta_with("sess4", &[("env", "test")]);
+        store.upsert_session_meta(&meta).await.unwrap();
+
+        // Verify tags exist
+        let tag_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM session_tags WHERE session_id = ?")
+                .bind("sess4")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(tag_count.0, 1);
+
+        // Delete
+        store.delete_session_meta("sess4").await.unwrap();
+
+        // Session should be gone
+        let result = store.get_session_meta("sess4").await.unwrap();
+        assert_eq!(result, None);
+
+        // Tags should also be gone
+        let tag_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM session_tags WHERE session_id = ?")
+                .bind("sess4")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(tag_count.0, 0);
+
+        // Second delete should return NotFound
+        let err = store.delete_session_meta("sess4").await.unwrap_err();
+        assert!(matches!(err, MetaError::NotFound(_)));
     }
 }
