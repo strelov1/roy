@@ -1,6 +1,6 @@
 //! agents table CRUD.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -15,16 +15,26 @@ pub struct NewAgent {
     pub task: String,
     pub model: Option<String>,
     pub persistent: bool,
+    pub notify_session: Option<String>,
 }
 
 pub async fn insert(pool: &SqlitePool, new: NewAgent) -> Result<Agent> {
+    // `notify_session` is templated unescaped into the agent's prompt as a
+    // `roy inject <id> "..."` instruction. Roy session ids are UUIDs (minted
+    // by `SessionEngine::spawn`), so require the same shape here — that makes
+    // a malformed value impossible to persist instead of needing per-callsite
+    // quoting in the template.
+    if let Some(sid) = new.notify_session.as_deref() {
+        Uuid::parse_str(sid)
+            .with_context(|| format!("notify_session must be a UUID (got: {sid:?})"))?;
+    }
     let id = Uuid::new_v4().to_string();
     let now = Utc::now();
     let persistent_int: i64 = if new.persistent { 1 } else { 0 };
 
     sqlx::query(
-        "INSERT INTO agents (id, name, preset, project_id, task, model, persistent, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agents (id, name, preset, project_id, task, model, persistent, notify_session, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&new.name)
@@ -33,6 +43,7 @@ pub async fn insert(pool: &SqlitePool, new: NewAgent) -> Result<Agent> {
     .bind(&new.task)
     .bind(&new.model)
     .bind(persistent_int)
+    .bind(&new.notify_session)
     .bind(now)
     .bind(now)
     .execute(pool)
@@ -101,6 +112,7 @@ mod tests {
             task: "summarize today".into(),
             model: None,
             persistent: false,
+            notify_session: None,
         }
     }
 
@@ -140,6 +152,31 @@ mod tests {
         assert!(get_by_id(&pool, &a.id).await.unwrap().is_none());
         // second delete returns false (no row).
         assert!(!delete(&pool, &a.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn notify_session_round_trips() {
+        let (_d, pool) = fresh_pool().await;
+        let sid = Uuid::new_v4().to_string();
+        let mut n = sample();
+        n.notify_session = Some(sid.clone());
+        let a = insert(&pool, n).await.unwrap();
+        let back = get_by_id(&pool, &a.id).await.unwrap().unwrap();
+        assert_eq!(back.notify_session.as_deref(), Some(sid.as_str()));
+    }
+
+    #[tokio::test]
+    async fn notify_session_rejects_non_uuid() {
+        let (_d, pool) = fresh_pool().await;
+        let mut n = sample();
+        n.notify_session = Some("not a uuid".into());
+        let err = insert(&pool, n)
+            .await
+            .expect_err("non-UUID must be rejected");
+        assert!(
+            format!("{err:#}").contains("notify_session must be a UUID"),
+            "unexpected error: {err:#}",
+        );
     }
 
     #[tokio::test]

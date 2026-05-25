@@ -9,27 +9,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use roy::{ClientCommand, FireTarget, ServerEvent, TurnEvent};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::net::unix::OwnedReadHalf;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-
-/// Connect to the daemon, write one command frame, and hand back the reply line
-/// reader. Shared by `fire` and `inject` — both speak the same connect → send →
-/// read-until-terminal-event shape.
-async fn connect_and_send(
-    socket_path: &Path,
-    cmd: &ClientCommand,
-) -> Result<Lines<BufReader<OwnedReadHalf>>> {
-    let stream = UnixStream::connect(socket_path)
-        .await
-        .with_context(|| format!("connecting to roy daemon at {}", socket_path.display()))?;
-    let (reader, mut writer) = stream.into_split();
-    let line = serde_json::to_string(cmd)?;
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
-    Ok(BufReader::new(reader).lines())
-}
 
 /// Successful Fire result — the turn finished with a terminal Result.
 #[derive(Debug, Clone)]
@@ -56,26 +37,6 @@ pub enum FireOutcome {
     },
 }
 
-/// Outcome of an Inject call. `Noted` is the respond=false reply; the other
-/// three mirror Fire for respond=true.
-#[derive(Debug, Clone)]
-pub enum InjectOutcome {
-    Noted {
-        session_id: String,
-        seq: u64,
-    },
-    Done(FireSuccess),
-    Timeout {
-        session_id: String,
-        partial_seq_range: (u64, u64),
-    },
-    Error {
-        session_id: Option<String>,
-        code: String,
-        message: String,
-    },
-}
-
 pub async fn fire(
     socket_path: &Path,
     target: FireTarget,
@@ -89,7 +50,15 @@ pub async fn fire(
         tags,
         timeout_ms: Some(timeout.as_millis() as u64),
     };
-    let mut lines = connect_and_send(socket_path, &cmd).await?;
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .with_context(|| format!("connecting to roy daemon at {}", socket_path.display()))?;
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let line = serde_json::to_string(&cmd)?;
+    writer.write_all(line.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
 
     loop {
         let raw = lines
@@ -146,87 +115,6 @@ pub async fn fire(
     }
 }
 
-pub async fn inject(
-    socket_path: &Path,
-    session: String,
-    text: String,
-    source_session: Option<String>,
-    respond: bool,
-    timeout: Duration,
-) -> Result<InjectOutcome> {
-    let cmd = ClientCommand::Inject {
-        session,
-        text,
-        source_session,
-        respond,
-        timeout_ms: Some(timeout.as_millis() as u64),
-    };
-    let mut lines = connect_and_send(socket_path, &cmd).await?;
-
-    loop {
-        let raw = lines
-            .next_line()
-            .await?
-            .ok_or_else(|| anyhow!("daemon hung up before terminal Inject event"))?;
-        let evt: ServerEvent = serde_json::from_str(raw.trim())?;
-        match evt {
-            ServerEvent::Injected { session, seq } => {
-                return Ok(InjectOutcome::Noted {
-                    session_id: session,
-                    seq,
-                });
-            }
-            ServerEvent::FireDone {
-                session,
-                seq_range,
-                result,
-                assistant_text,
-            } => {
-                let TurnEvent::Result {
-                    cost_usd,
-                    stop_reason,
-                } = result
-                else {
-                    return Err(anyhow!("non-Result in FireDone"));
-                };
-                return Ok(InjectOutcome::Done(FireSuccess {
-                    session_id: session,
-                    seq_range,
-                    cost_usd,
-                    stop_reason: format!("{stop_reason:?}"),
-                    assistant_text,
-                }));
-            }
-            ServerEvent::FireTimeout {
-                session,
-                partial_seq_range,
-            } => {
-                return Ok(InjectOutcome::Timeout {
-                    session_id: session,
-                    partial_seq_range,
-                });
-            }
-            ServerEvent::FireError {
-                session,
-                code,
-                message,
-            }
-            | ServerEvent::Error {
-                session,
-                code,
-                message,
-            } => {
-                return Ok(InjectOutcome::Error {
-                    session_id: session,
-                    code: code.to_string(),
-                    message,
-                });
-            }
-            _ => continue,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +159,7 @@ mod tests {
             FireTarget::Spawn {
                 preset: "claude".into(),
                 project_id: None,
+                system_prompt: None,
             },
             "p".into(),
             BTreeMap::new(),
@@ -306,6 +195,7 @@ mod tests {
             FireTarget::Spawn {
                 preset: "claude".into(),
                 project_id: None,
+                system_prompt: None,
             },
             "p".into(),
             BTreeMap::new(),
@@ -335,6 +225,7 @@ mod tests {
             FireTarget::Spawn {
                 preset: "claude".into(),
                 project_id: None,
+                system_prompt: None,
             },
             "p".into(),
             BTreeMap::new(),
@@ -346,39 +237,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inject_note_maps_to_noted() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("sock");
-        spawn_mock(
-            path.clone(),
-            ServerEvent::Injected {
-                session: "sid".into(),
-                seq: 7,
-            },
-        )
-        .await;
-
-        let out = inject(
-            &path,
-            "sid".into(),
-            "bg result".into(),
-            Some("child".into()),
-            false,
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
-
-        match out {
-            InjectOutcome::Noted { session_id, seq } => {
-                assert_eq!(session_id, "sid");
-                assert_eq!(seq, 7);
-            }
-            other => panic!("expected Noted, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn no_daemon_at_path_returns_error() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("missing.sock");
@@ -387,6 +245,7 @@ mod tests {
             FireTarget::Spawn {
                 preset: "claude".into(),
                 project_id: None,
+                system_prompt: None,
             },
             "p".into(),
             BTreeMap::new(),

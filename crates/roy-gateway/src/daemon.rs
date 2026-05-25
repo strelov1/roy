@@ -123,6 +123,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Conn for TurnConn<S> {
             permission: None,
             resume: None,
             tags,
+            system_prompt: None,
         })
         .await?;
         loop {

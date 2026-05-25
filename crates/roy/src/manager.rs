@@ -109,6 +109,7 @@ impl SessionManager {
             resume_cursor: meta.resume_cursor,
             fixed_session_id: Some(session_id.to_string()),
             tags: meta.tags,
+            system_prompt: meta.system_prompt,
         };
         let transport =
             self.factory
@@ -359,6 +360,7 @@ mod tests {
                 permission_policy: PermissionPolicy::AllowAll,
                 open_timeout: Duration::from_secs(5),
                 env_remove: Vec::new(),
+                system_prompt_channel: crate::transport::SystemPromptChannel::Meta,
             })))
         }
     }
@@ -386,6 +388,7 @@ mod tests {
             resume_cursor: None,
             fixed_session_id: None,
             tags: std::collections::BTreeMap::default(),
+            system_prompt: None,
         }
     }
 
@@ -505,6 +508,8 @@ mod tests {
             permission: None,
             resume_cursor: None,
             tags: Default::default(),
+            system_prompt: None,
+            agent_name: None,
         };
         crate::session_meta::write_metadata(&dir, &meta)
             .await
@@ -527,6 +532,8 @@ mod tests {
             permission: None,
             resume_cursor: None,
             tags: Default::default(),
+            system_prompt: None,
+            agent_name: None,
         };
         crate::session_meta::write_metadata(&dir, &orphan_meta)
             .await

@@ -12,6 +12,17 @@ fn fake_acp_transport() -> Arc<dyn Transport> {
 }
 
 fn fake_acp_transport_with(extra_args: &[&str]) -> Arc<dyn Transport> {
+    fake_acp_transport_with_channel(extra_args, roy::transport::SystemPromptChannel::Meta)
+}
+
+fn fake_acp_transport_first_turn() -> Arc<dyn Transport> {
+    fake_acp_transport_with_channel(&[], roy::transport::SystemPromptChannel::FirstTurn)
+}
+
+fn fake_acp_transport_with_channel(
+    extra_args: &[&str],
+    channel: roy::transport::SystemPromptChannel,
+) -> Arc<dyn Transport> {
     let mut args = vec!["tests/scripts/fake-acp-agent.py".to_string()];
     args.extend(extra_args.iter().map(|s| s.to_string()));
     Arc::new(AcpTransport::new(AcpConfig {
@@ -21,6 +32,7 @@ fn fake_acp_transport_with(extra_args: &[&str]) -> Arc<dyn Transport> {
         permission_policy: PermissionPolicy::AllowAll,
         open_timeout: Duration::from_secs(5),
         env_remove: Vec::new(),
+        system_prompt_channel: channel,
     }))
 }
 
@@ -34,6 +46,7 @@ fn test_cfg() -> SessionSpawnConfig {
         resume_cursor: None,
         fixed_session_id: None,
         tags: std::collections::BTreeMap::new(),
+        system_prompt: None,
     }
 }
 
@@ -293,36 +306,6 @@ async fn inject_note_appends_without_lease() {
 }
 
 #[tokio::test]
-async fn inject_prompt_receiver_resolves_with_this_turns_result() {
-    let journal_dir = tmp_journal_dir();
-    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
-        .await
-        .unwrap();
-
-    // The receiver returned by inject_prompt resolves with THIS turn's own
-    // terminal outcome — no external seq guessing, so it's correct even when
-    // other turns run first.
-    let rx = engine.inject_prompt("hello".into()).expect("inject_prompt");
-    let outcome = rx
-        .await
-        .expect("actor kept the sender alive")
-        .expect("journal read ok");
-    let (_start, _seq, result, _text) = outcome.expect("turn produced a terminal Result");
-    assert!(
-        matches!(result, TurnEvent::Result { .. }),
-        "outcome carries the terminal Result, got {result:?}",
-    );
-
-    engine.close().unwrap();
-    let _ = std::fs::remove_dir_all(&journal_dir);
-}
-
-/// A `Close` arriving mid-turn is consumed inside `drive_turn`; the actor must
-/// still wind down instead of blocking forever on the next `recv` (it holds its
-/// own `input_tx`, so the channel never closes on its own). We prove it by
-/// queuing an inject during a held turn, then closing: the inject's receiver
-/// resolving (with a closed error) means the actor reached shutdown.
-#[tokio::test]
 async fn close_during_turn_winds_down_and_does_not_hang() {
     let journal_dir = tmp_journal_dir();
     let engine = SessionEngine::spawn(
@@ -337,8 +320,8 @@ async fn close_during_turn_winds_down_and_does_not_hang() {
     let attach = engine.attach(None).await.unwrap();
     lease.send("hold").unwrap();
 
-    // Wait until the turn is genuinely active (the cancellable fake streams one
-    // chunk then waits) so the inject/close land mid-turn, not while idle.
+    // Wait until the turn is genuinely active (cancellable fake streams one
+    // chunk then waits) so the Close lands mid-turn.
     let mut stream = attach.stream;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let mut active = false;
@@ -353,19 +336,65 @@ async fn close_during_turn_winds_down_and_does_not_hang() {
             _ => break,
         }
     }
-    assert!(active, "turn should be active before inject/close");
+    assert!(active, "turn should be active before close");
 
-    let rx = engine.inject_prompt("queued".into()).expect("inject");
+    // Close mid-turn. With the fix the actor breaks out of `drive_turn` and
+    // out of the outer `recv` loop, so once it has exited the `input_rx`
+    // receiver is dropped and any further `cancel_turn`/`close` send fails.
+    // A hang (the bug) would leave the actor stuck on `input_rx.recv().await`,
+    // keeping the receiver alive forever.
     drop(lease);
     engine.close().unwrap();
+    drop(stream);
 
-    let resolved = tokio::time::timeout(Duration::from_secs(3), rx).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut wound_down = false;
+    while tokio::time::Instant::now() < deadline {
+        if engine.cancel_turn().is_err() {
+            wound_down = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(
-        matches!(resolved, Ok(Err(_))),
-        "inject receiver must resolve with a closed error once the actor winds \
-         down; a timeout means the actor hung. got {resolved:?}",
+        wound_down,
+        "actor must drop input_rx after Close; a timeout means it hung on recv"
     );
 
+    let _ = std::fs::remove_dir_all(&journal_dir);
+}
+
+#[tokio::test]
+async fn first_turn_persona_is_journaled_as_system() {
+    let journal_dir = tmp_journal_dir();
+    let mut cfg = test_cfg();
+    cfg.system_prompt = Some("PERSONA".to_string());
+    let engine = SessionEngine::spawn(
+        fake_acp_transport_first_turn(),
+        opts(journal_dir.clone()),
+        cfg,
+    )
+    .await
+    .unwrap();
+    // The engine injects the persona as the first turn automatically. Wait for
+    // that turn to reach a terminal Result so the journal is populated.
+    let _ = engine
+        .wait_for_result(0, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let entries = engine.snapshot(0).await.unwrap();
+    assert!(
+        matches!(entries.first().map(|e| &e.event), Some(TurnEvent::System { subtype }) if subtype == "persona"),
+        "first journal entry should be the persona System marker, got: {entries:?}"
+    );
+    // And it must NOT be journaled as a UserPrompt.
+    assert!(
+        !entries
+            .iter()
+            .any(|e| matches!(&e.event, TurnEvent::UserPrompt { text } if text == "PERSONA")),
+        "persona must not appear as a UserPrompt"
+    );
+    engine.close().unwrap();
     let _ = std::fs::remove_dir_all(&journal_dir);
 }
 

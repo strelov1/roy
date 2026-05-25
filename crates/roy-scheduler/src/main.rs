@@ -127,6 +127,10 @@ struct AgentAddArgs {
     /// Persistent agent — every fire resumes the same session id.
     #[arg(long)]
     persistent: bool,
+    /// Roy session id to notify. When set, the agent's fired prompt gets a
+    /// `roy inject <id> ...` instruction so it can self-report findings.
+    #[arg(long)]
+    notify_session: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -187,7 +191,7 @@ struct SubscriberAddArgs {
     /// Agent id to attach to (XOR with `--trigger`).
     #[arg(long)]
     agent: Option<String>,
-    /// inject_parent | webhook | notify_native
+    /// webhook | notify_native
     #[arg(long)]
     kind: String,
     /// JSON config blob (per-kind shape). Stored verbatim.
@@ -220,9 +224,7 @@ struct FireNowArgs {
     fire_timeout: Option<u64>,
     /// Session id of the caller. Recorded on the fire's session as the
     /// reserved tag `roy-scheduler:initiated_by_session` so the UI can link
-    /// the fire back to its initiator. Distinct from
-    /// `roy-scheduler:parent_session_id`, which is set by the
-    /// `inject_parent` subscriber.
+    /// the fire back to its initiator.
     #[arg(long, value_name = "SESSION_ID")]
     parent: Option<String>,
 }
@@ -397,6 +399,7 @@ async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<()> {
                     task: a.task,
                     model: a.model,
                     persistent: a.persistent,
+                    notify_session: a.notify_session,
                 },
             )
             .await?;
@@ -518,7 +521,7 @@ async fn cmd_subscribers(cmd: SubscribersCmd) -> anyhow::Result<()> {
         SubscribersCmd::Add(a) => {
             let kind = roy_scheduler::types::SubscriberKind::parse(&a.kind).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown subscriber kind: {:?} (expected inject_parent|webhook|notify_native)",
+                    "unknown subscriber kind: {:?} (expected webhook|notify_native)",
                     a.kind
                 )
             })?;
