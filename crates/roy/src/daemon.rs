@@ -356,10 +356,8 @@ impl Daemon {
                 session,
                 text,
                 source_session,
-                respond,
-                timeout_ms,
             } => {
-                self.handle_inject(session, text, source_session, respond, timeout_ms, event_tx)
+                self.handle_inject(session, text, source_session, event_tx)
                     .await
             }
             ClientCommand::ListProjects => self.handle_list_projects(event_tx).await,
@@ -753,8 +751,6 @@ impl Daemon {
         session: String,
         text: String,
         source_session: Option<String>,
-        respond: bool,
-        timeout_ms: Option<u64>,
         event_tx: &EventTx,
     ) {
         let Some(engine) = self.manager.get(&session).await else {
@@ -766,80 +762,17 @@ impl Daemon {
             );
             return;
         };
-
-        if !respond {
-            match engine.inject_note(text, source_session).await {
-                Ok(seq) => {
-                    let _ = event_tx.send(ServerEvent::Injected { session, seq });
-                }
-                Err(e) => {
-                    send_error(
-                        event_tx,
-                        Some(session),
-                        ErrorCode::SendFailed,
-                        format!("inject_note failed: {e}"),
-                    );
-                }
+        match engine.inject_note(text, source_session).await {
+            Ok(seq) => {
+                let _ = event_tx.send(ServerEvent::Injected { session, seq });
             }
-            return;
-        }
-
-        // respond = true: deliver as a real turn the agent answers. The engine
-        // queues the inject behind any in-flight turn and reports *this* turn's
-        // own outcome (including its start seq) on the channel.
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(600_000));
-        let rx = match engine.inject_prompt(text) {
-            Ok(rx) => rx,
             Err(e) => {
-                let _ = event_tx.send(ServerEvent::FireError {
-                    session: Some(session),
-                    code: ErrorCode::SendFailed,
-                    message: format!("inject_prompt failed: {e}"),
-                });
-                return;
-            }
-        };
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(Ok(Some((start, seq, result, assistant_text))))) => {
-                let _ = event_tx.send(ServerEvent::FireDone {
-                    session,
-                    seq_range: (start, seq),
-                    result,
-                    assistant_text,
-                });
-            }
-            // Turn finished without a terminal Result (e.g. shutdown mid-turn).
-            Ok(Ok(Ok(None))) => {
-                let end = engine.next_seq().await;
-                let _ = event_tx.send(ServerEvent::FireTimeout {
-                    session,
-                    partial_seq_range: (end, end),
-                });
-            }
-            // Journal read failed inside the engine.
-            Ok(Ok(Err(e))) => {
-                let _ = event_tx.send(ServerEvent::FireError {
-                    session: Some(session),
-                    code: ErrorCode::ReadJournalFailed,
-                    message: format!("inject result read failed: {e}"),
-                });
-            }
-            // The actor dropped the sender (engine gone / session closed).
-            Ok(Err(_recv)) => {
-                let _ = event_tx.send(ServerEvent::FireError {
-                    session: Some(session),
-                    code: ErrorCode::NoSession,
-                    message: "session closed before inject completed".to_string(),
-                });
-            }
-            // We hit the caller's timeout before the turn completed.
-            Err(_elapsed) => {
-                let end = engine.next_seq().await;
-                let _ = event_tx.send(ServerEvent::FireTimeout {
-                    session,
-                    partial_seq_range: (end, end),
-                });
+                send_error(
+                    event_tx,
+                    Some(session),
+                    ErrorCode::SendFailed,
+                    format!("inject_note failed: {e}"),
+                );
             }
         }
     }
@@ -2927,8 +2860,6 @@ mod tests {
                 session: session.clone(),
                 text: "bg result".into(),
                 source_session: Some("child".into()),
-                respond: false,
-                timeout_ms: None,
             },
         )
         .await;
@@ -2966,8 +2897,6 @@ mod tests {
                 session: "does-not-exist".into(),
                 text: "x".into(),
                 source_session: None,
-                respond: false,
-                timeout_ms: None,
             },
         )
         .await;
