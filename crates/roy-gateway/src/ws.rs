@@ -151,6 +151,10 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio_tungstenite::tungstenite::Message;
+
     #[test]
     fn token_is_minted_once_then_persisted() {
         let dir = tempfile::tempdir().unwrap();
@@ -164,5 +168,88 @@ mod tests {
 
         let t2 = load_or_create_ws_token(&token_path).unwrap();
         assert_eq!(t1, t2, "second call must return the persisted token");
+    }
+
+    #[tokio::test]
+    async fn relay_round_trips_a_line_each_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("daemon.sock");
+
+        // Fake daemon: accept one connection, read one line, echo a reply line.
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let fake_daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let got = lines.next_line().await.unwrap().unwrap();
+            write.write_all(b"{\"reply\":\"pong\"}\n").await.unwrap();
+            write.flush().await.unwrap();
+            got
+        });
+
+        // WS server side: accept one upgrade, hand it to relay_connection.
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let sock_for_relay = sock.clone();
+        let relay = tokio::spawn(async move {
+            let (stream, _) = tcp.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            relay_connection(ws, &sock_for_relay).await.unwrap();
+        });
+
+        // WS client: send a command line, expect the daemon's reply back.
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        ws.send(Message::Text("{\"cmd\":\"ping\"}".into())).await.unwrap();
+
+        let reply = loop {
+            match ws.next().await.expect("ws closed").unwrap() {
+                Message::Text(t) => break t.to_string(),
+                _ => continue,
+            }
+        };
+        assert_eq!(reply, "{\"reply\":\"pong\"}");
+
+        let daemon_saw = fake_daemon.await.unwrap();
+        assert_eq!(daemon_saw, "{\"cmd\":\"ping\"}");
+
+        let _ = ws.close(None).await;
+        let _ = relay.await;
+    }
+
+    #[tokio::test]
+    async fn ws_drop_closes_daemon_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("daemon.sock");
+
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        // Fake daemon: accept, then read until EOF; return whether EOF was seen.
+        let fake_daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, _write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            // Returns None at EOF.
+            lines.next_line().await.unwrap()
+        });
+
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let sock_for_relay = sock.clone();
+        let relay = tokio::spawn(async move {
+            let (stream, _) = tcp.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            relay_connection(ws, &sock_for_relay).await.unwrap();
+        });
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        // Close immediately without sending anything.
+        ws.close(None).await.unwrap();
+
+        let eof = fake_daemon.await.unwrap();
+        assert!(eof.is_none(), "daemon must observe EOF after WS closes");
+        let _ = relay.await;
     }
 }
