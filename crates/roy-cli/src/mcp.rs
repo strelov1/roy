@@ -869,6 +869,9 @@ async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<St
                         rendered.push(format!("[{}] result: {}", entry.seq, stop_reason.as_wire()));
                         terminal = Some(stop_reason.as_wire().to_string());
                     }
+                    TurnEvent::Note { text, .. } => {
+                        rendered.push(format!("[{}] note: {text}", entry.seq));
+                    }
                     TurnEvent::Raw(_) => {
                         rendered.push(format!("[{}] raw", entry.seq));
                     }

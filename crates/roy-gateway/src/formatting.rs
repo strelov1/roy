@@ -64,6 +64,17 @@ impl Renderer {
                     cost_usd.unwrap_or(0.0)
                 ));
             }
+            TurnEvent::Note {
+                text,
+                source_session,
+            } => {
+                self.finalize_active();
+                let header = match &source_session {
+                    Some(sid) => format!("📎 <i>background ({})</i>", escape(sid)),
+                    None => "📎 <i>background</i>".to_string(),
+                };
+                self.finalized.push(format!("{}\n{}", header, escape(&text)));
+            }
             TurnEvent::Raw(value) => {
                 self.finalize_active();
                 let compact = serde_json::to_string(&value).unwrap_or_default();
