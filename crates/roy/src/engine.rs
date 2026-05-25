@@ -81,6 +81,7 @@ pub struct SessionEngine {
     /// transport. `set_model` mutates it and rewrites on-disk metadata.
     model: StdMutex<Option<String>>,
     permission: Option<String>,
+    system_prompt: Option<String>,
     resume_cursor: StdMutex<Option<String>>,
     tags: StdMutex<BTreeMap<String, String>>,
     journal: Arc<Journal>,
@@ -168,6 +169,7 @@ impl SessionEngine {
             project_id: cfg.project_id.clone(),
             model: StdMutex::new(cfg.model.clone()),
             permission: cfg.permission.clone(),
+            system_prompt: cfg.system_prompt.clone(),
             resume_cursor: StdMutex::new(initial_cursor.clone()),
             tags: StdMutex::new(cfg.tags.clone()),
             journal,
@@ -191,6 +193,8 @@ impl SessionEngine {
                 permission: cfg.permission,
                 resume_cursor: initial_cursor,
                 tags: cfg.tags,
+                system_prompt: cfg.system_prompt.clone(),
+                agent_name: None,
             },
         )
         .await?;
@@ -412,8 +416,10 @@ impl SessionEngine {
             project_id: self.project_id.clone(), // Option<String> — None = orphan
             model: self.model.lock().unwrap().clone(),
             permission: self.permission.clone(),
+            system_prompt: self.system_prompt.clone(),
             resume_cursor: self.resume_cursor.lock().unwrap().clone(),
             tags: self.tags.lock().unwrap().clone(),
+            agent_name: None,
         }
     }
 
