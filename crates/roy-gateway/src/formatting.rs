@@ -46,7 +46,7 @@ impl Renderer {
                     escape(&args_str)
                 ));
             }
-            TurnEvent::System { subtype } => {
+            TurnEvent::System { subtype, text: _ } => {
                 self.finalize_active();
                 self.finalized
                     .push(format!("<i>ℹ {}</i>", escape(&subtype)));
