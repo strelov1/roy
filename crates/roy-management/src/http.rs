@@ -153,7 +153,11 @@ async fn create_project(
     State(s): State<AppState>,
     Json(req): Json<NewProject>,
 ) -> Result<(StatusCode, Json<crate::meta_store::Project>), ApiError> {
-    let p = s.meta.create_project(&req.name).await.map_err(meta_to_api)?;
+    let p = s
+        .meta
+        .create_project(&req.name)
+        .await
+        .map_err(meta_to_api)?;
     Ok((StatusCode::CREATED, Json(p)))
 }
 
@@ -361,7 +365,9 @@ mod tests {
             .oneshot(
                 Request::post("/projects")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&json!({"name":"p1"})).unwrap()))
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"name":"p1"})).unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -387,7 +393,9 @@ mod tests {
             .oneshot(
                 Request::post("/projects")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&json!({"name":"p1"})).unwrap()))
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"name":"p1"})).unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
