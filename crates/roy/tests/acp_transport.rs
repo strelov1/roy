@@ -234,6 +234,39 @@ async fn dropping_a_turn_cancels_it_and_the_next_turn_proceeds() {
     handle.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn meta_channel_sends_system_prompt_on_session_new() {
+    let out = std::env::temp_dir().join(format!("roy-meta-{}.json", uuid::Uuid::new_v4()));
+    let cfg = AcpConfig {
+        command: "python3".to_string(),
+        args: vec![
+            "tests/scripts/fake-acp-agent.py".to_string(),
+            "--meta-out".to_string(),
+            out.to_string_lossy().to_string(),
+        ],
+        mode_id: None,
+        permission_policy: PermissionPolicy::AllowAll,
+        open_timeout: Duration::from_secs(5),
+        env_remove: Vec::new(),
+        system_prompt_channel: roy::transport::SystemPromptChannel::Meta,
+    };
+    let transport = AcpTransport::new(cfg);
+    let _handle = transport
+        .open(
+            "sid",
+            None,
+            std::env::current_dir().unwrap(),
+            Some("PERSONA"),
+        )
+        .await
+        .expect("open");
+    // open() completes after session/new resolves, so the file is written by now.
+    let raw = std::fs::read(&out).expect("meta file written");
+    let meta: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(meta["systemPrompt"]["append"], "PERSONA");
+    let _ = std::fs::remove_file(&out);
+}
+
 // Real gemini. Ignored by default: needs the `gemini` binary, logged in.
 // Run with: cargo test --test acp_transport -- --ignored real_gemini
 #[tokio::test]
