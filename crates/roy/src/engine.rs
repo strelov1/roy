@@ -237,6 +237,18 @@ impl SessionEngine {
         Ok(model)
     }
 
+    /// Append a `Note` event to the journal + broadcast. Unlike a prompt this
+    /// takes no input lease and never touches the transport, so it lands even
+    /// while an interactive client holds the lease. Returns the appended seq.
+    pub async fn inject_note(
+        &self,
+        text: String,
+        source_session: Option<String>,
+    ) -> Result<Seq> {
+        let entry = publish(self, TurnEvent::Note { text, source_session }).await?;
+        Ok(entry.seq)
+    }
+
     /// Most recent activity timestamp. Used by `SessionManager::sweep_idle`.
     pub fn last_activity(&self) -> Instant {
         *self.last_activity.lock().unwrap()

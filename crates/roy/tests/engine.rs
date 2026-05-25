@@ -262,6 +262,36 @@ async fn wait_for_result_concatenates_many_chunks_then_result() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn inject_note_appends_without_lease() {
+    let journal_dir = tmp_journal_dir();
+    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
+        .await
+        .unwrap();
+
+    // Hold the input lease, as an interactive client would.
+    let _lease = engine.try_acquire_input().expect("first lease");
+
+    // Inject still succeeds despite the held lease.
+    let seq = engine
+        .inject_note("background result".into(), Some("child-sid".into()))
+        .await
+        .expect("inject_note");
+
+    let entries = engine.snapshot(seq).await.unwrap();
+    let note = entries.iter().find(|e| e.seq == seq).expect("note entry");
+    assert_eq!(
+        note.event,
+        TurnEvent::Note {
+            text: "background result".into(),
+            source_session: Some("child-sid".into()),
+        }
+    );
+
+    engine.close().unwrap();
+    let _ = std::fs::remove_dir_all(&journal_dir);
+}
+
 async fn collect_all(
     mut stream: std::pin::Pin<Box<dyn futures::Stream<Item = roy::JournalEntry> + Send>>,
 ) -> Vec<roy::JournalEntry> {
