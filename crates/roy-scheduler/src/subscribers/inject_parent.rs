@@ -1,13 +1,15 @@
-//! inject_parent subscriber — resume the parent session and send the
-//! formatted fire result as the next user turn.
+//! inject_parent subscriber — drop the fire's result into the parent session.
 //!
-//! Behaviour on parent state:
-//! - Live and idle  → send immediately.
-//! - Live and busy  → WaitForResult on the parent (5 min cap), then send.
-//! - Not live       → SessionNotFound bubbles up as a subscriber error.
+//! Default (`respond: false`): append a `Note` event referencing the child
+//! session. No input lease needed, so it lands even while an interactive
+//! client (roy-web) is holding the parent session's lease.
+//!
+//! `respond: true`: deliver the result as a real user turn the parent agent
+//! answers. The daemon waits for any in-flight turn first; a session the user
+//! is actively typing into may still race.
 //!
 //! v1 config:
-//!   { "session_id": "<roy session id>", "prefix": "optional string" }
+//!   { "session_id": "<roy session id>", "prefix": "optional", "respond": false }
 
 use std::path::Path;
 use std::time::Duration;
@@ -16,13 +18,15 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::roy_client::{self, FireOutcome, FireSuccess};
+use crate::roy_client::{self, FireSuccess, InjectOutcome};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub session_id: String,
     #[serde(default)]
     pub prefix: Option<String>,
+    #[serde(default)]
+    pub respond: bool,
 }
 
 pub fn parse_config(json: &str) -> Result<Config> {
@@ -39,25 +43,20 @@ pub async fn execute(
         None => fire_result.assistant_text.clone(),
     };
 
-    // Wait for parent to be idle (cheap if it already is), then Fire-Resume
-    // to inject. We use Fire here rather than separate Resume + Send so the
-    // round-trip is one call and we get an explicit success/timeout/error
-    // back from the daemon.
-    let outcome = roy_client::fire(
+    let outcome = roy_client::inject(
         socket_path,
-        roy::FireTarget::Resume {
-            session_id: cfg.session_id.clone(),
-        },
+        cfg.session_id.clone(),
         body,
-        std::collections::BTreeMap::new(),
+        Some(fire_result.session_id.clone()),
+        cfg.respond,
         Duration::from_secs(5 * 60),
     )
     .await;
 
     match outcome {
-        Ok(FireOutcome::Done(_)) => super::Outcome::ok(),
-        Ok(FireOutcome::Timeout { .. }) => super::Outcome::error("parent stayed busy past 5min"),
-        Ok(FireOutcome::Error { code, message, .. }) => {
+        Ok(InjectOutcome::Noted { .. }) | Ok(InjectOutcome::Done(_)) => super::Outcome::ok(),
+        Ok(InjectOutcome::Timeout { .. }) => super::Outcome::error("parent stayed busy past 5min"),
+        Ok(InjectOutcome::Error { code, message, .. }) => {
             super::Outcome::error(format!("{code}: {message}"))
         }
         Err(e) => super::Outcome::error(format!("roy_client: {e:#}")),
@@ -167,5 +166,36 @@ mod tests {
         let out = execute(&path, &cfg, &fake_success()).await;
         assert_eq!(out.status, super::super::RunStatus::Error);
         assert!(out.error_message.unwrap().contains("no_session"));
+    }
+
+    #[tokio::test]
+    async fn parses_config_with_respond() {
+        let c = parse_config(r#"{"session_id":"sid","respond":true}"#).unwrap();
+        assert_eq!(c.session_id, "sid");
+        assert!(c.respond);
+    }
+
+    #[tokio::test]
+    async fn respond_defaults_false() {
+        let c = parse_config(r#"{"session_id":"sid"}"#).unwrap();
+        assert!(!c.respond);
+    }
+
+    #[tokio::test]
+    async fn execute_ok_when_daemon_returns_injected() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sock");
+        spawn_mock(
+            path.clone(),
+            roy::ServerEvent::Injected {
+                session: "parent-sid".into(),
+                seq: 12,
+            },
+        )
+        .await;
+
+        let cfg = parse_config(r#"{"session_id":"parent-sid"}"#).unwrap();
+        let out = execute(&path, &cfg, &fake_success()).await;
+        assert_eq!(out.status, super::super::RunStatus::Ok);
     }
 }

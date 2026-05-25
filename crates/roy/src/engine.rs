@@ -4,13 +4,13 @@
 //!
 //! See `docs/architecture.md` for the design.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
 
@@ -90,8 +90,25 @@ pub struct SessionEngine {
     last_activity: StdMutex<Instant>,
 }
 
+/// Terminal outcome of a turn, as reported back to an out-of-band injector:
+/// `Ok(Some((start_seq, result_seq, the Result event, concatenated assistant
+/// text)))`, `Ok(None)` if the turn ended without a terminal `Result` (e.g.
+/// shutdown), or `Err` if reading the journal failed. `start_seq` is the seq of
+/// the turn's own `UserPrompt`, so the caller's reported range bounds exactly
+/// this turn even when it ran behind other queued turns.
+type TurnOutcome = Result<Option<(Seq, Seq, TurnEvent, String)>>;
+
 enum Cmd {
     Prompt(String),
+    /// Out-of-band prompt that does NOT require the input lease. Unlike
+    /// `Prompt`, an `Inject` that arrives mid-turn is queued and run after the
+    /// current turn rather than dropped, so a background injector can never
+    /// silently lose its turn or have its result mis-attributed. `done` fires
+    /// with this specific turn's outcome once it completes.
+    Inject {
+        text: String,
+        done: oneshot::Sender<TurnOutcome>,
+    },
     /// Abort the in-flight turn. No-op if no turn is running. The actor reacts
     /// by dropping the current `TurnStream`, which makes the transport send
     /// `session/cancel` to the agent; the synthesised terminal `Result` lands
@@ -235,6 +252,35 @@ impl SessionEngine {
         )
         .await?;
         Ok(model)
+    }
+
+    /// Append a `Note` event to the journal + broadcast. Unlike a prompt this
+    /// takes no input lease and never touches the transport, so it lands even
+    /// while an interactive client holds the lease. Returns the appended seq.
+    pub async fn inject_note(&self, text: String, source_session: Option<String>) -> Result<Seq> {
+        let entry = publish(
+            self,
+            TurnEvent::Note {
+                text,
+                source_session,
+            },
+        )
+        .await?;
+        Ok(entry.seq)
+    }
+
+    /// Queue a prompt without holding the input lease. The actor journals it
+    /// as a `UserPrompt` and drives a turn, exactly like a leased `send` — but
+    /// if a turn is already running, the inject is queued and run after it
+    /// (never dropped). The returned receiver resolves with *this* turn's
+    /// outcome, so a caller can await the right result even when other turns
+    /// run first. Used by `Inject { respond: true }`.
+    pub fn inject_prompt(&self, text: String) -> Result<oneshot::Receiver<TurnOutcome>> {
+        let (done, rx) = oneshot::channel();
+        self.input_tx
+            .send(Cmd::Inject { text, done })
+            .map_err(|_| RoyError::Protocol("engine actor gone".into()))?;
+        Ok(rx)
     }
 
     /// Most recent activity timestamp. Used by `SessionManager::sweep_idle`.
@@ -431,46 +477,50 @@ impl Drop for InputLease {
     }
 }
 
+/// A turn the actor still owes: its prompt text plus the channel to report the
+/// outcome on. Only `Inject`s land here — they're queued when they arrive
+/// mid-turn so they run (in order) after the current turn instead of being
+/// dropped.
+type PendingTurn = (String, oneshot::Sender<TurnOutcome>);
+
 async fn run_actor(
     engine: Arc<SessionEngine>,
     mut handle: Box<dyn Handle>,
     mut input_rx: mpsc::UnboundedReceiver<Cmd>,
 ) {
-    while let Some(cmd) = input_rx.recv().await {
-        match cmd {
-            Cmd::Prompt(text) => {
-                engine.touch_activity();
-                // Journal the user's prompt before driving the turn. Agents
-                // don't echo user input over ACP, so without this step a
-                // refresh / late attach can never reconstruct the user side
-                // of the conversation.
-                if let Err(e) = publish(&engine, TurnEvent::UserPrompt { text: text.clone() }).await
-                {
-                    tracing::error!(
-                        session = %engine.session_id,
-                        error = %e,
-                        "failed to journal user prompt; turn still dispatched",
-                    );
-                }
-                drive_turn(&engine, handle.as_mut(), &text, &mut input_rx).await;
-                if let Some(cursor) = handle.resume_cursor() {
-                    *engine.resume_cursor.lock().unwrap() = Some(cursor);
-                    // Non-fatal: session keeps running, but a stale cursor
-                    // on disk means a future Resume reconnects to the wrong
-                    // agent-side session. Surface it.
-                    if let Err(e) = engine.persist_metadata().await {
-                        tracing::warn!(
-                            session = %engine.session_id,
-                            error = %e,
-                            "failed to persist session metadata after turn",
-                        );
-                    }
-                }
+    let mut pending: VecDeque<PendingTurn> = VecDeque::new();
+    loop {
+        // Drain injects queued during the previous turn before blocking for a
+        // new command — they were deferred precisely so they'd run now.
+        let (text, done) = if let Some((text, done)) = pending.pop_front() {
+            (text, Some(done))
+        } else {
+            match input_rx.recv().await {
+                Some(Cmd::Prompt(text)) => (text, None),
+                Some(Cmd::Inject { text, done }) => (text, Some(done)),
+                // Cancel outside an active turn is a no-op; the turn-driving
+                // loop is the only place a cancel actually means something.
+                Some(Cmd::Cancel) => continue,
+                Some(Cmd::Close) | None => break,
             }
-            // Cancel outside an active turn is a no-op; the turn-driving loop
-            // is the only place a cancel actually means something.
-            Cmd::Cancel => {}
-            Cmd::Close => break,
+        };
+        let closed = run_one_turn(
+            &engine,
+            handle.as_mut(),
+            &text,
+            &mut input_rx,
+            &mut pending,
+            done,
+        )
+        .await;
+        // A `Close` (or channel hang-up) seen mid-turn is consumed inside
+        // `drive_turn`, so it can't reach the `recv` arm above. Honour it here
+        // instead — otherwise the actor would block forever on `recv` (the
+        // engine holds its own `input_tx`, so the channel never closes on its
+        // own). Any queued injects are dropped; their receivers resolve with a
+        // closed error.
+        if closed {
+            break;
         }
     }
     if let Err(e) = handle.close().await {
@@ -482,12 +532,78 @@ async fn run_actor(
     }
 }
 
+/// Journal the prompt, drive one turn to completion, persist the cursor, and —
+/// for an injected turn — report the outcome on `done`. Shared by the leased
+/// (`Prompt`) and lease-free (`Inject`) paths so both behave identically.
+/// Returns `true` if a `Close` / channel hang-up was observed mid-turn, so the
+/// caller knows to wind the actor down.
+async fn run_one_turn(
+    engine: &SessionEngine,
+    handle: &mut dyn Handle,
+    text: &str,
+    input_rx: &mut mpsc::UnboundedReceiver<Cmd>,
+    pending: &mut VecDeque<PendingTurn>,
+    done: Option<oneshot::Sender<TurnOutcome>>,
+) -> bool {
+    // Captured before the UserPrompt is journaled so `wait_for_result` below
+    // sees this turn's own terminal Result (turns run strictly serially, so
+    // the first Result at `seq >= since` is unambiguously ours).
+    let since = engine.next_seq().await;
+    engine.touch_activity();
+    // Journal the user's prompt before driving the turn. Agents don't echo
+    // user input over ACP, so without this step a refresh / late attach can
+    // never reconstruct the user side of the conversation.
+    if let Err(e) = publish(
+        engine,
+        TurnEvent::UserPrompt {
+            text: text.to_string(),
+        },
+    )
+    .await
+    {
+        tracing::error!(
+            session = %engine.session_id,
+            error = %e,
+            "failed to journal user prompt; turn still dispatched",
+        );
+    }
+    let closed = drive_turn(engine, handle, text, input_rx, pending).await;
+    if let Some(cursor) = handle.resume_cursor() {
+        *engine.resume_cursor.lock().unwrap() = Some(cursor);
+        // Non-fatal: session keeps running, but a stale cursor on disk means a
+        // future Resume reconnects to the wrong agent-side session. Surface it.
+        if let Err(e) = engine.persist_metadata().await {
+            tracing::warn!(
+                session = %engine.session_id,
+                error = %e,
+                "failed to persist session metadata after turn",
+            );
+        }
+    }
+    // The turn is done and its terminal Result is already journaled, so this
+    // read resolves immediately; the short timeout only guards the degenerate
+    // "turn ended without a Result" case (e.g. shutdown mid-turn). `since` is
+    // carried back so the caller's reported range bounds exactly this turn.
+    if let Some(done) = done {
+        let outcome = engine
+            .wait_for_result(since, std::time::Duration::from_secs(5))
+            .await
+            .map(|opt| opt.map(|(seq, result, text)| (since, seq, result, text)));
+        let _ = done.send(outcome);
+    }
+    closed
+}
+
+/// Drive one turn to its terminal `Result`. Returns `true` if a `Close` (or
+/// channel hang-up) arrived mid-turn — the actor must wind down rather than
+/// loop back to `recv`, which would block forever.
 async fn drive_turn(
     engine: &SessionEngine,
     handle: &mut dyn Handle,
     text: &str,
     input_rx: &mut mpsc::UnboundedReceiver<Cmd>,
-) {
+    pending: &mut VecDeque<PendingTurn>,
+) -> bool {
     let (mut stream, cancel) = match handle.send(text).await {
         Ok(pair) => pair,
         Err(e) => {
@@ -513,7 +629,7 @@ async fn drive_turn(
                     "failed to journal synthetic terminal Result",
                 );
             }
-            return;
+            return false;
         }
     };
     // Hold the cancel signal in an Option so the Cancel arm can drop it once.
@@ -528,12 +644,18 @@ async fn drive_turn(
                     drop(cancel.take());
                 }
                 Some(Cmd::Prompt(_)) => {
+                    // The lease holder shouldn't send while their own turn
+                    // runs; dropping is correct (Inject, below, is queued).
                     tracing::warn!(
                         session = %engine.session_id,
                         "ignoring Cmd::Prompt during active turn",
                     );
                 }
-                Some(Cmd::Close) | None => return,
+                Some(Cmd::Inject { text, done }) => {
+                    // Queue, don't drop: run after the current turn finishes.
+                    pending.push_back((text, done));
+                }
+                Some(Cmd::Close) | None => return true,
             },
             event = stream.next() => match event {
                 Some(event) => {
@@ -549,6 +671,7 @@ async fn drive_turn(
             },
         }
     }
+    false
 }
 
 async fn publish(engine: &SessionEngine, event: TurnEvent) -> Result<JournalEntry> {
