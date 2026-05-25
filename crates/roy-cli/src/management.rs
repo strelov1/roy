@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub fn url() -> String {
-    std::env::var("ROY_MANAGEMENT_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8079".to_string())
+    std::env::var("ROY_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:8079".to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,9 +42,15 @@ pub struct CreatedSession {
 pub async fn list_projects() -> Result<Vec<Project>> {
     let resp = reqwest::Client::new()
         .get(format!("{}/projects", url()))
-        .send().await.context("GET /projects")?;
+        .send()
+        .await
+        .context("GET /projects")?;
     if !resp.status().is_success() {
-        return Err(anyhow!("management {}: {}", resp.status(), resp.text().await?));
+        return Err(anyhow!(
+            "management {}: {}",
+            resp.status(),
+            resp.text().await?
+        ));
     }
     Ok(resp.json().await?)
 }
@@ -54,9 +59,14 @@ pub async fn create_project(name: &str) -> Result<Project> {
     let resp = reqwest::Client::new()
         .post(format!("{}/projects", url()))
         .json(&serde_json::json!({"name": name}))
-        .send().await?;
+        .send()
+        .await?;
     if !resp.status().is_success() {
-        return Err(anyhow!("management {}: {}", resp.status(), resp.text().await?));
+        return Err(anyhow!(
+            "management {}: {}",
+            resp.status(),
+            resp.text().await?
+        ));
     }
     Ok(resp.json().await?)
 }
@@ -64,9 +74,14 @@ pub async fn create_project(name: &str) -> Result<Project> {
 pub async fn delete_project(id: &str) -> Result<()> {
     let resp = reqwest::Client::new()
         .delete(format!("{}/projects/{}", url(), id))
-        .send().await?;
+        .send()
+        .await?;
     if !resp.status().is_success() {
-        return Err(anyhow!("management {}: {}", resp.status(), resp.text().await?));
+        return Err(anyhow!(
+            "management {}: {}",
+            resp.status(),
+            resp.text().await?
+        ));
     }
     Ok(())
 }
@@ -75,9 +90,14 @@ pub async fn create_session(req: CreateSessionReq) -> Result<CreatedSession> {
     let resp = reqwest::Client::new()
         .post(format!("{}/sessions", url()))
         .json(&req)
-        .send().await?;
+        .send()
+        .await?;
     if !resp.status().is_success() {
-        return Err(anyhow!("management {}: {}", resp.status(), resp.text().await?));
+        return Err(anyhow!(
+            "management {}: {}",
+            resp.status(),
+            resp.text().await?
+        ));
     }
     Ok(resp.json().await?)
 }
@@ -86,9 +106,14 @@ pub async fn put_tags(session_id: &str, tags: &BTreeMap<String, String>) -> Resu
     let resp = reqwest::Client::new()
         .put(format!("{}/sessions/{}/tags", url(), session_id))
         .json(&serde_json::json!({"tags": tags}))
-        .send().await?;
+        .send()
+        .await?;
     if !resp.status().is_success() {
-        return Err(anyhow!("management {}: {}", resp.status(), resp.text().await?));
+        return Err(anyhow!(
+            "management {}: {}",
+            resp.status(),
+            resp.text().await?
+        ));
     }
     Ok(())
 }

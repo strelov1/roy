@@ -76,6 +76,32 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AgentsCmd,
     },
+    /// Manage projects (HTTP-routed through roy-management).
+    Projects {
+        #[command(subcommand)]
+        cmd: ProjectsCmd,
+    },
+    /// Set the tag map for a session (HTTP-routed through roy-management).
+    SetTags(SetTagsArgs),
+}
+
+#[derive(Subcommand)]
+enum ProjectsCmd {
+    /// List all projects.
+    List,
+    /// Create a new project with the given name.
+    Create { name: String },
+    /// Delete a project by id.
+    Delete { id: String },
+}
+
+#[derive(clap::Args)]
+struct SetTagsArgs {
+    /// Session id to update.
+    session: String,
+    /// Replace the tag map with these `--tag k=v` pairs (repeatable).
+    #[arg(long = "tag", value_parser = parse_tag_kv)]
+    tags: Vec<(String, String)>,
 }
 
 #[derive(clap::Args)]
@@ -252,7 +278,36 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Scheduler(args) => roy_scheduler::cli::run(args).await,
         Cmd::Management(args) => roy_management::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Agents { cmd } => cmd_agents(cmd).await,
+        Cmd::Projects { cmd } => cmd_projects(cmd).await,
+        Cmd::SetTags(args) => cmd_set_tags(args).await,
     }
+}
+
+async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<ExitCode> {
+    match cmd {
+        ProjectsCmd::List => {
+            let projects = crate::management::list_projects().await?;
+            for p in projects {
+                println!("{}\t{}\t{}", p.id, p.name, p.path);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProjectsCmd::Create { name } => {
+            let p = crate::management::create_project(&name).await?;
+            println!("{}\t{}\t{}", p.id, p.name, p.path);
+            Ok(ExitCode::SUCCESS)
+        }
+        ProjectsCmd::Delete { id } => {
+            crate::management::delete_project(&id).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+async fn cmd_set_tags(args: SetTagsArgs) -> anyhow::Result<ExitCode> {
+    let tags: BTreeMap<String, String> = args.tags.into_iter().collect();
+    crate::management::put_tags(&args.session, &tags).await?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Set up tracing on stderr so `roy run`/`roy mcp` keep stdout reserved for
