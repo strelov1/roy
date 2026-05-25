@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use agent_client_protocol::schema::{
-    CancelNotification, ContentBlock, ContentChunk, InitializeRequest, LoadSessionRequest,
+    CancelNotification, ContentBlock, ContentChunk, InitializeRequest, LoadSessionRequest, Meta,
     NewSessionRequest, PermissionOptionKind, PromptRequest, ProtocolVersion,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
@@ -52,6 +52,17 @@ pub enum PermissionPolicy {
     AllowAll,
 }
 
+/// How a preset accepts a system/persona prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemPromptChannel {
+    /// Sent via ACP `_meta.systemPrompt = { append }` on `session/new` and
+    /// `session/load`. A real system prompt, outside history, survives resume.
+    Meta,
+    /// The preset ignores `_meta`; the engine injects the persona as the first
+    /// journaled turn instead.
+    FirstTurn,
+}
+
 /// Launch + behaviour config for an ACP agent.
 pub struct AcpConfig {
     pub command: String,
@@ -66,6 +77,8 @@ pub struct AcpConfig {
     /// own env is inherited otherwise). Per-preset because the problematic
     /// variables are agent-specific — e.g. `CLAUDECODE` for `claude-code-acp`.
     pub env_remove: Vec<String>,
+    /// Which channel carries the persona prompt for this preset.
+    pub system_prompt_channel: SystemPromptChannel,
 }
 
 impl AcpConfig {
@@ -78,6 +91,7 @@ impl AcpConfig {
             permission_policy: PermissionPolicy::AllowAll,
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
+            system_prompt_channel: SystemPromptChannel::FirstTurn,
         }
     }
 
@@ -91,6 +105,7 @@ impl AcpConfig {
             permission_policy: PermissionPolicy::Deny,
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
+            system_prompt_channel: SystemPromptChannel::Meta,
         }
     }
 
@@ -103,6 +118,7 @@ impl AcpConfig {
             permission_policy: PermissionPolicy::AllowAll,
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
+            system_prompt_channel: SystemPromptChannel::FirstTurn,
         }
     }
 
@@ -118,6 +134,7 @@ impl AcpConfig {
             permission_policy: PermissionPolicy::AllowAll,
             open_timeout: Duration::from_secs(30),
             env_remove: vec!["CLAUDECODE".to_string()],
+            system_prompt_channel: SystemPromptChannel::Meta,
         }
     }
 }
@@ -151,8 +168,19 @@ impl Transport for AcpTransport {
         _session_id: &str,
         resume_cursor: Option<&str>,
         cwd: PathBuf,
+        system_prompt: Option<&str>,
     ) -> Result<Box<dyn Handle>> {
         let cwd = std::path::absolute(&cwd).map_err(RoyError::Io)?;
+
+        // Route the persona to exactly one channel: Meta presets carry it in
+        // the session request's `_meta`; FirstTurn presets defer it to the
+        // engine (but never on resume — the agent reloads it from history).
+        let system_prompt = system_prompt.map(str::to_string);
+        let (meta_prompt, pending_persona) = match self.config.system_prompt_channel {
+            SystemPromptChannel::Meta => (system_prompt, None),
+            SystemPromptChannel::FirstTurn if resume_cursor.is_none() => (None, system_prompt),
+            SystemPromptChannel::FirstTurn => (None, None),
+        };
 
         let mut cmd = Command::new(&self.config.command);
         cmd.args(&self.config.args)
@@ -243,6 +271,7 @@ impl Transport for AcpTransport {
                         cwd,
                         resume,
                         mode_id,
+                        meta_prompt,
                         ready_tx,
                         cmd_rx,
                         sink_for_actor,
@@ -258,7 +287,11 @@ impl Transport for AcpTransport {
         });
 
         match tokio::time::timeout(open_timeout, ready_rx).await {
-            Ok(Ok(acp_sid)) => Ok(Box::new(AcpHandle { cmd_tx, acp_sid })),
+            Ok(Ok(acp_sid)) => Ok(Box::new(AcpHandle {
+                cmd_tx,
+                acp_sid,
+                pending_persona,
+            })),
             Ok(Err(_)) => match task.await {
                 Ok(Err(err)) => Err(RoyError::Protocol(err.to_string())),
                 _ => Err(RoyError::ProcessExited),
@@ -278,13 +311,14 @@ async fn run_session(
     cwd: PathBuf,
     resume: Option<String>,
     mode_id: Option<String>,
+    meta_prompt: Option<String>,
     ready_tx: oneshot::Sender<String>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
     sink: TurnSink,
     mut dead_rx: watch::Receiver<()>,
 ) -> std::result::Result<(), agent_client_protocol::Error> {
     let session_id = tokio::select! {
-        r = setup_session(&cx, cwd, resume, mode_id) => r?,
+        r = setup_session(&cx, cwd, resume, mode_id, meta_prompt) => r?,
         _ = dead_rx.changed() => {
             return Err(agent_client_protocol::Error::internal_error()
                 .data("agent process exited during initialize"));
@@ -328,11 +362,24 @@ async fn run_session(
     Ok(())
 }
 
+/// Set `_meta.systemPrompt = { "append": <prompt> }` on a request's meta map.
+/// No-op when `prompt` is `None`. claude-code-acp appends this to its
+/// `claude_code` preset; honored on both `session/new` and `session/load`.
+fn apply_system_prompt_meta(meta: &mut Option<Meta>, prompt: Option<&str>) {
+    let Some(prompt) = prompt else { return };
+    let map = meta.get_or_insert_with(serde_json::Map::new);
+    map.insert(
+        "systemPrompt".to_string(),
+        serde_json::json!({ "append": prompt }),
+    );
+}
+
 async fn setup_session(
     cx: &ConnectionTo<Agent>,
     cwd: PathBuf,
     resume: Option<String>,
     mode_id: Option<String>,
+    meta_prompt: Option<String>,
 ) -> std::result::Result<SessionId, agent_client_protocol::Error> {
     cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
         .block_task()
@@ -340,16 +387,15 @@ async fn setup_session(
 
     let (session_id, modes) = match resume {
         Some(sid) => {
-            cx.send_request(LoadSessionRequest::new(sid.clone(), cwd))
-                .block_task()
-                .await?;
+            let mut req = LoadSessionRequest::new(sid.clone(), cwd);
+            apply_system_prompt_meta(&mut req.meta, meta_prompt.as_deref());
+            cx.send_request(req).block_task().await?;
             (SessionId::from(sid), None)
         }
         None => {
-            let response = cx
-                .send_request(NewSessionRequest::new(cwd))
-                .block_task()
-                .await?;
+            let mut req = NewSessionRequest::new(cwd);
+            apply_system_prompt_meta(&mut req.meta, meta_prompt.as_deref());
+            let response = cx.send_request(req).block_task().await?;
             (response.session_id, response.modes)
         }
     };
@@ -593,6 +639,7 @@ fn permission_outcome(
 pub struct AcpHandle {
     cmd_tx: mpsc::UnboundedSender<SessionCommand>,
     acp_sid: String,
+    pending_persona: Option<String>,
 }
 
 #[async_trait]
@@ -617,6 +664,10 @@ impl Handle for AcpHandle {
     async fn close(&mut self) -> Result<()> {
         let _ = self.cmd_tx.send(SessionCommand::Close);
         Ok(())
+    }
+
+    fn take_pending_persona(&mut self) -> Option<String> {
+        self.pending_persona.take()
     }
 }
 
@@ -670,5 +721,29 @@ mod tests {
         assert!(AcpConfig::gemini().env_remove.is_empty());
         assert!(AcpConfig::opencode().env_remove.is_empty());
         assert!(AcpConfig::codex().env_remove.is_empty());
+    }
+
+    #[test]
+    fn presets_declare_system_prompt_channel() {
+        use super::SystemPromptChannel::*;
+        assert_eq!(AcpConfig::claude().system_prompt_channel, Meta);
+        assert_eq!(AcpConfig::opencode().system_prompt_channel, Meta);
+        assert_eq!(AcpConfig::gemini().system_prompt_channel, FirstTurn);
+        assert_eq!(AcpConfig::codex().system_prompt_channel, FirstTurn);
+    }
+
+    #[test]
+    fn apply_system_prompt_meta_sets_append_key() {
+        let mut meta = None;
+        super::apply_system_prompt_meta(&mut meta, Some("PERSONA"));
+        let m = meta.expect("meta set");
+        assert_eq!(m["systemPrompt"]["append"], "PERSONA");
+    }
+
+    #[test]
+    fn apply_system_prompt_meta_noop_when_none() {
+        let mut meta = None;
+        super::apply_system_prompt_meta(&mut meta, None);
+        assert!(meta.is_none());
     }
 }

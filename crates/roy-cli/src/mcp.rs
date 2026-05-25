@@ -129,7 +129,8 @@ fn tools_list() -> Value {
                         "project_id": {"type": "string", "description": "Roy project id to run the session under. Omit to create an orphan session."},
                         "model": {"type": "string"},
                         "permission": {"type": "string", "enum": ["allow", "deny"]},
-                        "resume": {"type": "string", "description": "Agent-side resume cursor (e.g. prior ACP sessionId)."}
+                        "resume": {"type": "string", "description": "Agent-side resume cursor (e.g. prior ACP sessionId)."},
+                        "system_prompt": {"type": "string", "description": "Inline system/persona prompt injected at session start."}
                     },
                     "required": ["agent", "task"],
                     "additionalProperties": false
@@ -146,7 +147,8 @@ fn tools_list() -> Value {
                         "project_id": {"type": "string", "description": "Roy project id to run the session under. Omit to create an orphan session."},
                         "model": {"type": "string"},
                         "permission": {"type": "string", "enum": ["allow", "deny"]},
-                        "resume": {"type": "string"}
+                        "resume": {"type": "string"},
+                        "system_prompt": {"type": "string", "description": "Inline system/persona prompt injected at session start."}
                     },
                     "required": ["agent", "task"],
                     "additionalProperties": false
@@ -337,6 +339,7 @@ struct SpawnArgs {
     model: Option<String>,
     permission: Option<String>,
     resume: Option<String>,
+    system_prompt: Option<String>,
 }
 
 fn parse_spawn_args(args: &Value) -> anyhow::Result<SpawnArgs> {
@@ -354,6 +357,7 @@ fn parse_spawn_args(args: &Value) -> anyhow::Result<SpawnArgs> {
         model: optional("model"),
         permission: optional("permission"),
         resume: optional("resume"),
+        system_prompt: optional("system_prompt"),
     })
 }
 
@@ -527,6 +531,7 @@ async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         (Some(a), None) => FireTarget::Spawn {
             preset: a.to_string(),
             project_id,
+            system_prompt: None,
         },
         (None, Some(sid)) => FireTarget::Resume {
             session_id: sid.to_string(),
@@ -621,6 +626,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         model,
         permission,
         resume,
+        system_prompt,
     } = parse_spawn_args(&args)?;
 
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
@@ -635,6 +641,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
             permission,
             resume,
             tags: BTreeMap::default(),
+            system_prompt,
         },
     )
     .await?;
@@ -734,6 +741,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
         model,
         permission,
         resume,
+        system_prompt,
     } = parse_spawn_args(&args)?;
 
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
@@ -747,6 +755,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
             permission,
             resume,
             tags: BTreeMap::default(),
+            system_prompt,
         },
     )
     .await?;

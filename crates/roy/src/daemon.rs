@@ -267,6 +267,7 @@ impl Daemon {
                 permission,
                 resume,
                 tags,
+                system_prompt,
             } => {
                 let preset: AgentPreset = match agent.parse() {
                     Ok(p) => p,
@@ -276,7 +277,14 @@ impl Daemon {
                     }
                 };
                 self.handle_spawn(
-                    preset, project_id, model, permission, resume, tags, event_tx,
+                    preset,
+                    project_id,
+                    model,
+                    permission,
+                    resume,
+                    tags,
+                    system_prompt,
+                    event_tx,
                 )
                 .await
             }
@@ -406,6 +414,7 @@ impl Daemon {
         permission: Option<String>,
         resume: Option<String>,
         tags: BTreeMap<String, String>,
+        system_prompt: Option<String>,
         event_tx: &EventTx,
     ) {
         let _ = event_tx.send(ServerEvent::Spawning {
@@ -433,6 +442,7 @@ impl Daemon {
             resume_cursor: resume,
             fixed_session_id,
             tags,
+            system_prompt,
         };
         match self.manager.spawn(cfg, 256, 1024).await {
             Ok(engine) => {
@@ -607,7 +617,11 @@ impl Daemon {
     ) {
         // 1. Spawn or Resume
         let engine = match target {
-            FireTarget::Spawn { preset, project_id } => {
+            FireTarget::Spawn {
+                preset,
+                project_id,
+                system_prompt,
+            } => {
                 let parsed: AgentPreset = match preset.parse() {
                     Ok(p) => p,
                     Err(e) => {
@@ -644,6 +658,7 @@ impl Daemon {
                     resume_cursor: None,
                     fixed_session_id,
                     tags,
+                    system_prompt,
                 };
                 match self.manager.spawn(cfg, 256, 1024).await {
                     Ok(e) => e,
@@ -1305,6 +1320,7 @@ mod tests {
                 permission_policy: PermissionPolicy::AllowAll,
                 open_timeout: Duration::from_secs(5),
                 env_remove: Vec::new(),
+                system_prompt_channel: crate::transport::SystemPromptChannel::Meta,
             })))
         }
     }
@@ -1408,6 +1424,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -1496,6 +1513,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A `Spawn` carrying `system_prompt` must persist that value in the
+    /// session metadata so the engine can inject the persona into the first
+    /// turn and so `resume` can re-apply it.
+    #[tokio::test]
+    async fn spawn_persists_system_prompt_in_metadata() {
+        let dir = tmp_dir();
+        let daemon = Arc::new(
+            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
+                .expect("registry load"),
+        );
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (server_rd, server_wr) = tokio::io::split(server_side);
+        let serve_handle = {
+            let d = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let _ = d.serve_connection(server_rd, server_wr).await;
+            })
+        };
+
+        let (client_rd, mut client_wr) = tokio::io::split(client_side);
+        let mut events = BufReader::new(client_rd).lines();
+
+        send_cmd_line(
+            &mut client_wr,
+            &ClientCommand::Spawn {
+                agent: "opencode".into(),
+                project_id: None,
+                model: None,
+                permission: None,
+                resume: None,
+                tags: BTreeMap::new(),
+                system_prompt: Some("PERSONA".into()),
+            },
+        )
+        .await;
+        match next_event_line(&mut events).await {
+            ServerEvent::Spawning { .. } => {}
+            other => panic!("expected Spawning, got {other:?}"),
+        }
+        let session = match next_event_line(&mut events).await {
+            ServerEvent::Spawned { session, .. } => session,
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+
+        let meta = crate::session_meta::read_metadata(&dir, &session)
+            .await
+            .unwrap();
+        assert_eq!(meta.system_prompt.as_deref(), Some("PERSONA"));
+
+        drop(client_wr);
+        drop(events);
+        let _ = serve_handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// After a session is closed, `Attach` to its id must fall back to the
     /// on-disk journal (read-only replay), and `ListArchived` must include it
     /// while live `List` does not.
@@ -1529,6 +1602,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -1669,6 +1743,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -1851,6 +1926,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2015,6 +2091,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2036,6 +2113,7 @@ mod tests {
                 permission: None,
                 resume: Some("prior-session-sid".into()),
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2094,6 +2172,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2180,6 +2259,7 @@ mod tests {
                 target: FireTarget::Spawn {
                     preset: "opencode".into(),
                     project_id: None,
+                    system_prompt: None,
                 },
                 prompt: "fire now".into(),
                 tags: BTreeMap::from([(
@@ -2250,6 +2330,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: initial,
+                system_prompt: None,
             },
         )
         .await;
@@ -2432,6 +2513,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2491,6 +2573,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2563,6 +2646,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;
@@ -2813,6 +2897,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 tags: BTreeMap::new(),
+                system_prompt: None,
             },
         )
         .await;

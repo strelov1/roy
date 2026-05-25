@@ -33,6 +33,13 @@ pub struct SessionMetadata {
     pub resume_cursor: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tags: BTreeMap<String, String>,
+    /// Snapshot of the persona prompt the session was spawned with. Re-applied
+    /// on resume; editing/deleting the source agent never mutates a live session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Optional display label of the agent that spawned this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 
 /// Compute the metadata file path for `session_id` in `dir`.
@@ -85,6 +92,8 @@ mod tests {
             permission: Some("allow".to_string()),
             resume_cursor: Some("acp-sid-x".to_string()),
             tags: BTreeMap::from([("foo".to_string(), "bar".to_string())]),
+            system_prompt: None,
+            agent_name: None,
         };
         write_metadata(&dir, &meta).await.unwrap();
         let back = read_metadata(&dir, "sid-1").await.unwrap();
@@ -97,6 +106,27 @@ mod tests {
         let dir = tmpdir();
         let _ = std::fs::create_dir_all(&dir);
         assert!(read_metadata(&dir, "missing").await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn system_prompt_snapshot_roundtrips() {
+        let dir = tmpdir();
+        let meta = SessionMetadata {
+            session_id: "sid".into(),
+            agent: "claude".into(),
+            cwd: PathBuf::from("/tmp"),
+            project_id: None,
+            model: None,
+            permission: None,
+            resume_cursor: None,
+            tags: BTreeMap::new(),
+            system_prompt: Some("PERSONA".into()),
+            agent_name: None,
+        };
+        write_metadata(&dir, &meta).await.unwrap();
+        let back = read_metadata(&dir, "sid").await.unwrap();
+        assert_eq!(back.system_prompt.as_deref(), Some("PERSONA"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
