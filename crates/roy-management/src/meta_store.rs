@@ -46,12 +46,19 @@ pub struct SessionMeta {
 
 #[derive(Clone)]
 pub struct MetaStore {
-    pub(crate) pool: SqlitePool,
+    pool: SqlitePool,
 }
 
 impl MetaStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Test seam: hands out a clone of the inner pool for direct SQL probes
+    /// and failure-injection (e.g. closing it to force write errors).
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> SqlitePool {
+        self.pool.clone()
     }
 
     pub async fn apply_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -357,6 +364,9 @@ mod tests {
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
+        // Leak the tempdir: the SqlitePool inside MetaStore must keep reading
+        // the file for the rest of the test, but the dir would otherwise be
+        // dropped when this function returns.
         std::mem::forget(dir);
         MetaStore::new(pool)
     }
@@ -544,7 +554,7 @@ mod tests {
         let tag_count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM session_tags WHERE session_id = ?")
                 .bind("sess4")
-                .fetch_one(&store.pool)
+                .fetch_one(&store.pool())
                 .await
                 .unwrap();
         assert_eq!(tag_count.0, 1);
@@ -560,7 +570,7 @@ mod tests {
         let tag_count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM session_tags WHERE session_id = ?")
                 .bind("sess4")
-                .fetch_one(&store.pool)
+                .fetch_one(&store.pool())
                 .await
                 .unwrap();
         assert_eq!(tag_count.0, 0);

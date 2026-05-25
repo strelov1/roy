@@ -51,6 +51,7 @@ mod tests {
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
+        // Leak the tempdir: pool reads from this file for the rest of the test.
         std::mem::forget(dir);
         let meta = MetaStore::new(pool);
         meta.upsert_session_meta(&SessionMeta {

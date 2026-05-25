@@ -254,12 +254,9 @@ async fn create_session(
 }
 
 async fn list_sessions(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let live = s
-        .daemon
-        .list()
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    let archived = s.daemon.list_archived().await.unwrap_or_default();
+    let (live, archived) = tokio::join!(s.daemon.list(), s.daemon.list_archived());
+    let live = live.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let archived = archived.unwrap_or_default();
     let mut sids: Vec<String> = live
         .iter()
         .cloned()
@@ -599,7 +596,7 @@ mod tests {
         // Force the upsert_session_meta to fail by closing the pool out from
         // under the MetaStore. The spawn happens first (mock, succeeds), then
         // the meta write fails, which must trigger a compensating close.
-        st.meta.pool.close().await;
+        st.meta.pool().close().await;
         let app = router(st);
 
         let body = serde_json::to_vec(&json!({"agent": "claude"})).unwrap();

@@ -542,15 +542,24 @@ async fn run_one_turn(
     }
     let closed = drive_turn(engine, handle, text, input_rx).await;
     if let Some(cursor) = handle.resume_cursor() {
-        *engine.resume_cursor.lock().unwrap() = Some(cursor);
-        // Non-fatal: session keeps running, but a stale cursor on disk means a
-        // future Resume reconnects to the wrong agent-side session. Surface it.
-        if let Err(e) = engine.persist_cursor().await {
-            tracing::warn!(
-                session = %engine.session_id,
-                error = %e,
-                "failed to persist session cursor after turn",
-            );
+        let changed = {
+            let mut guard = engine.resume_cursor.lock().unwrap();
+            let differs = guard.as_ref() != Some(&cursor);
+            if differs {
+                *guard = Some(cursor);
+            }
+            differs
+        };
+        if changed {
+            // Non-fatal: session keeps running, but a stale cursor on disk means
+            // a future Resume reconnects to the wrong agent-side session.
+            if let Err(e) = engine.persist_cursor().await {
+                tracing::warn!(
+                    session = %engine.session_id,
+                    error = %e,
+                    "failed to persist session cursor after turn",
+                );
+            }
         }
     }
     closed
