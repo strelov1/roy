@@ -16,9 +16,9 @@ Non-negotiable expectations for any change in this repo:
 A Cargo workspace with four crates:
 
 - **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting metadata so sessions survive across daemon restarts.
-- **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket / WebSocket) plus an MCP server (`roy mcp`) that exposes the daemon to MCP-aware AI clients.
+- **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket) plus an MCP server (`roy mcp`) that exposes the daemon to MCP-aware AI clients.
 - **`crates/roy-scheduler`** — cron + one-shot fire dispatcher. Talks to the daemon over its Unix socket using `ClientCommand::Fire`; never reaches into `SessionManager`, `Engine`, or `Journal`. Owns its own SQLite state (`~/.local/state/roy-scheduler/state.db`) for triggers, fires, and subscribers.
-- **`crates/roy-gateway`** — chat-platform → daemon bridge (v1: Telegram). Same boundary rule as `roy-scheduler`. Persists `chat_id → roy session_id` in a JSON file so chats survive restarts.
+- **`crates/roy-gateway`** — chat-platform and WebSocket bridge to the daemon (Telegram adapter + WS relay). Same boundary rule as `roy-scheduler`. Persists `chat_id → roy session_id` in a JSON file so chats survive restarts.
 
 External crates (`roy-scheduler`, `roy-gateway`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API.
 
@@ -97,9 +97,9 @@ cargo run --example engine_two_attach     # SessionEngine + two concurrent attac
 
 ## Architecture
 
-A short pipeline. Triggers (CLI, MCP, WebSocket) talk to a single `Daemon`; `Daemon` owns a `SessionManager`; `SessionManager` owns `SessionEngine` actors; each engine drives one ACP `Transport`. Bytes only cross trait boundaries at `Transport`, so adding a new agent is a new `AcpConfig` preset, not new session/journal/protocol code.
+A short pipeline. Triggers (CLI, MCP) talk to a single `Daemon`; `Daemon` owns a `SessionManager`; `SessionManager` owns `SessionEngine` actors; each engine drives one ACP `Transport`. Bytes only cross trait boundaries at `Transport`, so adding a new agent is a new `AcpConfig` preset, not new session/journal/protocol code.
 
-1. **`Daemon`** (`src/daemon.rs`) — accepts Unix-socket and WebSocket connections, parses `ClientCommand`s, dispatches to per-command `handle_*` methods, and pumps `ServerEvent`s back. Single-instance guard via `PidLock` (`src/pid_lock.rs`): the lock at `<socket>.pid` is the source of truth; a second `roy serve` on the same socket bails with `daemon already running (pid N)`, but a dead PID is detected and taken over (handles `kill -9`). Optional idle-GC + resume-all on startup via `ServeOpts`. **The WebSocket listener (when enabled via `--port`) is currently unauthenticated** — bind to loopback only or front it with auth.
+1. **`Daemon`** (`src/daemon.rs`) — accepts Unix-socket connections only, parses `ClientCommand`s, dispatches to per-command `handle_*` methods, and pumps `ServerEvent`s back. Single-instance guard via `PidLock` (`src/pid_lock.rs`): the lock at `<socket>.pid` is the source of truth; a second `roy serve` on the same socket bails with `daemon already running (pid N)`, but a dead PID is detected and taken over (handles `kill -9`). Optional idle-GC + resume-all on startup via `ServeOpts`. WebSocket clients are served by `roy-gateway`'s WS relay (token-authenticated via `Sec-WebSocket-Protocol`, loopback by default at `127.0.0.1:8787`), which bridges each connection to a dedicated Unix-socket connection to this daemon.
 
 2. **`SessionManager`** (`src/manager.rs`) — in-process registry of live `SessionEngine`s keyed by session id, plus on-disk archive operations: `list_archived`, `open_archive`, `read_journal` (unified live-or-archive read), `resume_all`, `sweep_idle`.
 
@@ -107,7 +107,7 @@ A short pipeline. Triggers (CLI, MCP, WebSocket) talk to a single `Daemon`; `Dae
 
 4. **`Transport`** (`src/transport/mod.rs`) — single trait, single impl `AcpTransport` (`src/transport/acp/mod.rs`). Spawns the agent as a child, sets up the official `agent-client-protocol` SDK, handles `session/new` / `session/load`, optional `set_mode`, and auto-answers `session/request_permission` per `PermissionPolicy`.
 
-5. **Control protocol** (`src/control.rs`) — wire-level enums (`ClientCommand`, `ServerEvent`, typed `ErrorCode`) shared by every trigger. Same JSON payload over either framing (Unix socket: `\n`-delimited; WebSocket: `Message::Text`).
+5. **Control protocol** (`src/control.rs`) — wire-level enums (`ClientCommand`, `ServerEvent`, typed `ErrorCode`) shared by every trigger. The JSON payload is identical regardless of transport; the daemon itself uses only `\n`-delimited Unix framing. The `Message::Text` framing for WebSocket clients is provided by `roy-gateway`'s WS relay.
 
 6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `status`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `set-tags`, `wait`, `fire`, `mcp`, `projects`, `agents`. `status` is a non-side-effecting health probe (exit 0 if the daemon socket accepts a connection, 2 otherwise) — prefer it over `pgrep`-ing the binary in scripts and skills. The `mcp` subcommand (`crates/roy-cli/src/mcp.rs`) is an MCP server (JSON-RPC 2.0 over stdio) that exposes six tools (`roy_list_sessions`, `roy_list_archived`, `roy_run`, `roy_run_detached`, `roy_read_session`, `roy_close`).
 
@@ -134,7 +134,7 @@ We own the child process directly (not `AcpAgent::from_args`) so we can detect m
 
 ### Testing approach
 
-Integration tests avoid real CLIs by faking the agent: `tests/scripts/fake-acp-agent.py` speaks JSON-RPC over stdio and takes flags (`--permission`, `--exit-mid-turn`, `--no-initialize-reply`, `--jsonrpc-error`, etc.) to drive error/timeout/permission paths deterministically. Daemon-level tests (`crates/roy/src/daemon.rs` `#[cfg(test)] mod tests`) drive the full Unix-socket and WebSocket paths through `tokio::io::duplex` / real loopback TCP. Real-CLI smoke tests (`#[ignore]`d) live in `crates/roy/tests/acp_transport.rs`.
+Integration tests avoid real CLIs by faking the agent: `tests/scripts/fake-acp-agent.py` speaks JSON-RPC over stdio and takes flags (`--permission`, `--exit-mid-turn`, `--no-initialize-reply`, `--jsonrpc-error`, etc.) to drive error/timeout/permission paths deterministically. Daemon-level tests (`crates/roy/src/daemon.rs` `#[cfg(test)] mod tests`) drive the Unix-socket path through `tokio::io::duplex`; WS relay tests live in `roy-gateway`. Real-CLI smoke tests (`#[ignore]`d) live in `crates/roy/tests/acp_transport.rs`.
 
 ## Reference docs
 

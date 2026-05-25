@@ -84,9 +84,6 @@ struct ServeArgs {
     /// Defaults to `~/.roy/workspace/` or `ROY_WORKSPACE`.
     #[arg(long)]
     workspace_dir: Option<PathBuf>,
-    /// Enable WebSocket listener on this port (in addition to the Unix socket).
-    #[arg(long)]
-    port: Option<u16>,
     /// On startup, resume every archived session found in journal_dir.
     #[arg(long)]
     resume_all: bool,
@@ -307,13 +304,6 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
         Arc::new(DefaultTransportFactory),
     )?);
     eprintln!("roy serve: listening on {}", socket.display());
-    if let Some(port) = args.port {
-        eprintln!("roy serve: WebSocket on 127.0.0.1:{port}");
-        eprintln!(
-            "roy serve: WS auth token at {}",
-            socket.with_extension("token").display()
-        );
-    }
     let idle_timeout = args
         .idle_timeout
         .filter(|n| *n > 0)
@@ -321,7 +311,6 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     daemon
         .run_with_opts(ServeOpts {
             socket_path: socket.clone(),
-            ws_port: args.port,
             idle_timeout,
             resume_all: args.resume_all,
         })
