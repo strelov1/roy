@@ -233,7 +233,9 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .unwrap();
-        ws.send(Message::Text("{\"cmd\":\"ping\"}".into())).await.unwrap();
+        ws.send(Message::Text("{\"cmd\":\"ping\"}".into()))
+            .await
+            .unwrap();
 
         let reply = loop {
             match ws.next().await.expect("ws closed").unwrap() {
@@ -298,7 +300,11 @@ mod tests {
             for _ in 0..3 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let cb = ws_auth_callback(Arc::clone(&token_for_server));
-                results.push(tokio_tungstenite::accept_hdr_async(stream, cb).await.is_ok());
+                results.push(
+                    tokio_tungstenite::accept_hdr_async(stream, cb)
+                        .await
+                        .is_ok(),
+                );
             }
             results
         });
@@ -309,10 +315,8 @@ mod tests {
 
         // 2. Wrong token → reject.
         let mut req = url.as_str().into_client_request().unwrap();
-        req.headers_mut().insert(
-            WS_TOKEN_HEADER,
-            http::HeaderValue::from_static("nope"),
-        );
+        req.headers_mut()
+            .insert(WS_TOKEN_HEADER, http::HeaderValue::from_static("nope"));
         assert!(tokio_tungstenite::connect_async(req).await.is_err());
 
         // 3. Correct token → accept.
