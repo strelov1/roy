@@ -9,6 +9,7 @@ pub mod manager;
 pub mod pid_lock;
 pub mod project;
 pub mod session_meta;
+pub mod session_store;
 pub mod transport;
 
 pub use agents_config::{AgentInfo, AgentPreset, AgentsConfigStatus, ModelInfo};
