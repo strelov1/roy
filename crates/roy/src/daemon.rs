@@ -934,45 +934,63 @@ impl Daemon {
             return;
         }
 
-        // respond = true: deliver as a real turn. Wait for any in-flight turn
-        // to finish first — a prompt that lands mid-turn is dropped.
+        // respond = true: deliver as a real turn the agent answers. The engine
+        // queues the inject behind any in-flight turn (never dropping it) and
+        // reports *this* turn's outcome on the returned channel, so we await
+        // the right result even if other turns run first.
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(600_000));
-        if engine.is_busy() {
-            let since = engine.next_seq().await;
-            let _ = engine.wait_for_result(since, timeout).await;
-        }
-
-        let since = engine.next_seq().await;
-        if let Err(e) = engine.inject_prompt(text) {
-            let _ = event_tx.send(ServerEvent::FireError {
-                session: Some(session),
-                code: ErrorCode::SendFailed,
-                message: format!("inject_prompt failed: {e}"),
-            });
-            return;
-        }
-
-        match engine.wait_for_result(since, timeout).await {
-            Ok(Some((seq, result, assistant_text))) => {
-                let _ = event_tx.send(ServerEvent::FireDone {
-                    session,
-                    seq_range: (since, seq),
-                    result,
-                    assistant_text,
-                });
-            }
-            Ok(None) => {
-                let partial_end = engine.next_seq().await;
-                let _ = event_tx.send(ServerEvent::FireTimeout {
-                    session,
-                    partial_seq_range: (since, partial_end),
-                });
-            }
+        let start = engine.next_seq().await;
+        let rx = match engine.inject_prompt(text) {
+            Ok(rx) => rx,
             Err(e) => {
                 let _ = event_tx.send(ServerEvent::FireError {
                     session: Some(session),
                     code: ErrorCode::SendFailed,
-                    message: format!("wait_for_result failed: {e}"),
+                    message: format!("inject_prompt failed: {e}"),
+                });
+                return;
+            }
+        };
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(Some((seq, result, assistant_text))))) => {
+                let _ = event_tx.send(ServerEvent::FireDone {
+                    session,
+                    seq_range: (start, seq),
+                    result,
+                    assistant_text,
+                });
+            }
+            // Turn finished without a terminal Result (e.g. shutdown mid-turn).
+            Ok(Ok(Ok(None))) => {
+                let partial_end = engine.next_seq().await;
+                let _ = event_tx.send(ServerEvent::FireTimeout {
+                    session,
+                    partial_seq_range: (start, partial_end),
+                });
+            }
+            // Journal read failed inside the engine.
+            Ok(Ok(Err(e))) => {
+                let _ = event_tx.send(ServerEvent::FireError {
+                    session: Some(session),
+                    code: ErrorCode::SendFailed,
+                    message: format!("inject result read failed: {e}"),
+                });
+            }
+            // The actor dropped the sender (engine gone / session closed).
+            Ok(Err(_recv)) => {
+                let _ = event_tx.send(ServerEvent::FireError {
+                    session: Some(session),
+                    code: ErrorCode::SendFailed,
+                    message: "session closed before inject completed".to_string(),
+                });
+            }
+            // We hit the caller's timeout before the turn completed.
+            Err(_elapsed) => {
+                let partial_end = engine.next_seq().await;
+                let _ = event_tx.send(ServerEvent::FireTimeout {
+                    session,
+                    partial_seq_range: (start, partial_end),
                 });
             }
         }
