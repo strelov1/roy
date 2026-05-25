@@ -172,15 +172,14 @@ impl Transport for AcpTransport {
     ) -> Result<Box<dyn Handle>> {
         let cwd = std::path::absolute(&cwd).map_err(RoyError::Io)?;
 
-        let channel = self.config.system_prompt_channel;
+        // Route the persona to exactly one channel: Meta presets carry it in
+        // the session request's `_meta`; FirstTurn presets defer it to the
+        // engine (but never on resume — the agent reloads it from history).
         let system_prompt = system_prompt.map(str::to_string);
-        let meta_prompt = match channel {
-            SystemPromptChannel::Meta => system_prompt.clone(),
-            SystemPromptChannel::FirstTurn => None,
-        };
-        let pending_persona = match channel {
-            SystemPromptChannel::FirstTurn if resume_cursor.is_none() => system_prompt.clone(),
-            _ => None,
+        let (meta_prompt, pending_persona) = match self.config.system_prompt_channel {
+            SystemPromptChannel::Meta => (system_prompt, None),
+            SystemPromptChannel::FirstTurn if resume_cursor.is_none() => (None, system_prompt),
+            SystemPromptChannel::FirstTurn => (None, None),
         };
 
         let mut cmd = Command::new(&self.config.command);

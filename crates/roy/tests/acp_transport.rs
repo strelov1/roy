@@ -237,20 +237,9 @@ async fn dropping_a_turn_cancels_it_and_the_next_turn_proceeds() {
 #[tokio::test]
 async fn meta_channel_sends_system_prompt_on_session_new() {
     let out = std::env::temp_dir().join(format!("roy-meta-{}.json", uuid::Uuid::new_v4()));
-    let cfg = AcpConfig {
-        command: "python3".to_string(),
-        args: vec![
-            "tests/scripts/fake-acp-agent.py".to_string(),
-            "--meta-out".to_string(),
-            out.to_string_lossy().to_string(),
-        ],
-        mode_id: None,
-        permission_policy: PermissionPolicy::AllowAll,
-        open_timeout: Duration::from_secs(5),
-        env_remove: Vec::new(),
-        system_prompt_channel: roy::transport::SystemPromptChannel::Meta,
-    };
-    let transport = AcpTransport::new(cfg);
+    let out_arg = out.to_string_lossy().to_string();
+    // fake_config defaults to the Meta channel.
+    let transport = AcpTransport::new(fake_config(&["--meta-out", &out_arg]));
     let _handle = transport
         .open(
             "sid",
