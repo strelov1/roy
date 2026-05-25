@@ -301,7 +301,11 @@ enum AgentsCmd {
 #[derive(Args, Debug)]
 struct MgmtBaseArgs {
     /// roy-management base URL. Overrides $ROY_MANAGEMENT_URL.
-    #[arg(long, env = "ROY_MANAGEMENT_URL", default_value = "http://127.0.0.1:8079")]
+    #[arg(
+        long,
+        env = "ROY_MANAGEMENT_URL",
+        default_value = "http://127.0.0.1:8079"
+    )]
     mgmt_url: String,
 }
 
@@ -951,8 +955,26 @@ async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<ExitCode> {
     match cmd {
         AgentsCmd::List(a) => cmd_agents_list(a).await,
         AgentsCmd::Get { base, id } => cmd_agents_get(base, id).await,
-        AgentsCmd::Create { base, name, preset, model, prompt_file, description, persistent } =>
-            cmd_agents_create(base, name, preset, model, prompt_file, description, persistent).await,
+        AgentsCmd::Create {
+            base,
+            name,
+            preset,
+            model,
+            prompt_file,
+            description,
+            persistent,
+        } => {
+            cmd_agents_create(
+                base,
+                name,
+                preset,
+                model,
+                prompt_file,
+                description,
+                persistent,
+            )
+            .await
+        }
         AgentsCmd::Update {
             base,
             id,
