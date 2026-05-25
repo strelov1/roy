@@ -39,6 +39,13 @@ fn create_owner_only_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+fn validate_token(token: String) -> Result<String> {
+    if !token.is_ascii() {
+        anyhow::bail!("ws auth token must be ASCII (got non-ASCII bytes)");
+    }
+    Ok(token)
+}
+
 /// Load the WS auth token from `token_path`, or mint a fresh UUID and write it
 /// owner-only (`0600`).
 pub fn load_or_create_ws_token(token_path: &Path) -> Result<String> {
@@ -47,12 +54,12 @@ pub fn load_or_create_ws_token(token_path: &Path) -> Result<String> {
             .with_context(|| format!("creating token dir {}", parent.display()))?;
     }
     match std::fs::read_to_string(token_path) {
-        Ok(s) => Ok(s.trim().to_string()),
+        Ok(s) => validate_token(s.trim().to_string()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let token = uuid::Uuid::new_v4().to_string();
             create_owner_only_file(token_path, token.as_bytes())
                 .with_context(|| format!("writing token {}", token_path.display()))?;
-            Ok(token)
+            validate_token(token)
         }
         Err(e) => Err(e).with_context(|| format!("reading token {}", token_path.display())),
     }
@@ -106,7 +113,6 @@ where
 
     let (mut ws_sink, mut ws_stream) = ws.split();
 
-    // WS client → daemon: forward each text frame as a line.
     let inbound = async {
         while let Some(msg) = ws_stream.next().await {
             let text = match msg {
@@ -114,7 +120,7 @@ where
                 Ok(Message::Close(_)) => break,
                 // tungstenite answers ping/pong itself; ignore binary too.
                 Ok(_) => continue,
-                Err(_) => break,
+                Err(e) => return Err(anyhow::Error::new(e).context("ws read")),
             };
             let text = text.trim();
             if text.is_empty() {
@@ -127,9 +133,9 @@ where
                 break;
             }
         }
+        Ok(())
     };
 
-    // daemon → WS client: forward each line as a text frame.
     let outbound = async {
         while let Ok(Some(line)) = daemon_lines.next_line().await {
             if ws_sink.send(Message::Text(line.into())).await.is_err() {
@@ -137,13 +143,14 @@ where
             }
         }
         let _ = ws_sink.close().await;
+        Ok::<(), anyhow::Error>(())
     };
 
-    tokio::select! {
-        _ = inbound => {}
-        _ = outbound => {}
-    }
-    Ok(())
+    let result = tokio::select! {
+        r = inbound => r,
+        r = outbound => r,
+    };
+    result
 }
 
 /// Bind `addr` and accept authenticated WS connections forever, relaying each
