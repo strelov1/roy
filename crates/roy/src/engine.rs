@@ -7,7 +7,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -89,16 +88,15 @@ pub struct SessionEngine {
     /// (`publish`) or an incoming prompt (`Cmd::Prompt` arriving at the
     /// actor). Used by `SessionManager::sweep_idle` to GC quiet sessions.
     last_activity: StdMutex<Instant>,
-    /// True while a turn is being driven. Lets an out-of-band injector decide
-    /// whether to wait for the in-flight turn before pushing its own prompt.
-    turn_active: AtomicBool,
 }
 
 /// Terminal outcome of a turn, as reported back to an out-of-band injector:
-/// `Ok(Some((result_seq, the Result event, concatenated assistant text)))`,
-/// `Ok(None)` if the turn ended without a terminal `Result` (e.g. shutdown),
-/// or `Err` if reading the journal failed.
-type TurnOutcome = Result<Option<(Seq, TurnEvent, String)>>;
+/// `Ok(Some((start_seq, result_seq, the Result event, concatenated assistant
+/// text)))`, `Ok(None)` if the turn ended without a terminal `Result` (e.g.
+/// shutdown), or `Err` if reading the journal failed. `start_seq` is the seq of
+/// the turn's own `UserPrompt`, so the caller's reported range bounds exactly
+/// this turn even when it ran behind other queued turns.
+type TurnOutcome = Result<Option<(Seq, Seq, TurnEvent, String)>>;
 
 enum Cmd {
     Prompt(String),
@@ -183,7 +181,6 @@ impl SessionEngine {
             input_tx,
             input_lease_held: StdMutex::new(false),
             last_activity: StdMutex::new(Instant::now()),
-            turn_active: AtomicBool::new(false),
         });
 
         // Persist initial metadata so a daemon restart can find this session.
@@ -270,13 +267,6 @@ impl SessionEngine {
         )
         .await?;
         Ok(entry.seq)
-    }
-
-    /// True while a turn is in flight. An out-of-band injector waits on this
-    /// before pushing a prompt, because a prompt that arrives mid-turn is
-    /// dropped by the actor (`drive_turn`).
-    pub fn is_busy(&self) -> bool {
-        self.turn_active.load(Ordering::SeqCst)
     }
 
     /// Queue a prompt without holding the input lease. The actor journals it
@@ -566,9 +556,7 @@ async fn run_one_turn(
             "failed to journal user prompt; turn still dispatched",
         );
     }
-    engine.turn_active.store(true, Ordering::SeqCst);
     drive_turn(engine, handle, text, input_rx, pending).await;
-    engine.turn_active.store(false, Ordering::SeqCst);
     if let Some(cursor) = handle.resume_cursor() {
         *engine.resume_cursor.lock().unwrap() = Some(cursor);
         // Non-fatal: session keeps running, but a stale cursor on disk means a
@@ -583,11 +571,13 @@ async fn run_one_turn(
     }
     // The turn is done and its terminal Result is already journaled, so this
     // read resolves immediately; the short timeout only guards the degenerate
-    // "turn ended without a Result" case (e.g. shutdown mid-turn).
+    // "turn ended without a Result" case (e.g. shutdown mid-turn). `since` is
+    // carried back so the caller's reported range bounds exactly this turn.
     if let Some(done) = done {
         let outcome = engine
             .wait_for_result(since, std::time::Duration::from_secs(5))
-            .await;
+            .await
+            .map(|opt| opt.map(|(seq, result, text)| (since, seq, result, text)));
         let _ = done.send(outcome);
     }
 }

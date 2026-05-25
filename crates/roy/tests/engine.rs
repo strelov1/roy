@@ -293,29 +293,6 @@ async fn inject_note_appends_without_lease() {
 }
 
 #[tokio::test]
-async fn is_busy_false_when_idle_and_inject_prompt_drives_turn() {
-    let journal_dir = tmp_journal_dir();
-    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
-        .await
-        .unwrap();
-
-    assert!(!engine.is_busy(), "fresh engine is idle");
-
-    let since = engine.next_seq().await;
-    engine.inject_prompt("hello".into()).expect("inject_prompt");
-
-    // The fake transport auto-answers; wait for the terminal Result.
-    let got = engine
-        .wait_for_result(since, std::time::Duration::from_secs(5))
-        .await
-        .expect("wait_for_result");
-    assert!(got.is_some(), "turn produced a terminal Result");
-
-    engine.close().unwrap();
-    let _ = std::fs::remove_dir_all(&journal_dir);
-}
-
-#[tokio::test]
 async fn inject_prompt_receiver_resolves_with_this_turns_result() {
     let journal_dir = tmp_journal_dir();
     let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
@@ -330,7 +307,7 @@ async fn inject_prompt_receiver_resolves_with_this_turns_result() {
         .await
         .expect("actor kept the sender alive")
         .expect("journal read ok");
-    let (_seq, result, _text) = outcome.expect("turn produced a terminal Result");
+    let (_start, _seq, result, _text) = outcome.expect("turn produced a terminal Result");
     assert!(
         matches!(result, TurnEvent::Result { .. }),
         "outcome carries the terminal Result, got {result:?}",
