@@ -18,6 +18,7 @@ use crate::error::{Result, RoyError};
 use crate::journal::{JournalEntry, Seq};
 use crate::project::ProjectRegistry;
 use crate::session_meta::read_metadata;
+use crate::session_store::SessionStore;
 
 pub struct SessionManager {
     journal_dir: PathBuf,
@@ -25,13 +26,16 @@ pub struct SessionManager {
     sessions: RwLock<HashMap<String, Arc<SessionEngine>>>,
     factory: Arc<dyn TransportFactory>,
     projects: Arc<ProjectRegistry>,
+    #[allow(dead_code)]
+    session_store: Arc<SessionStore>,
 }
 
 impl SessionManager {
-    pub fn new(
+    pub async fn new(
         journal_dir: PathBuf,
         workspace_dir: PathBuf,
         factory: Arc<dyn TransportFactory>,
+        session_store: Arc<SessionStore>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&workspace_dir).map_err(RoyError::Io)?;
         let projects = Arc::new(ProjectRegistry::load(&journal_dir, workspace_dir.clone())?);
@@ -41,6 +45,7 @@ impl SessionManager {
             sessions: RwLock::new(HashMap::new()),
             factory,
             projects,
+            session_store,
         })
     }
 
@@ -372,9 +377,21 @@ mod tests {
         std::env::temp_dir().join(format!("roy-manager-test-{}-{n}", std::process::id()))
     }
 
-    fn new_mgr(dir: &PathBuf) -> SessionManager {
-        SessionManager::new(dir.clone(), dir.join("workspace"), Arc::new(FakeFactory))
-            .expect("registry load")
+    async fn new_mgr(dir: &PathBuf) -> SessionManager {
+        let store_path = dir.join("sessions.db");
+        let store = Arc::new(
+            crate::session_store::SessionStore::open(&store_path)
+                .await
+                .expect("open store"),
+        );
+        SessionManager::new(
+            dir.clone(),
+            dir.join("workspace"),
+            Arc::new(FakeFactory),
+            store,
+        )
+        .await
+        .expect("manager")
     }
 
     /// Minimal orphan spawn config for tests.
@@ -395,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn resume_all_brings_back_closed_sessions() {
         let dir = tmp_dir();
-        let mgr = new_mgr(&dir);
+        let mgr = new_mgr(&dir).await;
 
         // Spawn → close two sessions to populate journals + metadata.
         let e1 = mgr
@@ -439,7 +456,7 @@ mod tests {
     #[tokio::test]
     async fn sweep_idle_closes_quiet_sessions() {
         let dir = tmp_dir();
-        let mgr = new_mgr(&dir);
+        let mgr = new_mgr(&dir).await;
 
         let engine = mgr
             .spawn(orphan_cfg(AgentPreset::Opencode), 256, 1024)
@@ -465,7 +482,7 @@ mod tests {
     #[tokio::test]
     async fn registry_lifecycle() {
         let dir = tmp_dir();
-        let mgr = new_mgr(&dir);
+        let mgr = new_mgr(&dir).await;
         assert!(mgr.list().await.is_empty());
 
         let engine = mgr
@@ -490,7 +507,7 @@ mod tests {
     async fn index_existing_sessions_rebuilds_project_membership() {
         let dir = tmp_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        let mgr = new_mgr(&dir);
+        let mgr = new_mgr(&dir).await;
 
         // Create a real project in the registry so index_existing_sessions can
         // verify it when it encounters a meta file that references it.

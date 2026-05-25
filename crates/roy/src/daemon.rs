@@ -23,6 +23,7 @@ use crate::engine::{InputLease, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
 use crate::journal::Seq;
 use crate::manager::SessionManager;
+use crate::session_store::{self, SessionStore};
 use crate::transport::{AcpConfig, AcpTransport, PermissionPolicy, Transport};
 
 /// One queued event for the writer task.
@@ -106,13 +107,33 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new(
+    pub async fn new(
         journal_dir: PathBuf,
         workspace_dir: PathBuf,
         factory: Arc<dyn TransportFactory>,
     ) -> Result<Self> {
+        Self::new_with_store_path(
+            journal_dir,
+            workspace_dir,
+            factory,
+            session_store::default_db_path(),
+        )
+        .await
+    }
+
+    /// Like `new`, but lets the caller pick the on-disk `SessionStore` path.
+    /// Used by tests so they don't share `~/.local/state/roy/sessions.db`.
+    pub async fn new_with_store_path(
+        journal_dir: PathBuf,
+        workspace_dir: PathBuf,
+        factory: Arc<dyn TransportFactory>,
+        sessions_db: PathBuf,
+    ) -> Result<Self> {
+        let store = Arc::new(SessionStore::open(&sessions_db).await?);
         Ok(Self {
-            manager: Arc::new(SessionManager::new(journal_dir, workspace_dir, factory)?),
+            manager: Arc::new(
+                SessionManager::new(journal_dir, workspace_dir, factory, store).await?,
+            ),
         })
     }
 
@@ -1289,8 +1310,14 @@ mod tests {
         let dir = tmp_dir();
         let socket_path = dir.join("daemon.sock");
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
         let socket_path_for_task = socket_path.clone();
         let listener_handle = {
@@ -1332,8 +1359,14 @@ mod tests {
     async fn spawn_attach_send_round_trip_over_duplex() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -1453,8 +1486,14 @@ mod tests {
     async fn spawn_persists_system_prompt_in_metadata() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -1509,8 +1548,14 @@ mod tests {
     async fn closed_session_is_attachable_via_archive_fallback() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -1650,8 +1695,14 @@ mod tests {
     async fn read_journal_snapshot_paginates_a_live_session() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -1806,8 +1857,14 @@ mod tests {
     async fn close_then_resume_continues_the_journal() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -1998,8 +2055,14 @@ mod tests {
     async fn spawn_with_resume_uses_session_load() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -2067,8 +2130,14 @@ mod tests {
     async fn wait_for_result_resolves_when_turn_finishes() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         // Connection 1: for Spawn + Send
@@ -2170,8 +2239,14 @@ mod tests {
     async fn fire_combo_spawns_sends_and_waits() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -2235,8 +2310,14 @@ mod tests {
     async fn set_tags_replaces_the_tag_map() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -2310,8 +2391,14 @@ mod tests {
     async fn create_list_delete_roundtrip() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -2407,8 +2494,14 @@ mod tests {
     async fn create_project_then_spawn_attaches() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -2481,8 +2574,14 @@ mod tests {
         let dir = tmp_dir();
         let workspace = dir.join("workspace");
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), workspace.clone(), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                workspace.clone(),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -2540,8 +2639,14 @@ mod tests {
     async fn cascade_delete_removes_journal_files() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -2621,8 +2726,14 @@ mod tests {
         let dir = tmp_dir();
         std::fs::create_dir_all(&dir).unwrap();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);
@@ -2792,8 +2903,14 @@ mod tests {
     async fn inject_note_lands_while_lease_held_by_another_connection() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         // Connection A: spawns the session and holds the lease.
@@ -2876,8 +2993,14 @@ mod tests {
     async fn inject_into_unknown_session_errors() {
         let dir = tmp_dir();
         let daemon = Arc::new(
-            Daemon::new(dir.clone(), dir.join("workspace"), Arc::new(FakeAcpFactory))
-                .expect("registry load"),
+            Daemon::new_with_store_path(
+                dir.clone(),
+                dir.join("workspace"),
+                Arc::new(FakeAcpFactory),
+                dir.join("sessions.db"),
+            )
+            .await
+            .expect("registry load"),
         );
 
         let (client_side, server_side) = tokio::io::duplex(8192);

@@ -11,6 +11,15 @@ use crate::error::{Result, RoyError};
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("migrations/sqlite");
 
+/// `$ROY_SESSIONS_DB`, else `~/.local/state/roy/sessions.db`.
+pub fn default_db_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("ROY_SESSIONS_DB") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local/state/roy/sessions.db")
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRow {
     pub session_id: String,
@@ -126,14 +135,12 @@ impl SessionStore {
 
     pub async fn mark_closed(&self, session_id: &str) -> Result<()> {
         let now = Utc::now().timestamp();
-        sqlx::query(
-            "UPDATE sessions SET closed_at = ? WHERE session_id = ? AND closed_at IS NULL",
-        )
-        .bind(now)
-        .bind(session_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| RoyError::Protocol(format!("mark_closed: {e}")))?;
+        sqlx::query("UPDATE sessions SET closed_at = ? WHERE session_id = ? AND closed_at IS NULL")
+            .bind(now)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| RoyError::Protocol(format!("mark_closed: {e}")))?;
         Ok(())
     }
 

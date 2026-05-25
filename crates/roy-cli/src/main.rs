@@ -333,11 +333,14 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     let socket = args.socket.unwrap_or_else(default_socket);
     let journal_dir = args.journal_dir.unwrap_or_else(default_journal_dir);
     let workspace_dir = args.workspace_dir.unwrap_or_else(default_workspace_dir);
-    let daemon = Arc::new(Daemon::new(
-        journal_dir,
-        workspace_dir,
-        Arc::new(DefaultTransportFactory),
-    )?);
+    let daemon = Arc::new(
+        Daemon::new(
+            journal_dir,
+            workspace_dir,
+            Arc::new(DefaultTransportFactory),
+        )
+        .await?,
+    );
     eprintln!("roy serve: listening on {}", socket.display());
     let idle_timeout = args
         .idle_timeout
