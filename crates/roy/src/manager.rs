@@ -109,7 +109,7 @@ impl SessionManager {
             resume_cursor: meta.resume_cursor,
             fixed_session_id: Some(session_id.to_string()),
             tags: meta.tags,
-            system_prompt: None,
+            system_prompt: meta.system_prompt,
         };
         let transport =
             self.factory
@@ -508,6 +508,8 @@ mod tests {
             permission: None,
             resume_cursor: None,
             tags: Default::default(),
+            system_prompt: None,
+            agent_name: None,
         };
         crate::session_meta::write_metadata(&dir, &meta)
             .await
@@ -530,6 +532,8 @@ mod tests {
             permission: None,
             resume_cursor: None,
             tags: Default::default(),
+            system_prompt: None,
+            agent_name: None,
         };
         crate::session_meta::write_metadata(&dir, &orphan_meta)
             .await
