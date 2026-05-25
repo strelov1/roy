@@ -2,7 +2,7 @@
 //! subcommands. Only the surface roy-cli needs.
 
 use anyhow::{anyhow, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Agent {
@@ -34,22 +34,50 @@ pub struct NewAgent {
     pub persistent: bool,
 }
 
+/// PATCH body for `PUT /agents/{id}`. Mirrors the server's tri-state semantics
+/// for nullable fields: `description` / `model` / `task` use `Option<Option<…>>`
+/// so we can express "leave alone" (outer `None`, skipped), "clear" (`Some(None)`,
+/// serialized as JSON `null`), and "set" (`Some(Some(value))`).
 #[derive(Debug, Default, Serialize)]
 pub struct AgentPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_nullable_field"
+    )]
+    pub description: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_nullable_field"
+    )]
+    pub model: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_nullable_field"
+    )]
+    pub task: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persistent: Option<bool>,
+}
+
+/// Emit JSON `null` for `Some(None)` (so the server's `Option<Option<…>>`
+/// deserializer treats the field as "clear"), and the inner value for
+/// `Some(Some(x))`. The outer `None` case is filtered out by
+/// `skip_serializing_if` upstream and never reaches this function.
+fn serialize_nullable_field<S: Serializer, T: Serialize>(
+    v: &Option<Option<T>>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(Some(x)) => x.serialize(s),
+        Some(None) => s.serialize_none(),
+        None => unreachable!("skip_serializing_if filters this case"),
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
