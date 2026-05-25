@@ -244,6 +244,11 @@ enum AgentsCmd {
         persistent: bool,
     },
     /// Update fields of an existing agent. Only fields you pass are changed.
+    ///
+    /// Nullable columns (`description`, `model`) accept either a value
+    /// (`--description "…"`) or an explicit clear (`--clear-description`).
+    /// The two are mutually exclusive per field; omit both to leave the
+    /// column alone.
     Update {
         #[command(flatten)]
         base: MgmtBaseArgs,
@@ -253,12 +258,24 @@ enum AgentsCmd {
         name: Option<String>,
         #[arg(long, value_parser = ["claude", "gemini", "opencode", "codex"])]
         preset: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "clear_model")]
         model: Option<String>,
+        /// Clear the model column (NULL in DB) — engine default applies.
+        #[arg(long)]
+        clear_model: bool,
         #[arg(long)]
         prompt_file: Option<std::path::PathBuf>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "clear_description")]
         description: Option<String>,
+        /// Clear the description column (NULL in DB).
+        #[arg(long)]
+        clear_description: bool,
+        /// Standing instruction text for scheduled fires.
+        #[arg(long, conflicts_with = "clear_task")]
+        task: Option<String>,
+        /// Clear the task column (NULL in DB).
+        #[arg(long)]
+        clear_task: bool,
         /// When set, toggles `persistent` to the given value.
         #[arg(long)]
         persistent: Option<bool>,
@@ -936,8 +953,36 @@ async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<ExitCode> {
         AgentsCmd::Get { base, id } => cmd_agents_get(base, id).await,
         AgentsCmd::Create { base, name, preset, model, prompt_file, description, persistent } =>
             cmd_agents_create(base, name, preset, model, prompt_file, description, persistent).await,
-        AgentsCmd::Update { base, id, name, preset, model, prompt_file, description, persistent } =>
-            cmd_agents_update(base, id, name, preset, model, prompt_file, description, persistent).await,
+        AgentsCmd::Update {
+            base,
+            id,
+            name,
+            preset,
+            model,
+            clear_model,
+            prompt_file,
+            description,
+            clear_description,
+            task,
+            clear_task,
+            persistent,
+        } => {
+            cmd_agents_update(
+                base,
+                id,
+                name,
+                preset,
+                model,
+                clear_model,
+                prompt_file,
+                description,
+                clear_description,
+                task,
+                clear_task,
+                persistent,
+            )
+            .await
+        }
         AgentsCmd::Delete { base, id, yes } => cmd_agents_delete(base, id, yes).await,
         AgentsCmd::Run { base, id } => cmd_agents_run(base, id).await,
     }
@@ -984,14 +1029,19 @@ async fn cmd_agents_create(
     Ok(ExitCode::SUCCESS)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_agents_update(
     args: MgmtBaseArgs,
     id: String,
     name: Option<String>,
     preset: Option<String>,
     model: Option<String>,
+    clear_model: bool,
     prompt_file: Option<std::path::PathBuf>,
     description: Option<String>,
+    clear_description: bool,
+    task: Option<String>,
+    clear_task: bool,
     persistent: Option<bool>,
 ) -> anyhow::Result<ExitCode> {
     let prompt = match prompt_file {
@@ -1005,16 +1055,27 @@ async fn cmd_agents_update(
     let resolved = c.resolve(&id).await?;
     let patch = crate::management_client::AgentPatch {
         name,
-        description,
+        description: nullable_arg(description, clear_description),
         preset,
-        model,
+        model: nullable_arg(model, clear_model),
         prompt,
-        task: None,
+        task: nullable_arg(task, clear_task),
         persistent,
     };
     let updated = c.update(&resolved, &patch).await?;
     println!("{}", serde_json::to_string_pretty(&updated)?);
     Ok(ExitCode::SUCCESS)
+}
+
+/// Translate a `(--field value, --clear-field)` arg pair into the wire
+/// tri-state expected by roy-management. `clap`'s `conflicts_with` guarantees
+/// the two are never both set.
+fn nullable_arg(value: Option<String>, clear: bool) -> Option<Option<String>> {
+    if clear {
+        Some(None)
+    } else {
+        value.map(Some)
+    }
 }
 
 async fn cmd_agents_delete(args: MgmtBaseArgs, id: String, yes: bool) -> anyhow::Result<ExitCode> {
