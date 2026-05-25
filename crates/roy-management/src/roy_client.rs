@@ -2,7 +2,6 @@
 //! coordination, plus the production `UnixSocketDaemonClient` impl. Tests
 //! use `MockDaemonClient` (see `meta_store::tests`).
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -133,7 +132,7 @@ async fn list_inner(socket: &Path, cmd: ClientCommand) -> Result<Vec<String>> {
             .ok_or_else(|| anyhow!("daemon hung up"))?;
         match serde_json::from_str::<ServerEvent>(raw.trim())? {
             ServerEvent::Listed { sessions } | ServerEvent::ListedArchived { sessions } => {
-                return Ok(sessions.into_iter().map(|s| s.session_id).collect());
+                return Ok(sessions.into_iter().map(|s| s.session).collect());
             }
             ServerEvent::Error { code, message, .. } => {
                 return Err(anyhow!("daemon error [{code}]: {message}"))
@@ -204,7 +203,12 @@ pub(crate) mod mock {
             }
         }
         async fn list(&self) -> Result<Vec<String>> {
-            Ok(self.list_response.lock().unwrap().clone().unwrap_or_default())
+            Ok(self
+                .list_response
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default())
         }
         async fn list_archived(&self) -> Result<Vec<String>> {
             Ok(Vec::new())

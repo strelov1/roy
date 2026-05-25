@@ -162,18 +162,16 @@ impl SessionManager {
         self.sessions.read().await.get(id).cloned()
     }
 
-    /// Session ids whose row is in the session store with `closed_at IS NOT
-    /// NULL` and whose engine is not in the live registry — i.e. closed
-    /// sessions plus survivors of a daemon restart. Returned in unspecified
-    /// order.
-    pub async fn list_archived(&self) -> Result<Vec<String>> {
+    /// Session rows whose `closed_at IS NOT NULL` in the session store and
+    /// whose engine is not in the live registry — i.e. closed sessions plus
+    /// survivors of a daemon restart. Returned in unspecified order.
+    pub async fn list_archived(&self) -> Result<Vec<crate::session_store::SessionRow>> {
         use std::collections::HashSet;
         let live: HashSet<String> = self.sessions.read().await.keys().cloned().collect();
         let rows = self.session_store.list_archived().await?;
         Ok(rows
             .into_iter()
-            .map(|r| r.session_id)
-            .filter(|sid| !live.contains(sid))
+            .filter(|r| !live.contains(&r.session_id))
             .collect())
     }
 
@@ -308,6 +306,10 @@ impl SessionManager {
     pub fn factory(&self) -> &Arc<dyn TransportFactory> {
         &self.factory
     }
+
+    pub fn session_store(&self) -> &Arc<SessionStore> {
+        &self.session_store
+    }
 }
 
 #[cfg(test)]
@@ -403,7 +405,13 @@ mod tests {
         // Until T12 wires the engine→store insert, the resume_all path below
         // will be exercised by T14's test fix-ups. For now, just verify
         // `list_archived` reflects the closed state.
-        let mut archived = mgr.list_archived().await.unwrap();
+        let mut archived: Vec<String> = mgr
+            .list_archived()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.session_id)
+            .collect();
         archived.sort();
         let mut expected = vec![id1.clone(), id2.clone()];
         expected.sort();

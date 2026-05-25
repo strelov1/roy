@@ -158,7 +158,7 @@ mod tests {
             &path,
             FireTarget::Spawn {
                 preset: "claude".into(),
-                project_id: None,
+
                 system_prompt: None,
             },
             "p".into(),
@@ -194,7 +194,7 @@ mod tests {
             &path,
             FireTarget::Spawn {
                 preset: "claude".into(),
-                project_id: None,
+
                 system_prompt: None,
             },
             "p".into(),
@@ -224,7 +224,7 @@ mod tests {
             &path,
             FireTarget::Spawn {
                 preset: "claude".into(),
-                project_id: None,
+
                 system_prompt: None,
             },
             "p".into(),
@@ -244,7 +244,7 @@ mod tests {
             &path,
             FireTarget::Spawn {
                 preset: "claude".into(),
-                project_id: None,
+
                 system_prompt: None,
             },
             "p".into(),

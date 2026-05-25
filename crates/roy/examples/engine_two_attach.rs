@@ -33,13 +33,11 @@ async fn main() -> anyhow::Result<()> {
         .spawn(
             SessionSpawnConfig {
                 agent: roy::AgentPreset::Opencode,
-                cwd,
-                project_id: None,
+                cwd: Some(cwd),
                 model: None,
                 permission: None,
                 resume_cursor: None,
                 fixed_session_id: None,
-                tags: std::collections::BTreeMap::new(),
                 system_prompt: None,
             },
             256,

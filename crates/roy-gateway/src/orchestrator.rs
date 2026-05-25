@@ -1,7 +1,7 @@
 //! Streaming pipeline that turns one inbound chat message into a series of
 //! throttled Telegram edits as the agent produces `TurnEvent`s.
 
-use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +26,7 @@ pub trait Replier: DraftReplier + TypingReplier {
 #[derive(Debug, Clone)]
 pub struct OrchestratorConfig {
     pub preset: String,
-    pub project_id: Option<String>,
+    pub cwd: Option<PathBuf>,
     pub turn_timeout: Duration,
     pub typing_interval: Duration,
 }
@@ -35,7 +35,7 @@ impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
             preset: "claude".into(),
-            project_id: None,
+            cwd: None,
             turn_timeout: Duration::from_secs(600),
             typing_interval: Duration::from_secs(4),
         }
@@ -78,21 +78,7 @@ where
     let typing = TypingKeepalive::start(replier.clone(), chat_id, cfg.typing_interval);
     let draft = DraftStream::new(replier.clone(), chat_id, placeholder_id);
 
-    let mut tags = BTreeMap::new();
-    tags.insert("channel".into(), "telegram".into());
-    tags.insert("chat_id".into(), chat_id.to_string());
-
-    let outcome = drive_turn(
-        cfg,
-        binder,
-        token,
-        conn_factory,
-        &draft,
-        chat_id,
-        prompt,
-        tags,
-    )
-    .await;
+    let outcome = drive_turn(cfg, binder, token, conn_factory, &draft, chat_id, prompt).await;
 
     if let Err(ref e) = outcome {
         let _ = draft.update(format!("⚠ {e}")).await;
@@ -111,7 +97,6 @@ async fn drive_turn<F, R>(
     draft: &DraftStream<R>,
     chat_id: i64,
     prompt: String,
-    tags: BTreeMap<String, String>,
 ) -> Result<()>
 where
     F: ConnFactory,
@@ -120,8 +105,8 @@ where
     let mut conn = conn_factory.open().await?;
 
     let session_id = match binder.get(chat_id).await {
-        Some(sid) => conn.resume(&sid, tags).await,
-        None => conn.spawn(&cfg.preset, cfg.project_id.clone(), tags).await,
+        Some(sid) => conn.resume(&sid).await,
+        None => conn.spawn(&cfg.preset, cfg.cwd.clone()).await,
     };
     let session_id = match session_id {
         Ok(s) => s,
@@ -291,22 +276,13 @@ mod tests {
 
     #[async_trait]
     impl Conn for MockConn {
-        async fn spawn(
-            &mut self,
-            _preset: &str,
-            _project_id: Option<String>,
-            _tags: BTreeMap<String, String>,
-        ) -> Result<String> {
+        async fn spawn(&mut self, _preset: &str, _cwd: Option<PathBuf>) -> Result<String> {
             match self.pop() {
                 Some(MockStep::SpawnReturns(s)) => Ok(s),
                 other => panic!("unexpected spawn call, next step was {other:?}"),
             }
         }
-        async fn resume(
-            &mut self,
-            _session_id: &str,
-            _tags: BTreeMap<String, String>,
-        ) -> Result<String> {
+        async fn resume(&mut self, _session_id: &str) -> Result<String> {
             match self.pop() {
                 Some(MockStep::SpawnReturns(s)) => Ok(s),
                 other => panic!("unexpected resume call, next step was {other:?}"),
@@ -380,7 +356,7 @@ mod tests {
     fn cfg() -> OrchestratorConfig {
         OrchestratorConfig {
             preset: "claude".into(),
-            project_id: None,
+            cwd: None,
             turn_timeout: Duration::from_secs(60),
             typing_interval: Duration::from_secs(60),
         }
@@ -530,7 +506,7 @@ mod tests {
 
         let cfg_with_short_timeout = OrchestratorConfig {
             preset: "claude".into(),
-            project_id: None,
+            cwd: None,
             turn_timeout: Duration::from_millis(100),
             typing_interval: Duration::from_secs(60),
         };
