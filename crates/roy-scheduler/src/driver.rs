@@ -198,9 +198,8 @@ pub async fn invoke_fire(
 /// (e.g. a UI session, or another agent). When `Some`, the resulting fire
 /// session carries the reserved tag `roy-scheduler:initiated_by_session` so
 /// downstream consumers (UI, audit) can link a fire back to its initiator.
-/// This is distinct from `roy-scheduler:parent_session_id`, which is set by
-/// the `inject_parent` subscriber and names the session the result will be
-/// injected into.
+/// The legacy `roy-scheduler:parent_session_id` tag is reserved and not set
+/// by the scheduler itself.
 pub async fn fire_agent_ad_hoc(
     pool: &SqlitePool,
     socket_path: &std::path::Path,
@@ -761,8 +760,8 @@ mod tests {
         assert_eq!(fire.status, "ok");
 
         // The Fire command that hit the daemon must carry the
-        // initiated_by_session tag — distinct from parent_session_id, which
-        // only the inject_parent subscriber sets.
+        // initiated_by_session tag and must NOT carry the reserved
+        // parent_session_id tag (no scheduler component sets it any more).
         let lines = captured.lock().unwrap().clone();
         assert_eq!(lines.len(), 1, "expected exactly one Fire command");
         let cmd: ClientCommand = serde_json::from_str(&lines[0]).expect("parse ClientCommand");
@@ -776,7 +775,7 @@ mod tests {
         );
         assert!(
             !tags.contains_key("roy-scheduler:parent_session_id"),
-            "fire-now must not set parent_session_id (that tag belongs to inject_parent)",
+            "fire-now must not set the reserved parent_session_id tag",
         );
     }
 
