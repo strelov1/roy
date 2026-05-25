@@ -51,10 +51,12 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     let app = http::router(state);
     let listener = tokio::net::TcpListener::bind(args.addr).await?;
+    let bound = listener.local_addr()?;
     tracing::info!(
-        addr = %args.addr,
+        addr = %bound,
         db = %db_path.display(),
-        "roy-management listening"
+        "listening on {}",
+        bound
     );
     axum::serve(listener, app).await?;
     Ok(())
