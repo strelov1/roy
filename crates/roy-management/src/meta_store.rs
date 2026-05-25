@@ -266,6 +266,15 @@ impl MetaStore {
             .collect())
     }
 
+    /// All session_meta rows (tags joined). Used by orphan-sweep.
+    pub async fn list_all_session_metas(&self) -> Result<Vec<SessionMeta>, MetaError> {
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT session_id FROM session_meta")
+            .fetch_all(&self.pool)
+            .await?;
+        let ids: Vec<String> = rows.into_iter().map(|r| r.0).collect();
+        self.list_session_metas(&ids).await
+    }
+
     pub async fn replace_tags(
         &self,
         session_id: &str,

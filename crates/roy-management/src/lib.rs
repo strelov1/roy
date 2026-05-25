@@ -4,6 +4,7 @@
 
 pub mod http;
 pub mod meta_store;
+pub mod orphan_sweep;
 pub mod roy_client;
 pub mod state;
 
@@ -45,6 +46,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         daemon,
         socket_path: socket,
     };
+
+    orphan_sweep::spawn(state.meta.clone(), Arc::clone(&state.daemon));
 
     let app = http::router(state);
     let listener = tokio::net::TcpListener::bind(args.addr).await?;
