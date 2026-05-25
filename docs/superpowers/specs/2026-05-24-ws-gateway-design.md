@@ -115,9 +115,15 @@ Removed from `crates/roy/`:
 | `run_ws`, `serve_ws_connection`, `dispatch_ws`, `ws_writer_loop` | `src/daemon.rs` |
 | `ServeOpts.ws_port` field | `src/daemon.rs` |
 | WS branch in `run_with_opts` (token load + `run_ws` spawn + the `join!`) | `src/daemon.rs` |
-| WS round-trip test `spawn_attach_send_round_trip_over_websocket` | `src/daemon.rs` (moves to gateway) |
-| `tokio-tungstenite`, `futures-util` deps (verify no other in-crate use) | `Cargo.toml` |
-| `--port` flag on `ServeArgs`; `ws_port` wiring | `crates/roy-cli/src/main.rs` |
+| WS tests: `spawn_attach_send_round_trip_over_websocket`, `ws_handshake_rejects_missing_or_wrong_token`, the `load_or_create_ws_token` token test | `src/daemon.rs` (logic re-tested in the gateway) |
+| `tokio-tungstenite` dep | `Cargo.toml` |
+| `--port` flag on `ServeArgs`; `ws_port` wiring; the `roy serve: WebSocket …` eprintlns | `crates/roy-cli/src/main.rs` |
+
+**Stays in `roy`:** `futures-util` — still used by `StreamExt` at the attach pump
+(`daemon.rs:1298`, `while let Some(entry) = stream.next().await`). Only the
+`SinkExt` part of `use futures_util::{SinkExt, StreamExt};` goes away.
+`tokio::net::TcpListener` and `std::net::SocketAddr` imports drop (only WS used
+them); `UnixListener` stays.
 
 After removal `run_with_opts` runs only the Unix listener (plus resume-all /
 idle-GC), so its `match ws { … }` collapses to awaiting the single Unix task.
