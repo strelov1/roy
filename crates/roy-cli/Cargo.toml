@@ -15,7 +15,7 @@ roy = { path = "../roy" }
 roy-mcp = { path = "../roy-mcp" }
 roy-gateway = { path = "../roy-gateway" }
 roy-scheduler = { path = "../roy-scheduler" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "sync", "time", "fs", "signal", "process"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
