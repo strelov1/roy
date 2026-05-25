@@ -1,6 +1,10 @@
 //! Management-owned tables (projects, session_meta, session_tags) on top of
 //! the shared `agents.db` SqlitePool. Migrations live in
-//! `crates/roy-management/migrations/sqlite/`. Apply with
+//! `crates/roy-management/migrations/sqlite/` and share the database's
+//! `_sqlx_migrations` table with `roy-agents`. Versions are coordinated
+//! across crates: `roy-agents` owns v1, `roy-management` owns v2. Each
+//! crate's `Migrator` runs with `set_ignore_missing(true)` so it tolerates
+//! rows owned by the other crate. Apply with
 //! `MetaStore::apply_migrations(pool)` after `roy_agents::open` has applied
 //! its own migrations.
 
@@ -8,8 +12,6 @@ use std::collections::BTreeMap;
 
 use sqlx::SqlitePool;
 use thiserror::Error;
-
-pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("migrations/sqlite");
 
 #[derive(Debug, Error)]
 pub enum MetaError {
@@ -53,7 +55,9 @@ impl MetaStore {
     }
 
     pub async fn apply_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-        MIGRATOR.run(pool).await.map_err(sqlx::Error::from)
+        let mut migrator = sqlx::migrate!("migrations/sqlite");
+        migrator.set_ignore_missing(true);
+        migrator.run(pool).await.map_err(sqlx::Error::from)
     }
 
     pub async fn create_project(&self, name: &str) -> Result<Project, MetaError> {
@@ -62,15 +66,14 @@ impl MetaStore {
         let workspace = workspace_dir_default();
         let path = workspace.join(name).to_string_lossy().into_owned();
         let created_at = chrono::Utc::now().timestamp();
-        let result = sqlx::query(
-            "INSERT INTO projects (id, name, path, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(name)
-        .bind(&path)
-        .bind(created_at)
-        .execute(&self.pool)
-        .await;
+        let result =
+            sqlx::query("INSERT INTO projects (id, name, path, created_at) VALUES (?, ?, ?, ?)")
+                .bind(&id)
+                .bind(name)
+                .bind(&path)
+                .bind(created_at)
+                .execute(&self.pool)
+                .await;
         match result {
             Ok(_) => Ok(Project {
                 id,
@@ -148,13 +151,6 @@ mod tests {
         let pool = roy_agents::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
-        // Management migrations have version numbering that conflicts with agents
-        // (both use version 1). So we need to clear the migration tracking before
-        // applying management migrations.
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 1")
-            .execute(&pool)
-            .await
-            .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
         std::mem::forget(dir);
         MetaStore::new(pool)
@@ -198,5 +194,27 @@ mod tests {
             store.delete_project(&p.id).await,
             Err(MetaError::NotFound(_))
         ));
+    }
+
+    /// `roy-agents` and `roy-management` share `_sqlx_migrations` and each
+    /// crate's migrator runs with `set_ignore_missing(true)`. This test
+    /// simulates a second process start (re-open agents after management
+    /// already wrote v2; re-apply management) and asserts neither side
+    /// errors with `VersionMissing` on the foreign-owned rows.
+    #[tokio::test]
+    async fn shared_migrations_table_idempotent_across_crates() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("agents.db");
+        let pool = roy_agents::open(&db).await.unwrap();
+        MetaStore::apply_migrations(&pool).await.unwrap();
+        pool.close().await;
+        let pool = roy_agents::open(&db).await.unwrap();
+        MetaStore::apply_migrations(&pool).await.unwrap();
+        let versions: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(versions, vec![(1,), (2,)]);
     }
 }
