@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
@@ -102,6 +103,97 @@ impl SessionStore {
             closed_at: r.8,
         }))
     }
+
+    pub async fn update_cursor(&self, session_id: &str, cursor: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE sessions SET resume_cursor = ? WHERE session_id = ?")
+            .bind(cursor)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| RoyError::Protocol(format!("update_cursor: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn update_model(&self, session_id: &str, model: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE sessions SET model = ? WHERE session_id = ?")
+            .bind(model)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| RoyError::Protocol(format!("update_model: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn mark_closed(&self, session_id: &str) -> Result<()> {
+        let now = Utc::now().timestamp();
+        sqlx::query(
+            "UPDATE sessions SET closed_at = ? WHERE session_id = ? AND closed_at IS NULL",
+        )
+        .bind(now)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RoyError::Protocol(format!("mark_closed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn delete(&self, session_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM sessions WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| RoyError::Protocol(format!("delete: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn list_live(&self) -> Result<Vec<SessionRow>> {
+        self.list_by_state(true).await
+    }
+
+    pub async fn list_archived(&self) -> Result<Vec<SessionRow>> {
+        self.list_by_state(false).await
+    }
+
+    async fn list_by_state(&self, live: bool) -> Result<Vec<SessionRow>> {
+        let predicate = if live {
+            "closed_at IS NULL"
+        } else {
+            "closed_at IS NOT NULL"
+        };
+        let sql = format!(
+            "SELECT session_id, agent, cwd, model, permission, resume_cursor, \
+             system_prompt, created_at, closed_at FROM sessions WHERE {predicate} \
+             ORDER BY created_at"
+        );
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<i64>,
+        )> = sqlx::query_as(&sql)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| RoyError::Protocol(format!("list_by_state: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| SessionRow {
+                session_id: r.0,
+                agent: r.1,
+                cwd: PathBuf::from(r.2),
+                model: r.3,
+                permission: r.4,
+                resume_cursor: r.5,
+                system_prompt: r.6,
+                created_at: r.7,
+                closed_at: r.8,
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -134,5 +226,59 @@ mod tests {
         let back = store.get("sid-1").await.unwrap().unwrap();
         assert_eq!(back, row);
         assert!(store.get("missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn list_live_excludes_closed() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("sessions.db"))
+            .await
+            .unwrap();
+        let mut live = sample_row("live");
+        live.closed_at = None;
+        let mut closed = sample_row("closed");
+        closed.closed_at = Some(1722345700);
+        store.insert(&live).await.unwrap();
+        store.insert(&closed).await.unwrap();
+
+        let live_rows = store.list_live().await.unwrap();
+        assert_eq!(live_rows.len(), 1);
+        assert_eq!(live_rows[0].session_id, "live");
+
+        let archived = store.list_archived().await.unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].session_id, "closed");
+    }
+
+    #[tokio::test]
+    async fn mark_closed_then_delete() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("sessions.db"))
+            .await
+            .unwrap();
+        store.insert(&sample_row("sid")).await.unwrap();
+        store.mark_closed("sid").await.unwrap();
+        assert!(store.list_live().await.unwrap().is_empty());
+        assert_eq!(store.list_archived().await.unwrap().len(), 1);
+
+        store.delete("sid").await.unwrap();
+        assert!(store.get("sid").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn update_cursor_and_model() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("sessions.db"))
+            .await
+            .unwrap();
+        store.insert(&sample_row("sid")).await.unwrap();
+        store.update_cursor("sid", Some("cursor-2")).await.unwrap();
+        store
+            .update_model("sid", Some("claude-haiku-4-5"))
+            .await
+            .unwrap();
+        let row = store.get("sid").await.unwrap().unwrap();
+        assert_eq!(row.resume_cursor.as_deref(), Some("cursor-2"));
+        assert_eq!(row.model.as_deref(), Some("claude-haiku-4-5"));
     }
 }
