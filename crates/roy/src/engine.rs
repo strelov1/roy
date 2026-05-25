@@ -504,7 +504,7 @@ async fn run_actor(
                 Some(Cmd::Close) | None => break,
             }
         };
-        run_one_turn(
+        let closed = run_one_turn(
             &engine,
             handle.as_mut(),
             &text,
@@ -513,6 +513,15 @@ async fn run_actor(
             done,
         )
         .await;
+        // A `Close` (or channel hang-up) seen mid-turn is consumed inside
+        // `drive_turn`, so it can't reach the `recv` arm above. Honour it here
+        // instead — otherwise the actor would block forever on `recv` (the
+        // engine holds its own `input_tx`, so the channel never closes on its
+        // own). Any queued injects are dropped; their receivers resolve with a
+        // closed error.
+        if closed {
+            break;
+        }
     }
     if let Err(e) = handle.close().await {
         tracing::warn!(
@@ -526,6 +535,8 @@ async fn run_actor(
 /// Journal the prompt, drive one turn to completion, persist the cursor, and —
 /// for an injected turn — report the outcome on `done`. Shared by the leased
 /// (`Prompt`) and lease-free (`Inject`) paths so both behave identically.
+/// Returns `true` if a `Close` / channel hang-up was observed mid-turn, so the
+/// caller knows to wind the actor down.
 async fn run_one_turn(
     engine: &SessionEngine,
     handle: &mut dyn Handle,
@@ -533,7 +544,7 @@ async fn run_one_turn(
     input_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     pending: &mut VecDeque<PendingTurn>,
     done: Option<oneshot::Sender<TurnOutcome>>,
-) {
+) -> bool {
     // Captured before the UserPrompt is journaled so `wait_for_result` below
     // sees this turn's own terminal Result (turns run strictly serially, so
     // the first Result at `seq >= since` is unambiguously ours).
@@ -556,7 +567,7 @@ async fn run_one_turn(
             "failed to journal user prompt; turn still dispatched",
         );
     }
-    drive_turn(engine, handle, text, input_rx, pending).await;
+    let closed = drive_turn(engine, handle, text, input_rx, pending).await;
     if let Some(cursor) = handle.resume_cursor() {
         *engine.resume_cursor.lock().unwrap() = Some(cursor);
         // Non-fatal: session keeps running, but a stale cursor on disk means a
@@ -580,15 +591,19 @@ async fn run_one_turn(
             .map(|opt| opt.map(|(seq, result, text)| (since, seq, result, text)));
         let _ = done.send(outcome);
     }
+    closed
 }
 
+/// Drive one turn to its terminal `Result`. Returns `true` if a `Close` (or
+/// channel hang-up) arrived mid-turn — the actor must wind down rather than
+/// loop back to `recv`, which would block forever.
 async fn drive_turn(
     engine: &SessionEngine,
     handle: &mut dyn Handle,
     text: &str,
     input_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     pending: &mut VecDeque<PendingTurn>,
-) {
+) -> bool {
     let (mut stream, cancel) = match handle.send(text).await {
         Ok(pair) => pair,
         Err(e) => {
@@ -614,7 +629,7 @@ async fn drive_turn(
                     "failed to journal synthetic terminal Result",
                 );
             }
-            return;
+            return false;
         }
     };
     // Hold the cancel signal in an Option so the Cancel arm can drop it once.
@@ -640,7 +655,7 @@ async fn drive_turn(
                     // Queue, don't drop: run after the current turn finishes.
                     pending.push_back((text, done));
                 }
-                Some(Cmd::Close) | None => return,
+                Some(Cmd::Close) | None => return true,
             },
             event = stream.next() => match event {
                 Some(event) => {
@@ -656,6 +671,7 @@ async fn drive_turn(
             },
         }
     }
+    false
 }
 
 async fn publish(engine: &SessionEngine, event: TurnEvent) -> Result<JournalEntry> {
