@@ -13,14 +13,15 @@ Non-negotiable expectations for any change in this repo:
 
 ## What this is
 
-A Cargo workspace with four crates:
+A Cargo workspace with five crates:
 
 - **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting metadata so sessions survive across daemon restarts.
-- **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket) plus an MCP server (`roy mcp`) that exposes the daemon to MCP-aware AI clients.
+- **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket). The `roy mcp` subcommand delegates to `roy-mcp`.
+- **`crates/roy-mcp`** — library. MCP (Model Context Protocol) server: JSON-RPC 2.0 over stdio, exposes daemon control operations as MCP tools. Linked into `roy-cli` and dispatched via `roy mcp`.
 - **`crates/roy-scheduler`** — cron + one-shot fire dispatcher. Talks to the daemon over its Unix socket using `ClientCommand::Fire`; never reaches into `SessionManager`, `Engine`, or `Journal`. Owns its own SQLite state (`~/.local/state/roy-scheduler/state.db`) for triggers, fires, and subscribers.
 - **`crates/roy-gateway`** — chat-platform and WebSocket bridge to the daemon (Telegram adapter + WS relay). Same boundary rule as `roy-scheduler`. Persists `chat_id → roy session_id` in a JSON file so chats survive restarts.
 
-External crates (`roy-scheduler`, `roy-gateway`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API.
+External crates (`roy-mcp`, `roy-scheduler`, `roy-gateway`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API.
 
 Roy spawns agent CLIs; it does not install them. The agent's working directory comes from the client: `roy run --cwd …`, MCP `cwd` argument, or `ClientCommand::Spawn.cwd`. When no client supplies one, the daemon falls back to `ROY_CWD` (env), then its own `current_dir`. Set `ROY_CWD` on the systemd/launchd unit to pin a default project root for every default-cwd session.
 
@@ -109,7 +110,7 @@ A short pipeline. Triggers (CLI, MCP) talk to a single `Daemon`; `Daemon` owns a
 
 5. **Control protocol** (`src/control.rs`) — wire-level enums (`ClientCommand`, `ServerEvent`, typed `ErrorCode`) shared by every trigger. The JSON payload is identical regardless of transport; the daemon itself uses only `\n`-delimited Unix framing. The `Message::Text` framing for WebSocket clients is provided by `roy-gateway`'s WS relay.
 
-6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `status`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `set-tags`, `wait`, `fire`, `mcp`, `projects`, `agents`. `status` is a non-side-effecting health probe (exit 0 if the daemon socket accepts a connection, 2 otherwise) — prefer it over `pgrep`-ing the binary in scripts and skills. The `mcp` subcommand (`crates/roy-cli/src/mcp.rs`) is an MCP server (JSON-RPC 2.0 over stdio) that exposes six tools (`roy_list_sessions`, `roy_list_archived`, `roy_run`, `roy_run_detached`, `roy_read_session`, `roy_close`).
+6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `status`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `set-tags`, `wait`, `fire`, `mcp`, `projects`, `agents`. `status` is a non-side-effecting health probe (exit 0 if the daemon socket accepts a connection, 2 otherwise) — prefer it over `pgrep`-ing the binary in scripts and skills. The `mcp` subcommand delegates to `roy-mcp` (`crates/roy-mcp/src/lib.rs`), an MCP server (JSON-RPC 2.0 over stdio) that exposes daemon control operations as MCP tools.
 
 ### TurnEvent normalization
 
