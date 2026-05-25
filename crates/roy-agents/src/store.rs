@@ -26,30 +26,53 @@ impl Store {
         Self { pool }
     }
 
-    /// Insert a new agent, minting a unique slug from `new.name`.
+    /// Insert a new agent, minting a unique slug from `new.name`. Retries
+    /// internally if a concurrent insert wins the SELECT→INSERT race on the
+    /// UNIQUE(slug) constraint, so callers never see a raw constraint error.
     pub async fn create(&self, new: NewAgent) -> Result<Agent, StoreError> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        let slug = self.unique_slug(&slugify(&new.name)).await?;
-        sqlx::query(
-            "INSERT INTO agents
-             (id, name, slug, description, preset, model, prompt, task, persistent, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(&new.name)
-        .bind(&slug)
-        .bind(&new.description)
-        .bind(&new.preset)
-        .bind(&new.model)
-        .bind(&new.prompt)
-        .bind(&new.task)
-        .bind(new.persistent)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-        self.get(&id).await
+        let base = slugify(&new.name);
+        loop {
+            let slug = self.unique_slug(&base).await?;
+            let res = sqlx::query(
+                "INSERT INTO agents
+                 (id, name, slug, description, preset, model, prompt, task, persistent, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&new.name)
+            .bind(&slug)
+            .bind(&new.description)
+            .bind(&new.preset)
+            .bind(&new.model)
+            .bind(&new.prompt)
+            .bind(&new.task)
+            .bind(new.persistent)
+            .bind(now)
+            .bind(now)
+            .execute(&self.pool)
+            .await;
+            match res {
+                Ok(_) => {
+                    return Ok(Agent {
+                        id,
+                        name: new.name,
+                        slug,
+                        description: new.description,
+                        preset: new.preset,
+                        model: new.model,
+                        prompt: new.prompt,
+                        task: new.task,
+                        persistent: new.persistent,
+                        created_at: now,
+                        updated_at: now,
+                    })
+                }
+                Err(sqlx::Error::Database(d)) if d.is_unique_violation() => continue,
+                Err(e) => return Err(StoreError::Db(e)),
+            }
+        }
     }
 
     /// Find the first free slug: `base`, then `base-2`, `base-3`, …
@@ -57,11 +80,10 @@ impl Store {
         let mut candidate = base.to_string();
         let mut n = 1;
         loop {
-            let taken: Option<(String,)> =
-                sqlx::query_as("SELECT slug FROM agents WHERE slug = ?")
-                    .bind(&candidate)
-                    .fetch_optional(&self.pool)
-                    .await?;
+            let taken: Option<(String,)> = sqlx::query_as("SELECT slug FROM agents WHERE slug = ?")
+                .bind(&candidate)
+                .fetch_optional(&self.pool)
+                .await?;
             if taken.is_none() {
                 return Ok(candidate);
             }
@@ -117,7 +139,7 @@ impl Store {
         .bind(id)
         .execute(&self.pool)
         .await?;
-        self.get(id).await
+        Ok(merged)
     }
 
     /// Delete by id. Returns `NotFound` if nothing was removed.
@@ -139,7 +161,9 @@ mod tests {
 
     async fn store() -> Store {
         let dir = tempfile::tempdir().unwrap();
-        let pool = crate::db::open(&dir.path().join("agents.db")).await.unwrap();
+        let pool = crate::db::open(&dir.path().join("agents.db"))
+            .await
+            .unwrap();
         // Keep the temp dir alive for the test process lifetime — dropping it
         // would invalidate the SQLite file referenced by the pool.
         std::mem::forget(dir);
@@ -166,14 +190,20 @@ mod tests {
         assert_eq!(s.get(&a.id).await.unwrap().prompt, "You are terse.");
         assert_eq!(s.list().await.unwrap().len(), 1);
 
-        let up = AgentUpdate { prompt: Some("Be blunt.".into()), ..Default::default() };
+        let up = AgentUpdate {
+            prompt: Some("Be blunt.".into()),
+            ..Default::default()
+        };
         let updated = s.update(&a.id, up).await.unwrap();
         assert_eq!(updated.prompt, "Be blunt.");
         assert_eq!(updated.slug, "reviewer"); // slug stable
 
         s.delete(&a.id).await.unwrap();
         assert!(matches!(s.get(&a.id).await, Err(StoreError::NotFound(_))));
-        assert!(matches!(s.delete(&a.id).await, Err(StoreError::NotFound(_))));
+        assert!(matches!(
+            s.delete(&a.id).await,
+            Err(StoreError::NotFound(_))
+        ));
     }
 
     #[tokio::test]

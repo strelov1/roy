@@ -68,9 +68,13 @@ pub async fn list_presets(socket: &Path) -> Result<serde_json::Value> {
             .next_line()
             .await?
             .ok_or_else(|| anyhow!("daemon hung up before AgentsList"))?;
-        let val: serde_json::Value = serde_json::from_str(raw.trim())?;
-        if val.get("kind").and_then(|k| k.as_str()) == Some("agents_list") {
-            return Ok(val);
+        let trimmed = raw.trim();
+        match serde_json::from_str::<ServerEvent>(trimmed)? {
+            ServerEvent::AgentsList { .. } => return Ok(serde_json::from_str(trimmed)?),
+            ServerEvent::Error { code, message, .. } => {
+                return Err(anyhow!("daemon error [{code}]: {message}"))
+            }
+            _ => continue,
         }
     }
 }

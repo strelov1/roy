@@ -29,7 +29,12 @@ impl From<StoreError> for ApiError {
             StoreError::NotFound(id) => {
                 ApiError(StatusCode::NOT_FOUND, format!("agent not found: {id}"))
             }
-            StoreError::Db(e) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            StoreError::Db(e) => {
+                // Don't surface sqlx text (column names, file paths) to API
+                // callers. Log the cause and return a generic 500.
+                tracing::error!(error = %e, "agent store db error");
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+            }
         }
     }
 }
@@ -100,8 +105,8 @@ async fn run_agent(
     let session = roy_client::spawn(
         &s.socket_path,
         &agent.preset,
-        agent.model.clone(),
-        Some(agent.prompt.clone()),
+        agent.model,
+        Some(agent.prompt),
     )
     .await
     .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
@@ -137,7 +142,9 @@ mod tests {
 
     async fn test_state() -> AppState {
         let dir = tempfile::tempdir().unwrap();
-        let pool = roy_agents::open(&dir.path().join("agents.db")).await.unwrap();
+        let pool = roy_agents::open(&dir.path().join("agents.db"))
+            .await
+            .unwrap();
         // Keep the temp dir alive for the test process lifetime — dropping it
         // would invalidate the SQLite file referenced by the pool.
         std::mem::forget(dir);
