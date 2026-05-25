@@ -57,3 +57,24 @@ pub fn load_or_create_ws_token(token_path: &Path) -> Result<String> {
         Err(e) => Err(e).with_context(|| format!("reading token {}", token_path.display())),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn token_is_minted_once_then_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("ws.token");
+
+        let t1 = load_or_create_ws_token(&token_path).unwrap();
+        assert!(!t1.is_empty(), "token must not be empty");
+
+        let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "token file must be 0600, got {mode:o}");
+
+        let t2 = load_or_create_ws_token(&token_path).unwrap();
+        assert_eq!(t1, t2, "second call must return the persisted token");
+    }
+}
