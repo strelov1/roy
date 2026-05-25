@@ -10,8 +10,12 @@ use serde::Deserialize;
 pub struct GatewayConfig {
     #[serde(default)]
     pub daemon: DaemonConfig,
-    pub telegram: TelegramConfig,
-    pub binder: BinderConfig,
+    #[serde(default)]
+    pub telegram: Option<TelegramConfig>,
+    #[serde(default)]
+    pub binder: Option<BinderConfig>,
+    #[serde(default)]
+    pub websocket: Option<WebsocketConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -49,13 +53,41 @@ pub struct BinderConfig {
     pub path: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct WebsocketConfig {
+    /// Address to bind the WS listener on. Loopback-only by default; set an
+    /// external address only behind your own TLS termination.
+    #[serde(default = "default_ws_bind")]
+    pub bind: String,
+    /// Path to the shared-secret token file. When `None`, defaults to
+    /// `~/.local/state/roy-gateway/ws.token`.
+    #[serde(default)]
+    pub token_path: Option<String>,
+}
+
+fn default_ws_bind() -> String {
+    "127.0.0.1:8787".to_string()
+}
+
 impl GatewayConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
         let cfg: Self =
             toml::from_str(&raw).with_context(|| format!("parsing config {}", path.display()))?;
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// At least one adapter must be configured; Telegram needs a binder.
+    pub fn validate(&self) -> Result<()> {
+        if self.telegram.is_none() && self.websocket.is_none() {
+            anyhow::bail!("config must enable at least one of [telegram] or [websocket]");
+        }
+        if self.telegram.is_some() && self.binder.is_none() {
+            anyhow::bail!("[telegram] requires a [binder] section");
+        }
+        Ok(())
     }
 }
 
@@ -64,45 +96,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_full_config() {
+    fn parse_telegram_and_websocket() {
         let raw = r#"
             [daemon]
             socket = "/tmp/roy.sock"
 
             [telegram]
             token = "1234:abc"
-            allowed_user_ids = [1, 2]
             preset = "claude"
-            project_id = "proj-abc"
-            turn_timeout_secs = 300
 
             [binder]
             path = "/tmp/binder.json"
+
+            [websocket]
+            bind = "127.0.0.1:9001"
+            token_path = "/tmp/ws.token"
         "#;
         let cfg: GatewayConfig = toml::from_str(raw).unwrap();
         assert_eq!(cfg.daemon.socket.as_deref(), Some("/tmp/roy.sock"));
-        assert_eq!(cfg.telegram.token, "1234:abc");
-        assert_eq!(cfg.telegram.allowed_user_ids, vec![1, 2]);
-        assert_eq!(cfg.telegram.preset, "claude");
-        assert_eq!(cfg.telegram.project_id.as_deref(), Some("proj-abc"));
-        assert_eq!(cfg.telegram.turn_timeout_secs, 300);
-        assert_eq!(cfg.binder.path, "/tmp/binder.json");
+        let tg = cfg.telegram.as_ref().unwrap();
+        assert_eq!(tg.token, "1234:abc");
+        let ws = cfg.websocket.as_ref().unwrap();
+        assert_eq!(ws.bind, "127.0.0.1:9001");
+        assert_eq!(ws.token_path.as_deref(), Some("/tmp/ws.token"));
     }
 
     #[test]
-    fn parse_minimal_config_uses_defaults() {
+    fn websocket_only_config_parses() {
+        let raw = r#"
+            [websocket]
+            bind = "127.0.0.1:8787"
+        "#;
+        let cfg: GatewayConfig = toml::from_str(raw).unwrap();
+        assert!(cfg.telegram.is_none());
+        assert!(cfg.binder.is_none());
+        let ws = cfg.websocket.as_ref().unwrap();
+        assert_eq!(ws.bind, "127.0.0.1:8787");
+        assert!(ws.token_path.is_none());
+        cfg.validate().expect("ws-only is valid");
+    }
+
+    #[test]
+    fn websocket_bind_defaults_when_omitted() {
+        let raw = r#"
+            [websocket]
+        "#;
+        let cfg: GatewayConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.websocket.unwrap().bind, "127.0.0.1:8787");
+    }
+
+    #[test]
+    fn no_adapter_is_an_error() {
+        let raw = r#"
+            [daemon]
+            socket = "/tmp/roy.sock"
+        "#;
+        let cfg: GatewayConfig = toml::from_str(raw).unwrap();
+        assert!(cfg.validate().is_err(), "must require at least one adapter");
+    }
+
+    #[test]
+    fn telegram_without_binder_is_an_error() {
         let raw = r#"
             [telegram]
             token = "x"
             preset = "claude"
-
-            [binder]
-            path = "/tmp/b.json"
         "#;
         let cfg: GatewayConfig = toml::from_str(raw).unwrap();
-        assert!(cfg.daemon.socket.is_none());
-        assert!(cfg.telegram.allowed_user_ids.is_empty());
-        assert!(cfg.telegram.project_id.is_none());
-        assert_eq!(cfg.telegram.turn_timeout_secs, 600);
+        assert!(cfg.validate().is_err(), "telegram requires a binder");
     }
 }

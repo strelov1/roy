@@ -7,8 +7,8 @@ crate:
   stdio, journaling each turn, broadcasting events to N subscribers, and
   persisting metadata so sessions survive across daemon restarts.
 - **`crates/roy-cli`** — the `roy` binary. A thin trigger client over the
-  daemon (Unix socket / WebSocket) and an MCP server (`roy mcp`) that
-  exposes the daemon to MCP-aware AI clients.
+  daemon (Unix socket) and an MCP server (`roy mcp`) that exposes the
+  daemon to MCP-aware AI clients.
 
 This document describes the layering. The wire formats are documented
 separately in [wire-protocol.md](./wire-protocol.md); journal and resume
@@ -25,13 +25,15 @@ semantics live in [persistence.md](./persistence.md).
 │  │   ├ SessionEngine { … }                           │    │
 │  │   └ …                                             │    │
 │  └──────────────────────────────────────────────────┘    │
-│   ▲ Unix socket    ▲ WebSocket    ▲ stdio MCP            │
-└───┼────────────────┼───────────────┼─────────────────────┘
-    │                │               │
- roy run         WS client       LLM via roy mcp
- roy attach      (browser/IDE)
+│   ▲ Unix socket                  ▲ stdio MCP             │
+└───┼──────────────────────────────┼──────────────────────┘
+    │                              │
+ roy run                       LLM via roy mcp
+ roy attach
  roy list / list-archived
  roy resume / close
+ roy-gateway WS relay ◄── WS client (browser/IDE)
+ (127.0.0.1:8787, token-auth)
 ```
 
 Bytes only cross trait boundaries at `Transport`. Adding a new agent is a
@@ -130,41 +132,52 @@ Front-door methods:
 2. If `idle_timeout`: spawn a background ticker that calls
    `SessionManager::sweep_idle` at `max(threshold/4, 50ms)` intervals.
 3. Spawn the Unix listener (`run_unix`).
-4. If `ws_port` is set, spawn the WebSocket listener (`run_ws`).
-5. Await whichever exits first.
+4. Await its exit.
 
 Single-instance is enforced by `PidLock`: a PID file at `<socket>.pid`
 written atomically with `O_CREAT | O_EXCL`. A live PID blocks startup; a
 dead PID is treated as stale and taken over. `kill -9` leaks the file;
 the next start detects the dead PID and recovers.
 
-Per-connection (`serve_connection` / `serve_ws_connection`):
+Per-connection (`serve_connection`):
 
 - One `mpsc::UnboundedSender<ServerEvent>` is the per-connection writer
-  channel; a dedicated writer task drains it and serialises events to
-  the framing-of-the-day (`\n`-delimited bytes on Unix sockets,
-  `Message::Text` on WebSocket).
+  channel; a dedicated writer task drains it and serialises events as
+  `\n`-delimited JSON bytes on the Unix socket.
 - The dispatch loop reads `ClientCommand`s from the inbound side and
   routes them through a shared `handle()` that operates on the
-  `EventTx` only — it doesn't know which framing it's serving.
+  `EventTx` only.
 - Each connection tracks its own subscriptions (one tokio task per
   `Attach`, aborted on `Detach`/`Close` and on connection drop) and its
   own held `InputLease`s (RAII-released when the connection drops).
+
+WebSocket clients connect through the `roy-gateway` WS relay
+(`crates/roy-gateway/src/ws.rs`), which accepts token-authenticated WS
+connections (shared secret via `Sec-WebSocket-Protocol`, loopback by
+default at `127.0.0.1:8787`) and bridges each to a dedicated
+Unix-socket connection to the daemon, pumping the same control-protocol
+JSON verbatim. From the daemon's perspective every WS client is just
+another Unix-socket connection.
 
 ### Triggers
 
 Three today, all speaking the same `ClientCommand` / `ServerEvent`
 payload — only framing differs.
 
-| Trigger              | Framing                              | Where it lives                       |
-|----------------------|---------------------------------------|--------------------------------------|
-| Unix socket          | `\n`-delimited JSON Lines             | `roy::daemon` (in-crate)             |
-| WebSocket            | `tungstenite::Message::Text`           | `roy::daemon` (in-crate)             |
-| MCP (stdio)          | MCP JSON-RPC 2.0 over stdio           | `roy-cli::mcp` (out-of-crate bridge) |
+| Trigger              | Framing                              | Where it lives                              |
+|----------------------|---------------------------------------|---------------------------------------------|
+| Unix socket          | `\n`-delimited JSON Lines             | `roy::daemon` (in-crate)                    |
+| WebSocket            | `tungstenite::Message::Text`           | `roy-gateway::ws` (transparent relay)       |
+| MCP (stdio)          | MCP JSON-RPC 2.0 over stdio           | `roy-cli::mcp` (out-of-crate bridge)        |
 
 `roy mcp` is intentionally a separate bridge process spawned by an
 MCP-aware client (Claude Desktop, IDE plugin). Each tools/call opens a
 fresh Unix-socket connection to the daemon and drives one round trip.
+
+The WebSocket relay in `roy-gateway` is a peer to the scheduler and
+Telegram adapter: it speaks the control protocol over the Unix socket
+like any other external client, and re-frames the same JSON as
+`Message::Text` for WS peers. The daemon is unaware of WS.
 
 ### Agents discovery layer
 
@@ -194,7 +207,7 @@ small Python script that speaks JSON-RPC over stdio and takes flags
 (`--permission`, `--exit-mid-turn`, `--cancellable`, `--no-initialize-reply`,
 `--jsonrpc-error`, etc.) to drive error/timeout/permission paths
 deterministically. The daemon-level tests (`crates/roy/src/daemon.rs`
-`#[cfg(test)] mod tests`) drive the full Unix-socket and WebSocket paths
-through `tokio::io::duplex` and real loopback TCP. Real-CLI smoke tests
-in `crates/roy/tests/acp_transport.rs` are `#[ignore]`d and self-skip
-when the corresponding agent binary isn't installed.
+`#[cfg(test)] mod tests`) drive the Unix-socket path through
+`tokio::io::duplex`; WS relay tests live in `roy-gateway`. Real-CLI
+smoke tests in `crates/roy/tests/acp_transport.rs` are `#[ignore]`d and
+self-skip when the corresponding agent binary isn't installed.

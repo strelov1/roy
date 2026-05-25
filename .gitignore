@@ -8,3 +8,6 @@ Cargo.lock
 # Playwright MCP scratch + ad-hoc screenshots from interactive sessions.
 /.playwright-mcp/
 /*.png
+
+# Git worktrees for isolated feature development.
+/.worktrees/
