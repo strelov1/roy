@@ -36,7 +36,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     meta_store::MetaStore::apply_migrations(&pool).await?;
     let socket = args.socket.unwrap_or_else(default_socket);
-    let meta = meta_store::MetaStore::new(pool.clone());
+    let workspace_dir = meta_store::default_workspace_dir();
+    std::fs::create_dir_all(&workspace_dir)?;
+    let meta = meta_store::MetaStore::new(pool.clone(), workspace_dir);
     let daemon: Arc<dyn roy_client::DaemonClient> =
         Arc::new(roy_client::UnixSocketDaemonClient::new(socket.clone()));
 

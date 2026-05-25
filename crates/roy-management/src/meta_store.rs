@@ -10,6 +10,7 @@
 //! its own migrations.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use sqlx::SqlitePool;
 use thiserror::Error;
@@ -24,6 +25,8 @@ pub enum MetaError {
     Invalid(String),
     #[error("db: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -48,11 +51,19 @@ pub struct SessionMeta {
 #[derive(Clone)]
 pub struct MetaStore {
     pool: SqlitePool,
+    workspace_dir: PathBuf,
 }
 
 impl MetaStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    /// `workspace_dir` is where new project directories are created (one
+    /// child dir per project name). Production callers should resolve this
+    /// once at startup from `$ROY_WORKSPACE_DIR` / `~/.roy/workspace` and
+    /// pass it in; tests inject a tempdir.
+    pub fn new(pool: SqlitePool, workspace_dir: PathBuf) -> Self {
+        Self {
+            pool,
+            workspace_dir,
+        }
     }
 
     /// Test seam: hands out a clone of the inner pool for direct SQL probes
@@ -71,8 +82,9 @@ impl MetaStore {
     pub async fn create_project(&self, name: &str) -> Result<Project, MetaError> {
         validate_project_name(name)?;
         let id = uuid::Uuid::new_v4().to_string();
-        let workspace = workspace_dir_default();
-        let path = workspace.join(name).to_string_lossy().into_owned();
+        let dir = self.workspace_dir.join(name);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.to_string_lossy().into_owned();
         let created_at = chrono::Utc::now().timestamp();
         let result =
             sqlx::query("INSERT INTO projects (id, name, path, created_at) VALUES (?, ?, ?, ?)")
@@ -346,12 +358,14 @@ fn validate_project_name(name: &str) -> Result<(), MetaError> {
     Ok(())
 }
 
-fn workspace_dir_default() -> std::path::PathBuf {
+/// `$ROY_WORKSPACE_DIR`, else `~/.roy/workspace`. Resolved at startup by
+/// callers (e.g. `roy_management::run`) and passed into `MetaStore::new`.
+pub fn default_workspace_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("ROY_WORKSPACE_DIR") {
-        return std::path::PathBuf::from(p);
+        return PathBuf::from(p);
     }
     let home = std::env::var_os("HOME").unwrap_or_default();
-    std::path::PathBuf::from(home).join(".roy/workspace")
+    PathBuf::from(home).join(".roy/workspace")
 }
 
 #[cfg(test)]
@@ -365,11 +379,12 @@ mod tests {
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
+        let workspace = dir.path().join("workspace");
         // Leak the tempdir: the SqlitePool inside MetaStore must keep reading
         // the file for the rest of the test, but the dir would otherwise be
         // dropped when this function returns.
         std::mem::forget(dir);
-        MetaStore::new(pool)
+        MetaStore::new(pool, workspace)
     }
 
     #[tokio::test]

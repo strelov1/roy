@@ -431,6 +431,10 @@ fn meta_to_api(e: crate::meta_store::MetaError) -> ApiError {
             tracing::error!(error=%e, "meta db error");
             ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
         }
+        Io(e) => {
+            tracing::error!(error=%e, "meta io error");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+        }
     }
 }
 
@@ -450,12 +454,13 @@ mod tests {
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
+        let workspace = dir.path().join("workspace");
         // Keep the temp dir alive for the test process lifetime — dropping it
         // would invalidate the SQLite file referenced by the pool.
         std::mem::forget(dir);
         AppState {
             store: roy_agents::Store::new(pool.clone()),
-            meta: MetaStore::new(pool),
+            meta: MetaStore::new(pool, workspace),
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
         }
@@ -725,11 +730,12 @@ mod tests {
         crate::meta_store::MetaStore::apply_migrations(&pool)
             .await
             .unwrap();
+        let workspace = dir.path().join("workspace");
         // Leak the tempdir: pool keeps reading from this file for the test.
         std::mem::forget(dir);
         AppState {
             store: roy_agents::Store::new(pool.clone()),
-            meta: crate::meta_store::MetaStore::new(pool),
+            meta: crate::meta_store::MetaStore::new(pool, workspace),
             daemon: std::sync::Arc::new(crate::roy_client::mock::MockDaemonClient::new()),
             socket_path: socket,
         }

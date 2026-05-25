@@ -51,9 +51,10 @@ mod tests {
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
+        let workspace = dir.path().join("workspace");
         // Leak the tempdir: pool reads from this file for the rest of the test.
         std::mem::forget(dir);
-        let meta = MetaStore::new(pool);
+        let meta = MetaStore::new(pool, workspace);
         meta.upsert_session_meta(&SessionMeta {
             session_id: "ghost".into(),
             project_id: None,
