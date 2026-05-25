@@ -935,11 +935,9 @@ impl Daemon {
         }
 
         // respond = true: deliver as a real turn the agent answers. The engine
-        // queues the inject behind any in-flight turn (never dropping it) and
-        // reports *this* turn's outcome on the returned channel, so we await
-        // the right result even if other turns run first.
+        // queues the inject behind any in-flight turn and reports *this* turn's
+        // own outcome (including its start seq) on the channel.
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(600_000));
-        let start = engine.next_seq().await;
         let rx = match engine.inject_prompt(text) {
             Ok(rx) => rx,
             Err(e) => {
@@ -953,7 +951,7 @@ impl Daemon {
         };
 
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(Ok(Some((seq, result, assistant_text))))) => {
+            Ok(Ok(Ok(Some((start, seq, result, assistant_text))))) => {
                 let _ = event_tx.send(ServerEvent::FireDone {
                     session,
                     seq_range: (start, seq),
@@ -963,17 +961,17 @@ impl Daemon {
             }
             // Turn finished without a terminal Result (e.g. shutdown mid-turn).
             Ok(Ok(Ok(None))) => {
-                let partial_end = engine.next_seq().await;
+                let end = engine.next_seq().await;
                 let _ = event_tx.send(ServerEvent::FireTimeout {
                     session,
-                    partial_seq_range: (start, partial_end),
+                    partial_seq_range: (end, end),
                 });
             }
             // Journal read failed inside the engine.
             Ok(Ok(Err(e))) => {
                 let _ = event_tx.send(ServerEvent::FireError {
                     session: Some(session),
-                    code: ErrorCode::SendFailed,
+                    code: ErrorCode::ReadJournalFailed,
                     message: format!("inject result read failed: {e}"),
                 });
             }
@@ -981,16 +979,16 @@ impl Daemon {
             Ok(Err(_recv)) => {
                 let _ = event_tx.send(ServerEvent::FireError {
                     session: Some(session),
-                    code: ErrorCode::SendFailed,
+                    code: ErrorCode::NoSession,
                     message: "session closed before inject completed".to_string(),
                 });
             }
             // We hit the caller's timeout before the turn completed.
             Err(_elapsed) => {
-                let partial_end = engine.next_seq().await;
+                let end = engine.next_seq().await;
                 let _ = event_tx.send(ServerEvent::FireTimeout {
                     session,
-                    partial_seq_range: (start, partial_end),
+                    partial_seq_range: (end, end),
                 });
             }
         }
