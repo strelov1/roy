@@ -25,8 +25,7 @@ pub struct Args {
     pub socket: Option<PathBuf>,
 }
 
-/// Build and serve the management HTTP API. The caller owns the tokio runtime
-/// and tracing subscriber.
+/// Build and serve the management HTTP API.
 pub async fn run(args: Args) -> anyhow::Result<()> {
     let db_path = args.db.unwrap_or_else(roy_agents::default_db_path);
     let pool = roy_agents::open(&db_path).await?;
@@ -46,7 +45,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Matches roy-scheduler's `default_socket` so both find the same daemon.
 fn default_socket() -> PathBuf {
     if let Ok(s) = std::env::var("ROY_SOCKET") {
         return PathBuf::from(s);
