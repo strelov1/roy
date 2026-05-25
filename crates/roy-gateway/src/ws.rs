@@ -137,13 +137,19 @@ where
     };
 
     let outbound = async {
-        while let Ok(Some(line)) = daemon_lines.next_line().await {
-            if ws_sink.send(Message::Text(line.into())).await.is_err() {
-                break;
+        let result = loop {
+            match daemon_lines.next_line().await {
+                Ok(Some(line)) => {
+                    if ws_sink.send(Message::Text(line.into())).await.is_err() {
+                        break Ok(());
+                    }
+                }
+                Ok(None) => break Ok(()),
+                Err(e) => break Err(anyhow::Error::new(e).context("daemon read")),
             }
-        }
+        };
         let _ = ws_sink.close().await;
-        Ok::<(), anyhow::Error>(())
+        result
     };
 
     let result = tokio::select! {
