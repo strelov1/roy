@@ -108,13 +108,23 @@ async fn run_agent(
     Ok(Json(json!({ "session": session, "agent_id": agent.id })))
 }
 
-/// Preset must be one of the four the daemon knows. Parsed via roy's enum so
-/// the set stays in sync with the daemon.
+/// Preset must be one the daemon spawns. Kept as a const list rather than
+/// importing `roy::AgentPreset` so this crate's only `roy` dependency stays
+/// limited to the wire-protocol types listed in CLAUDE.md.
+const VALID_PRESETS: &[&str] = &["claude", "gemini", "opencode", "codex"];
+
 fn validate_preset(preset: &str) -> Result<(), ApiError> {
-    preset
-        .parse::<roy::AgentPreset>()
-        .map(|_| ())
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))
+    if VALID_PRESETS.contains(&preset) {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unknown preset '{preset}'; expected one of: {}",
+                VALID_PRESETS.join(", ")
+            ),
+        ))
+    }
 }
 
 #[cfg(test)]
