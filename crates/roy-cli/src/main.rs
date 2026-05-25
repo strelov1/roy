@@ -1317,11 +1317,7 @@ fn validate_flags(args: &RunArgs) -> anyhow::Result<()> {
 
 fn print_entry(entry: &JournalEntry, with_seq: bool) {
     let line = if with_seq {
-        serde_json::to_string(&serde_json::json!({
-            "seq": entry.seq,
-            "event": entry.event,
-        }))
-        .expect("serialize")
+        serde_json::to_string(entry).expect("serialize")
     } else {
         serde_json::to_string(&entry.event).expect("serialize")
     };

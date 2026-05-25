@@ -80,17 +80,22 @@ Notes:
 | `error`                | catch-all transport/agent failure                    |
 | `<other string>`       | forward-compat: any other agent-emitted reason       |
 
-## JournalEntry — `seq` + `event`
+## JournalEntry — `seq` + `ts_ms` + `event`
 
 Every entry in the journal AND every `Frame` event on the trigger
 protocol uses:
 
 ```json
-{"seq": 7, "event": {"type": "assistant_text", "text": "…"}}
+{"seq": 7, "ts_ms": 1748000000000, "event": {"type": "assistant_text", "text": "…"}}
 ```
 
 `seq` is `u64`, monotonically increasing across all turns of a session.
 Resumed sessions continue past the last persisted seq.
+
+`ts_ms` is `u64`, wall-clock milliseconds since the Unix epoch, stamped
+by `Journal::append` at the moment the entry hits the journal. UIs use
+this to render send/receive times. `seq` remains the ordering key —
+multiple events inside a streamed turn can land in the same millisecond.
 
 ## Control protocol — ClientCommand / ServerEvent
 

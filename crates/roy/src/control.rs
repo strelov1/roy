@@ -538,6 +538,7 @@ mod tests {
     fn frame_event_roundtrips_with_typed_turn_event() {
         let entry = JournalEntry {
             seq: 7,
+            ts_ms: 1_700_000_000_000,
             event: TurnEvent::Result {
                 cost_usd: Some(0.5),
                 stop_reason: StopReason::EndTurn,
