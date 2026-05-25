@@ -249,37 +249,7 @@ enum AgentsCmd {
     /// (`--description "…"`) or an explicit clear (`--clear-description`).
     /// The two are mutually exclusive per field; omit both to leave the
     /// column alone.
-    Update {
-        #[command(flatten)]
-        base: MgmtBaseArgs,
-        /// Agent id or slug.
-        id: String,
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long, value_parser = ["claude", "gemini", "opencode", "codex"])]
-        preset: Option<String>,
-        #[arg(long, conflicts_with = "clear_model")]
-        model: Option<String>,
-        /// Clear the model column (NULL in DB) — engine default applies.
-        #[arg(long)]
-        clear_model: bool,
-        #[arg(long)]
-        prompt_file: Option<std::path::PathBuf>,
-        #[arg(long, conflicts_with = "clear_description")]
-        description: Option<String>,
-        /// Clear the description column (NULL in DB).
-        #[arg(long)]
-        clear_description: bool,
-        /// Standing instruction text for scheduled fires.
-        #[arg(long, conflicts_with = "clear_task")]
-        task: Option<String>,
-        /// Clear the task column (NULL in DB).
-        #[arg(long)]
-        clear_task: bool,
-        /// When set, toggles `persistent` to the given value.
-        #[arg(long)]
-        persistent: Option<bool>,
-    },
+    Update(AgentsUpdateArgs),
     /// Delete an agent persona. Requires --yes (deletion is permanent).
     Delete {
         #[command(flatten)]
@@ -307,6 +277,39 @@ struct MgmtBaseArgs {
         default_value = "http://127.0.0.1:8079"
     )]
     mgmt_url: String,
+}
+
+#[derive(Args, Debug)]
+struct AgentsUpdateArgs {
+    #[command(flatten)]
+    base: MgmtBaseArgs,
+    /// Agent id or slug.
+    id: String,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long, value_parser = ["claude", "gemini", "opencode", "codex"])]
+    preset: Option<String>,
+    #[arg(long, conflicts_with = "clear_model")]
+    model: Option<String>,
+    /// Clear the model column (NULL in DB) — engine default applies.
+    #[arg(long)]
+    clear_model: bool,
+    #[arg(long)]
+    prompt_file: Option<std::path::PathBuf>,
+    #[arg(long, conflicts_with = "clear_description")]
+    description: Option<String>,
+    /// Clear the description column (NULL in DB).
+    #[arg(long)]
+    clear_description: bool,
+    /// Standing instruction text for scheduled fires.
+    #[arg(long, conflicts_with = "clear_task")]
+    task: Option<String>,
+    /// Clear the task column (NULL in DB).
+    #[arg(long)]
+    clear_task: bool,
+    /// When set, toggles `persistent` to the given value.
+    #[arg(long)]
+    persistent: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -975,36 +978,7 @@ async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<ExitCode> {
             )
             .await
         }
-        AgentsCmd::Update {
-            base,
-            id,
-            name,
-            preset,
-            model,
-            clear_model,
-            prompt_file,
-            description,
-            clear_description,
-            task,
-            clear_task,
-            persistent,
-        } => {
-            cmd_agents_update(
-                base,
-                id,
-                name,
-                preset,
-                model,
-                clear_model,
-                prompt_file,
-                description,
-                clear_description,
-                task,
-                clear_task,
-                persistent,
-            )
-            .await
-        }
+        AgentsCmd::Update(args) => cmd_agents_update(args).await,
         AgentsCmd::Delete { base, id, yes } => cmd_agents_delete(base, id, yes).await,
         AgentsCmd::Run { base, id } => cmd_agents_run(base, id).await,
     }
@@ -1051,21 +1025,21 @@ async fn cmd_agents_create(
     Ok(ExitCode::SUCCESS)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn cmd_agents_update(
-    args: MgmtBaseArgs,
-    id: String,
-    name: Option<String>,
-    preset: Option<String>,
-    model: Option<String>,
-    clear_model: bool,
-    prompt_file: Option<std::path::PathBuf>,
-    description: Option<String>,
-    clear_description: bool,
-    task: Option<String>,
-    clear_task: bool,
-    persistent: Option<bool>,
-) -> anyhow::Result<ExitCode> {
+async fn cmd_agents_update(args: AgentsUpdateArgs) -> anyhow::Result<ExitCode> {
+    let AgentsUpdateArgs {
+        base,
+        id,
+        name,
+        preset,
+        model,
+        clear_model,
+        prompt_file,
+        description,
+        clear_description,
+        task,
+        clear_task,
+        persistent,
+    } = args;
     let prompt = match prompt_file {
         Some(p) => Some(
             std::fs::read_to_string(&p)
@@ -1073,7 +1047,7 @@ async fn cmd_agents_update(
         ),
         None => None,
     };
-    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let c = crate::management_client::ManagementClient::new(&base.mgmt_url);
     let resolved = c.resolve(&id).await?;
     let patch = crate::management_client::AgentPatch {
         name,

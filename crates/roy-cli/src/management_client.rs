@@ -183,14 +183,9 @@ impl ManagementClient {
     }
 
     /// Client-side slug→id resolution. Since the server doesn't expose
-    /// `/agents/by-slug/<slug>`, we list and filter. Cheap for the
-    /// management's expected scale.
+    /// `/agents/by-slug/<slug>`, we list and filter by either slug or id.
+    /// One extra HTTP round-trip per CLI invocation — acceptable at this scale.
     pub async fn resolve(&self, id_or_slug: &str) -> Result<String> {
-        // Heuristic: if it looks like a UUID (36 chars with hyphens), use as-is.
-        // Otherwise list+filter by slug or exact-id match.
-        if id_or_slug.len() == 36 && id_or_slug.matches('-').count() == 4 {
-            return Ok(id_or_slug.to_string());
-        }
         let all = self.list().await?;
         all.into_iter()
             .find(|a| a.slug == id_or_slug || a.id == id_or_slug)
