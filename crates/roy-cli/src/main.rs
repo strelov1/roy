@@ -58,6 +58,9 @@ enum Cmd {
     Wait(WaitArgs),
     /// One-shot fire: spawn (or resume) a session, send a prompt, wait for the result.
     Fire(FireArgs),
+    /// Inject a message into a live session as a background note (no input
+    /// lease needed). A background agent calls this to notify a session.
+    Inject(InjectArgs),
     /// Run an MCP server (stdio JSON-RPC) that exposes roy daemon operations
     /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
     /// IDE plugin) which talks to it over stdio.
@@ -138,6 +141,18 @@ struct ResumeArgs {
 #[derive(clap::Args)]
 struct CloseArgs {
     session: String,
+}
+
+#[derive(clap::Args)]
+struct InjectArgs {
+    /// The live session to inject into.
+    session: String,
+    /// The message text.
+    text: String,
+    /// Optional source session id to link the note back to (e.g. the child
+    /// background session that produced this message).
+    #[arg(long)]
+    source: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -253,9 +268,10 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::SetTags(args) => cmd_set_tags(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Wait(args) => cmd_wait(args).await,
         Cmd::Fire(args) => cmd_fire(args).await,
+        Cmd::Inject(args) => cmd_inject(args).await,
         Cmd::Mcp(args) => {
             let socket = args.socket.unwrap_or_else(default_socket);
-            mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
+            roy_mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
         }
         Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
         Cmd::Agents { cmd } => cmd_agents(cmd).await,
@@ -605,6 +621,38 @@ async fn cmd_close(args: CloseArgs) -> anyhow::Result<()> {
             anyhow::bail!("close failed: {code}: {message}")
         }
         other => anyhow::bail!("unexpected response to Close: {other:?}"),
+    }
+}
+
+async fn cmd_inject(args: InjectArgs) -> anyhow::Result<ExitCode> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut events = BufReader::new(reader).lines();
+
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Inject {
+            session: args.session.clone(),
+            text: args.text,
+            source_session: args.source,
+        },
+    )
+    .await?;
+    match read_event(&mut events).await? {
+        ServerEvent::Injected { session, seq } => {
+            let payload = serde_json::json!({
+                "type": "injected",
+                "session": session,
+                "seq": seq,
+            });
+            println!("{payload}");
+            Ok(ExitCode::SUCCESS)
+        }
+        ServerEvent::Error { code, message, .. } => {
+            eprintln!("roy inject: {code}: {message}");
+            Ok(ExitCode::from(2))
+        }
+        other => anyhow::bail!("unexpected response to Inject: {other:?}"),
     }
 }
 
