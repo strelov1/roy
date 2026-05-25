@@ -10,20 +10,30 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use crate::error::{Result, RoyError};
-use crate::event::{event_from_json, event_to_json, TurnEvent};
+use crate::event::{event_from_json, TurnEvent};
 
 pub type Seq = u64;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JournalEntry {
     pub seq: Seq,
+    /// Wall-clock millis since epoch. `seq` is still the ordering key — many
+    /// events share a millisecond during a streamed turn.
+    pub ts_ms: u64,
     pub event: TurnEvent,
+}
+
+fn unix_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Parse one JSONL line into a `JournalEntry`. Single source of truth for the
@@ -37,11 +47,15 @@ fn parse_entry_line(line: &str) -> Result<JournalEntry> {
         .get("seq")
         .and_then(Value::as_u64)
         .ok_or_else(|| RoyError::Protocol(format!("journal entry missing seq: {line}")))?;
+    let ts_ms = v
+        .get("ts_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| RoyError::Protocol(format!("journal entry missing ts_ms: {line}")))?;
     let event = event_from_json(
         v.get("event")
             .ok_or_else(|| RoyError::Protocol(format!("journal entry missing event: {line}")))?,
     )?;
-    Ok(JournalEntry { seq, event })
+    Ok(JournalEntry { seq, ts_ms, event })
 }
 
 pub struct Journal {
@@ -126,15 +140,19 @@ impl Journal {
     }
 
     /// Append one event. Single-writer in practice (the session actor) — but
-    /// guarded by an async mutex for safety. Returns the assigned `seq`.
-    pub async fn append(&self, event: TurnEvent) -> Result<Seq> {
+    /// guarded by an async mutex for safety. Stamps `ts_ms` at the moment of
+    /// write and returns the full entry so callers can re-broadcast it
+    /// without rebuilding.
+    pub async fn append(&self, event: TurnEvent) -> Result<JournalEntry> {
         let mut inner = self.inner.lock().await;
-        let seq = inner.next_seq;
-        let line = serde_json::to_string(&json!({
-            "seq": seq,
-            "event": event_to_json(&event),
-        }))
-        .map_err(|e| RoyError::Protocol(e.to_string()))?;
+        let entry = JournalEntry {
+            seq: inner.next_seq,
+            ts_ms: unix_now_millis(),
+            event,
+        };
+        // On-disk format == in-memory `JournalEntry` serde shape. Struct field
+        // order is the on-disk key order — moving `ts_ms` would change bytes.
+        let line = serde_json::to_string(&entry).map_err(|e| RoyError::Protocol(e.to_string()))?;
         inner.writer.write_all(line.as_bytes()).await?;
         inner.writer.write_all(b"\n").await?;
         inner.writer.flush().await?;
@@ -142,9 +160,9 @@ impl Journal {
         if inner.mem.len() == inner.mem_capacity {
             inner.mem.pop_front();
         }
-        inner.mem.push_back(JournalEntry { seq, event });
+        inner.mem.push_back(entry.clone());
         inner.next_seq += 1;
-        Ok(seq)
+        Ok(entry)
     }
 
     pub async fn next_seq(&self) -> Seq {
@@ -273,22 +291,27 @@ mod tests {
         let dir = tmpdir();
         let j = Journal::open(&dir.0, "s1", 10).await.unwrap();
 
-        assert_eq!(
-            j.append(TurnEvent::AssistantText { text: "a".into() })
-                .await
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            j.append(TurnEvent::AssistantText { text: "b".into() })
-                .await
-                .unwrap(),
-            1
+        let first = j
+            .append(TurnEvent::AssistantText { text: "a".into() })
+            .await
+            .unwrap();
+        assert_eq!(first.seq, 0);
+        assert!(first.ts_ms > 0, "ts should be stamped from wall clock");
+        let second = j
+            .append(TurnEvent::AssistantText { text: "b".into() })
+            .await
+            .unwrap();
+        assert_eq!(second.seq, 1);
+        assert!(
+            second.ts_ms >= first.ts_ms,
+            "ts is non-decreasing across appends"
         );
         let replay = j.replay_from(0).await.unwrap();
         assert_eq!(replay.len(), 2);
         assert_eq!(replay[0].seq, 0);
         assert_eq!(replay[1].seq, 1);
+        assert_eq!(replay[0].ts_ms, first.ts_ms);
+        assert_eq!(replay[1].ts_ms, second.ts_ms);
         match &replay[1].event {
             TurnEvent::AssistantText { text } => assert_eq!(text, "b"),
             other => panic!("expected AssistantText, got {other:?}"),
@@ -352,6 +375,14 @@ mod tests {
         let raw = std::fs::read_to_string(j.path()).unwrap();
         assert!(raw.contains("\"stop_reason\":\"refusal\""));
         assert!(raw.contains("\"is_error\":true"));
+        // Lock the on-disk key order: `seq` then `ts_ms` then `event`. The
+        // serde-derived shape and `parse_entry_line` agree today only because
+        // the struct fields are declared in this order — a reorder would
+        // silently rewrite every journal file.
+        assert!(
+            raw.starts_with("{\"seq\":0,\"ts_ms\":"),
+            "unexpected on-disk key order: {raw}"
+        );
     }
 
     #[tokio::test]
@@ -407,13 +438,16 @@ mod tests {
         }
         // Resume must read the tail, see seqs 0..2, and assign seq 3 next.
         let j2 = Journal::resume(&dir.0, session, 10).await.unwrap();
-        let seq = j2
+        let entry = j2
             .append(TurnEvent::AssistantText {
                 text: "after-resume".into(),
             })
             .await
             .unwrap();
-        assert_eq!(seq, 3, "next_seq must continue from the last on-disk entry");
+        assert_eq!(
+            entry.seq, 3,
+            "next_seq must continue from the last on-disk entry"
+        );
         let all = j2.replay_from(0).await.unwrap();
         assert_eq!(all.len(), 4);
         assert_eq!(all[3].seq, 3);
@@ -438,13 +472,13 @@ mod tests {
         // Valid → garbage → valid. parse_entry_line must error on line 2.
         writeln!(
             f,
-            "{{\"seq\":0,\"event\":{{\"type\":\"assistant_text\",\"text\":\"a\"}}}}"
+            "{{\"seq\":0,\"ts_ms\":1,\"event\":{{\"type\":\"assistant_text\",\"text\":\"a\"}}}}"
         )
         .unwrap();
         writeln!(f, "this is not json at all").unwrap();
         writeln!(
             f,
-            "{{\"seq\":2,\"event\":{{\"type\":\"assistant_text\",\"text\":\"c\"}}}}"
+            "{{\"seq\":2,\"ts_ms\":3,\"event\":{{\"type\":\"assistant_text\",\"text\":\"c\"}}}}"
         )
         .unwrap();
         drop(f);
