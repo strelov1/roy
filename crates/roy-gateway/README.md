@@ -53,7 +53,7 @@ roy serve
 
 # 2. start the gateway
 RUST_LOG=roy_gateway=info,info \
-  cargo run -p roy-gateway -- --config ~/.config/roy-gateway/telegram.toml
+  roy gateway --config ~/.config/roy-gateway/telegram.toml
 ```
 
 ## Manual smoke checklist (v1.1)

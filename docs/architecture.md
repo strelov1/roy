@@ -32,7 +32,7 @@ semantics live in [persistence.md](./persistence.md).
  roy attach
  roy list / list-archived
  roy resume / close
- roy-gateway WS relay ◄── WS client (browser/IDE)
+ roy gateway WS relay ◄── WS client (browser/IDE)
  (127.0.0.1:8787, token-auth)
 ```
 
