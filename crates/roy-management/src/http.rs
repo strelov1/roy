@@ -116,3 +116,84 @@ fn validate_preset(preset: &str) -> Result<(), ApiError> {
         .map(|_| ())
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = roy_agents::open(&dir.path().join("agents.db")).await.unwrap();
+        // Keep the temp dir alive for the test process lifetime — dropping it
+        // would invalidate the SQLite file referenced by the pool.
+        std::mem::forget(dir);
+        AppState {
+            store: roy_agents::Store::new(pool),
+            socket_path: "/nonexistent.sock".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_then_get_roundtrips() {
+        let app = router(test_state().await);
+        let body = serde_json::to_vec(&json!({
+            "name": "Reviewer", "preset": "claude", "prompt": "Be terse."
+        }))
+        .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let created: Agent = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(created.slug, "reviewer");
+
+        let resp = app
+            .oneshot(
+                Request::get(format!("/agents/{}", created.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_missing_is_404() {
+        let app = router(test_state().await);
+        let resp = app
+            .oneshot(Request::get("/agents/nope").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_with_bad_preset_is_400() {
+        let app = router(test_state().await);
+        let body =
+            serde_json::to_vec(&json!({ "name": "X", "preset": "klaude", "prompt": "" })).unwrap();
+        let resp = app
+            .oneshot(
+                Request::post("/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
