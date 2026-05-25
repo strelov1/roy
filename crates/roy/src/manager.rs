@@ -109,6 +109,7 @@ impl SessionManager {
             resume_cursor: meta.resume_cursor,
             fixed_session_id: Some(session_id.to_string()),
             tags: meta.tags,
+            system_prompt: None,
         };
         let transport =
             self.factory
@@ -387,6 +388,7 @@ mod tests {
             resume_cursor: None,
             fixed_session_id: None,
             tags: std::collections::BTreeMap::default(),
+            system_prompt: None,
         }
     }
 

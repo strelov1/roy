@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
                 resume_cursor: None,
                 fixed_session_id: None,
                 tags: std::collections::BTreeMap::new(),
+                system_prompt: None,
             },
             256,
             1024,

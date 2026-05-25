@@ -5,7 +5,7 @@ use tokio_stream::StreamExt;
 async fn main() -> anyhow::Result<()> {
     let transport = AcpTransport::new(AcpConfig::opencode());
     let mut handle = transport
-        .open("demo", None, std::env::current_dir()?)
+        .open("demo", None, std::env::current_dir()?, None)
         .await?;
 
     for prompt in ["reply with exactly: hello", "now reply with exactly: world"] {
