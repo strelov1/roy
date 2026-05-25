@@ -127,6 +127,10 @@ struct AgentAddArgs {
     /// Persistent agent — every fire resumes the same session id.
     #[arg(long)]
     persistent: bool,
+    /// Roy session id to notify. When set, the agent's fired prompt gets a
+    /// `roy inject <id> ...` instruction so it can self-report findings.
+    #[arg(long)]
+    notify_session: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -395,6 +399,7 @@ async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<()> {
                     task: a.task,
                     model: a.model,
                     persistent: a.persistent,
+                    notify_session: a.notify_session,
                 },
             )
             .await?;

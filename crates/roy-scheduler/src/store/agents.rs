@@ -15,6 +15,7 @@ pub struct NewAgent {
     pub task: String,
     pub model: Option<String>,
     pub persistent: bool,
+    pub notify_session: Option<String>,
 }
 
 pub async fn insert(pool: &SqlitePool, new: NewAgent) -> Result<Agent> {
@@ -23,8 +24,8 @@ pub async fn insert(pool: &SqlitePool, new: NewAgent) -> Result<Agent> {
     let persistent_int: i64 = if new.persistent { 1 } else { 0 };
 
     sqlx::query(
-        "INSERT INTO agents (id, name, preset, project_id, task, model, persistent, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agents (id, name, preset, project_id, task, model, persistent, notify_session, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&new.name)
@@ -33,6 +34,7 @@ pub async fn insert(pool: &SqlitePool, new: NewAgent) -> Result<Agent> {
     .bind(&new.task)
     .bind(&new.model)
     .bind(persistent_int)
+    .bind(&new.notify_session)
     .bind(now)
     .bind(now)
     .execute(pool)
@@ -101,6 +103,7 @@ mod tests {
             task: "summarize today".into(),
             model: None,
             persistent: false,
+            notify_session: None,
         }
     }
 
@@ -140,6 +143,16 @@ mod tests {
         assert!(get_by_id(&pool, &a.id).await.unwrap().is_none());
         // second delete returns false (no row).
         assert!(!delete(&pool, &a.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn notify_session_round_trips() {
+        let (_d, pool) = fresh_pool().await;
+        let mut n = sample();
+        n.notify_session = Some("main-sid".into());
+        let a = insert(&pool, n).await.unwrap();
+        let back = get_by_id(&pool, &a.id).await.unwrap().unwrap();
+        assert_eq!(back.notify_session.as_deref(), Some("main-sid"));
     }
 
     #[tokio::test]
