@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use roy::{
     daemon::{Daemon, DefaultTransportFactory},
     project::Project,
@@ -83,6 +83,11 @@ enum Cmd {
     Engines {
         #[command(subcommand)]
         cmd: EnginesCmd,
+    },
+    /// Manage agent personas via roy-management (CRUD + run).
+    Agents {
+        #[command(subcommand)]
+        cmd: AgentsCmd,
     },
 }
 
@@ -209,6 +214,26 @@ struct McpArgs {
     socket: Option<PathBuf>,
 }
 
+#[derive(Subcommand, Debug)]
+enum AgentsCmd {
+    /// List all agent personas.
+    List(MgmtBaseArgs),
+    /// Show one agent persona (by id or slug).
+    Get {
+        #[command(flatten)]
+        base: MgmtBaseArgs,
+        /// Agent id or slug.
+        id: String,
+    },
+}
+
+#[derive(Args, Debug)]
+struct MgmtBaseArgs {
+    /// roy-management base URL. Overrides $ROY_MANAGEMENT_URL.
+    #[arg(long, env = "ROY_MANAGEMENT_URL", default_value = "http://127.0.0.1:8079")]
+    mgmt_url: String,
+}
+
 #[derive(Subcommand)]
 enum EnginesCmd {
     /// List configured engines (and optionally their models).
@@ -287,6 +312,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Management(args) => roy_management::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Projects { cmd } => cmd_projects(cmd).await.map(|()| ExitCode::SUCCESS),
         Cmd::Engines { cmd } => cmd_engines(cmd).await,
+        Cmd::Agents { cmd } => cmd_agents(cmd).await,
     }
 }
 
@@ -848,6 +874,28 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
         }
         other => anyhow::bail!("unexpected response to Fire: {other:?}"),
     }
+}
+
+async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<ExitCode> {
+    match cmd {
+        AgentsCmd::List(a) => cmd_agents_list(a).await,
+        AgentsCmd::Get { base, id } => cmd_agents_get(base, id).await,
+    }
+}
+
+async fn cmd_agents_list(args: MgmtBaseArgs) -> anyhow::Result<ExitCode> {
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let all = c.list().await?;
+    println!("{}", serde_json::to_string_pretty(&all)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_agents_get(args: MgmtBaseArgs, id: String) -> anyhow::Result<ExitCode> {
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let resolved = c.resolve(&id).await?;
+    let agent = c.get(&resolved).await?;
+    println!("{}", serde_json::to_string_pretty(&agent)?);
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn cmd_engines(cmd: EnginesCmd) -> anyhow::Result<ExitCode> {
