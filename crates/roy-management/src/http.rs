@@ -322,9 +322,12 @@ async fn create_session(
 }
 
 async fn list_sessions(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    use std::collections::{HashMap, HashSet};
+
     let (live, archived) = tokio::join!(s.daemon.list(), s.daemon.list_archived());
     let live = live.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let archived = archived.unwrap_or_default();
+    let live_set: HashSet<&String> = live.iter().collect();
     let mut sids: Vec<String> = live
         .iter()
         .cloned()
@@ -338,7 +341,7 @@ async fn list_sessions(State(s): State<AppState>) -> Result<Json<serde_json::Val
         .list_session_metas(&sids)
         .await
         .map_err(meta_to_api)?;
-    let meta_by_sid: std::collections::HashMap<String, _> = metas
+    let meta_by_sid: HashMap<String, _> = metas
         .into_iter()
         .map(|m| (m.session_id.clone(), m))
         .collect();
@@ -352,7 +355,7 @@ async fn list_sessions(State(s): State<AppState>) -> Result<Json<serde_json::Val
                 "project_id": m.and_then(|m| m.project_id.clone()),
                 "agent_name": m.and_then(|m| m.agent_name.clone()),
                 "tags": m.map(|m| m.tags.clone()).unwrap_or_default(),
-                "live": live.contains(&sid),
+                "live": live_set.contains(&sid),
             })
         })
         .collect();

@@ -301,6 +301,18 @@ impl MetaStore {
         tags: &BTreeMap<String, String>,
     ) -> Result<(), MetaError> {
         let mut tx = self.pool.begin().await?;
+        // Guard against orphan tag rows: session_tags has no FK to
+        // session_meta in SQLite, so we enforce the parent-must-exist
+        // invariant here. `upsert_session_meta` short-circuits this path
+        // because it writes the meta row in the same tx.
+        let exists: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM session_meta WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if exists.0 == 0 {
+            return Err(MetaError::NotFound(session_id.into()));
+        }
         sqlx::query("DELETE FROM session_tags WHERE session_id = ?")
             .bind(session_id)
             .execute(&mut *tx)
@@ -538,6 +550,24 @@ mod tests {
         assert_eq!(retrieved.tags.len(), 2);
         assert_eq!(retrieved.tags.get("x"), Some(&"y".into()));
         assert_eq!(retrieved.tags.get("p"), Some(&"q".into()));
+    }
+
+    #[tokio::test]
+    async fn replace_tags_on_unknown_session_is_not_found() {
+        let store = fresh_store().await;
+        let mut tags = BTreeMap::new();
+        tags.insert("k".into(), "v".into());
+        let err = store
+            .replace_tags("never-existed", &tags)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MetaError::NotFound(_)));
+        // And no orphan tag rows landed in the table.
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM session_tags")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0);
     }
 
     #[tokio::test]

@@ -24,10 +24,16 @@ pub fn spawn(meta: MetaStore, daemon: Arc<dyn DaemonClient>) {
 }
 
 async fn run_once(meta: &MetaStore, daemon: &dyn DaemonClient) -> anyhow::Result<()> {
+    // Snapshot meta FIRST, then live + archived. `POST /sessions` writes the
+    // meta row strictly *after* the daemon spawn completes; reading meta
+    // first means a concurrent spawn either misses this iteration (no row
+    // to delete) or appears in the subsequent `daemon.list()` snapshot,
+    // never the broken middle state where the row exists in meta but the
+    // daemon doesn't yet know the session.
+    let all_metas = meta.list_all_session_metas().await?;
     let live = daemon.list().await?;
     let archived = daemon.list_archived().await?;
     let known: std::collections::HashSet<String> = live.into_iter().chain(archived).collect();
-    let all_metas = meta.list_all_session_metas().await?;
     for m in all_metas {
         if !known.contains(&m.session_id) {
             tracing::info!(session = %m.session_id, "sweeping orphan management row");
