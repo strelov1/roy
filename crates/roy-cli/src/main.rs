@@ -17,6 +17,8 @@ use roy::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+mod management_client;
+
 #[derive(Parser)]
 #[command(
     name = "roy",
