@@ -77,8 +77,8 @@ Spawned once per session by `SessionManager::spawn`. Owns:
 - a `tokio::sync::broadcast::Sender<JournalEntry>` for live observers,
 - a single `InputLease` slot (RAII; only one writer at a time),
 - `last_activity` for idle-GC,
-- the metadata fields used to persist `SessionMetadata` after every
-  cursor change.
+- references to `SessionStore` (SQLite boot-kit persistence: agent, cwd,
+  model, permission, resume_cursor, system_prompt, created_at, closed_at).
 
 The engine's actor task reads `Cmd::Prompt` / `Cmd::Close` from an mpsc
 channel. On `Prompt`:
@@ -87,7 +87,7 @@ channel. On `Prompt`:
 3. For each `TurnEvent`: `Journal::append` → `JournalEntry` →
    `broadcast::send`. (No receivers is not an error.)
 4. If the handle reports a new `resume_cursor`, persist it back to
-   `SessionMetadata` so a daemon restart can resume the session.
+   `SessionStore::update_cursor` so a daemon restart can resume the session.
 
 `SessionEngine::attach(from_seq)` is the heart of the multi-observer
 contract. It is **race-free**:
@@ -106,17 +106,19 @@ broadcast subscription) used by poll-style clients.
 ### `SessionManager` — the registry
 
 In-process `HashMap<session_id, Arc<SessionEngine>>` plus on-disk
-inspection helpers. Owns a `TransportFactory` so it can resurrect a
-session from on-disk metadata without the trigger having to remember
-which agent it was.
+inspection helpers. Owns a `TransportFactory` and a reference to
+`SessionStore` (SQLite at `~/.local/state/roy/sessions.db`) so it can
+resurrect a session from the boot-kit columns without the trigger having
+to remember which agent it was.
 
 Front-door methods:
 
 - `spawn(SessionSpawnConfig, capacity_opts)` — fresh session: build the
-  transport via the factory, write initial metadata, register the engine.
-- `resume(session_id, capacity_opts)` — read metadata, rebuild the
-  transport via the factory, call `SessionEngine::resume` (same id, same
-  journal), register.
+  transport via the factory, insert boot-kit row into SessionStore, register
+  the engine.
+- `resume(session_id, capacity_opts)` — read boot-kit from SessionStore,
+  rebuild the transport via the factory, call `SessionEngine::resume`
+  (same id, same journal), register.
 - `attach`-friendly inspection: `list` (live), `list_archived` (closed),
   `get` (live engine handle), `open_archive` (read-only journal view),
   `read_journal` (unified live-or-archive read).

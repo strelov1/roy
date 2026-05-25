@@ -5,6 +5,21 @@ OpenCode, Codex) as long-lived sessions, persist every turn as JSONL, attach
 multiple observers, and drive everything from a CLI, WebSocket, or MCP-aware
 LLM — all through one daemon, one journal, one control protocol.
 
+## Breaking changes (split-store refactor)
+
+Session metadata moved from per-session `.meta.json` files to two SQLite databases:
+- **Core sessions**: `~/.local/state/roy/sessions.db` (boot-kit per session: agent, cwd, model, permission, resume_cursor, system_prompt, created_at, closed_at).
+- **Management projects/tags/meta**: `~/.local/state/roy/agents.db` (joins existing `agents` table; adds `projects`, `session_meta`, `session_tags`).
+
+After upgrading, clear obsolete files once:
+
+```bash
+rm -rf ~/.roy/journals/*.meta.json
+rm -f  ~/.roy/projects.json
+```
+
+Wire-protocol break: `SetTags`/`ListProjects`/`CreateProject`/`DeleteProject` commands removed from the Unix-socket protocol. `roy projects`, `roy set-tags`, `roy run --project|--tag|--agent-name` now route through the management HTTP API (`roy management` subcommand; default `127.0.0.1:8079`). Bare `roy run --cwd` keeps the Unix-socket path.
+
 ## What this is
 
 roy started as a Rust library that wraps coding-agent CLIs as a single
