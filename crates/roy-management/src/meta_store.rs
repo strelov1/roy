@@ -266,7 +266,7 @@ impl MetaStore {
             .collect())
     }
 
-    pub async fn set_tags(
+    pub async fn replace_tags(
         &self,
         session_id: &str,
         tags: &BTreeMap<String, String>,
@@ -476,13 +476,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_tags_replaces_atomically() {
+    async fn replace_tags_replaces_atomically() {
         let store = fresh_store().await;
         let meta = meta_with("sess3", &[("a", "1")]);
         store.upsert_session_meta(&meta).await.unwrap();
 
         // Replace with empty tags
-        store.set_tags("sess3", &BTreeMap::new()).await.unwrap();
+        store.replace_tags("sess3", &BTreeMap::new()).await.unwrap();
         let retrieved = store
             .get_session_meta("sess3")
             .await
@@ -494,7 +494,7 @@ mod tests {
         let mut new_tags = BTreeMap::new();
         new_tags.insert("x".into(), "y".into());
         new_tags.insert("p".into(), "q".into());
-        store.set_tags("sess3", &new_tags).await.unwrap();
+        store.replace_tags("sess3", &new_tags).await.unwrap();
         let retrieved = store
             .get_session_meta("sess3")
             .await

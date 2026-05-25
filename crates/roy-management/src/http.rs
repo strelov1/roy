@@ -54,7 +54,8 @@ pub fn router(state: AppState) -> Router {
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{id}", axum::routing::delete(delete_project))
         .route("/sessions", get(list_sessions).post(create_session))
-        .route("/sessions/{id}", get(get_session))
+        .route("/sessions/{id}", get(get_session).patch(patch_session))
+        .route("/sessions/{id}/tags", axum::routing::put(put_tags))
         .with_state(state)
 }
 
@@ -304,6 +305,55 @@ async fn get_session(
         "meta": meta,
         "live": live.contains(&id),
     })))
+}
+
+#[derive(serde::Deserialize)]
+struct TagsBody {
+    tags: BTreeMap<String, String>,
+}
+
+async fn put_tags(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<TagsBody>,
+) -> Result<StatusCode, ApiError> {
+    s.meta
+        .replace_tags(&id, &body.tags)
+        .await
+        .map_err(meta_to_api)?;
+    Ok(StatusCode::OK)
+}
+
+#[derive(serde::Deserialize)]
+struct PatchSession {
+    #[serde(default)]
+    agent_name: Option<String>,
+    #[serde(default)]
+    display_label: Option<String>,
+}
+
+async fn patch_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchSession>,
+) -> Result<StatusCode, ApiError> {
+    let mut meta = s
+        .meta
+        .get_session_meta(&id)
+        .await
+        .map_err(meta_to_api)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("session: {id}")))?;
+    if body.agent_name.is_some() {
+        meta.agent_name = body.agent_name;
+    }
+    if body.display_label.is_some() {
+        meta.display_label = body.display_label;
+    }
+    s.meta
+        .upsert_session_meta(&meta)
+        .await
+        .map_err(meta_to_api)?;
+    Ok(StatusCode::OK)
 }
 
 fn meta_to_api(e: crate::meta_store::MetaError) -> ApiError {
@@ -566,5 +616,39 @@ mod tests {
 
         // Mock recorded the compensating Close
         assert_eq!(mock.recorded_closes.lock().unwrap().as_slice(), &["sid-X"]);
+    }
+
+    #[tokio::test]
+    async fn put_tags_replaces() {
+        let st = test_state().await;
+        st.meta
+            .upsert_session_meta(&crate::meta_store::SessionMeta {
+                session_id: "sid".into(),
+                project_id: None,
+                agent_id: None,
+                agent_name: None,
+                display_label: None,
+                tags: BTreeMap::from([("old".into(), "1".into())]),
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        let app = router(st.clone());
+
+        let body = serde_json::to_vec(&json!({"tags": {"new": "2"}})).unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri("/sessions/sid/tags")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let back = st.meta.get_session_meta("sid").await.unwrap().unwrap();
+        assert_eq!(back.tags, BTreeMap::from([("new".into(), "2".into())]));
     }
 }
