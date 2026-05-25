@@ -15,6 +15,7 @@ fn fake_config(extra: &[&str]) -> AcpConfig {
         permission_policy: PermissionPolicy::AllowAll,
         open_timeout: Duration::from_secs(5),
         env_remove: Vec::new(),
+        system_prompt_channel: roy::transport::SystemPromptChannel::Meta,
     }
 }
 
@@ -98,6 +99,7 @@ async fn open_without_mode_skips_set_mode() {
         permission_policy: PermissionPolicy::Deny,
         open_timeout: Duration::from_secs(5),
         env_remove: Vec::new(),
+        system_prompt_channel: roy::transport::SystemPromptChannel::Meta,
     };
     let transport = AcpTransport::new(config);
     let mut handle = transport

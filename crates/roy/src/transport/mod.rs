@@ -10,7 +10,7 @@ use crate::event::TurnEvent;
 
 pub mod acp;
 
-pub use acp::{AcpConfig, AcpTransport, PermissionPolicy};
+pub use acp::{AcpConfig, AcpTransport, PermissionPolicy, SystemPromptChannel};
 
 pub type TurnStream = Pin<Box<dyn Stream<Item = TurnEvent> + Send + 'static>>;
 

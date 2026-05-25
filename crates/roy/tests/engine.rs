@@ -21,6 +21,7 @@ fn fake_acp_transport_with(extra_args: &[&str]) -> Arc<dyn Transport> {
         permission_policy: PermissionPolicy::AllowAll,
         open_timeout: Duration::from_secs(5),
         env_remove: Vec::new(),
+        system_prompt_channel: roy::transport::SystemPromptChannel::Meta,
     }))
 }
 

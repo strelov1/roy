@@ -52,6 +52,17 @@ pub enum PermissionPolicy {
     AllowAll,
 }
 
+/// How a preset accepts a system/persona prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemPromptChannel {
+    /// Sent via ACP `_meta.systemPrompt = { append }` on `session/new` and
+    /// `session/load`. A real system prompt, outside history, survives resume.
+    Meta,
+    /// The preset ignores `_meta`; the engine injects the persona as the first
+    /// journaled turn instead.
+    FirstTurn,
+}
+
 /// Launch + behaviour config for an ACP agent.
 pub struct AcpConfig {
     pub command: String,
@@ -66,6 +77,8 @@ pub struct AcpConfig {
     /// own env is inherited otherwise). Per-preset because the problematic
     /// variables are agent-specific — e.g. `CLAUDECODE` for `claude-code-acp`.
     pub env_remove: Vec<String>,
+    /// Which channel carries the persona prompt for this preset.
+    pub system_prompt_channel: SystemPromptChannel,
 }
 
 impl AcpConfig {
@@ -78,6 +91,7 @@ impl AcpConfig {
             permission_policy: PermissionPolicy::AllowAll,
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
+            system_prompt_channel: SystemPromptChannel::FirstTurn,
         }
     }
 
@@ -91,6 +105,7 @@ impl AcpConfig {
             permission_policy: PermissionPolicy::Deny,
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
+            system_prompt_channel: SystemPromptChannel::Meta,
         }
     }
 
@@ -103,6 +118,7 @@ impl AcpConfig {
             permission_policy: PermissionPolicy::AllowAll,
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
+            system_prompt_channel: SystemPromptChannel::FirstTurn,
         }
     }
 
@@ -118,6 +134,7 @@ impl AcpConfig {
             permission_policy: PermissionPolicy::AllowAll,
             open_timeout: Duration::from_secs(30),
             env_remove: vec!["CLAUDECODE".to_string()],
+            system_prompt_channel: SystemPromptChannel::Meta,
         }
     }
 }
@@ -670,5 +687,14 @@ mod tests {
         assert!(AcpConfig::gemini().env_remove.is_empty());
         assert!(AcpConfig::opencode().env_remove.is_empty());
         assert!(AcpConfig::codex().env_remove.is_empty());
+    }
+
+    #[test]
+    fn presets_declare_system_prompt_channel() {
+        use super::SystemPromptChannel::*;
+        assert_eq!(AcpConfig::claude().system_prompt_channel, Meta);
+        assert_eq!(AcpConfig::opencode().system_prompt_channel, Meta);
+        assert_eq!(AcpConfig::gemini().system_prompt_channel, FirstTurn);
+        assert_eq!(AcpConfig::codex().system_prompt_channel, FirstTurn);
     }
 }
