@@ -5,7 +5,7 @@ roy has **one** JSON wire format. The same shapes appear on:
 - CLI stdout (`roy run`, `roy attach`, etc.),
 - the per-session JSONL journal (`<journal_dir>/<session_id>.jsonl`),
 - frames sent across the Unix-socket trigger,
-- text frames on the WebSocket trigger,
+- text frames on the WebSocket trigger (provided by `roy-gateway`'s WS relay),
 - result payloads inside MCP tool responses.
 
 This document is the reference. The Rust types live in
@@ -86,8 +86,9 @@ Resumed sessions continue past the last persisted seq.
 
 ## Control protocol — ClientCommand / ServerEvent
 
-The payload of every command/event on the Unix-socket and WebSocket
-triggers (and, indirectly, of every MCP tool result body).
+The payload of every command/event on the Unix-socket trigger (and,
+indirectly, on the WebSocket relay in `roy-gateway` and in every MCP
+tool result body). The JSON shapes are identical across all transports.
 
 ### ClientCommand (client → server)
 
@@ -223,12 +224,17 @@ client can read a newer server's error without losing information.
 
 ## Framing
 
-| transport     | framing                                                              |
-|---------------|----------------------------------------------------------------------|
-| Unix socket   | one JSON object per line, `\n`-delimited                             |
-| WebSocket     | one JSON object per `tungstenite::Message::Text` frame               |
-| Journal file  | one JSON object per line, `\n`-delimited (same as Unix socket)        |
-| CLI stdout    | one JSON object per line, `\n`-delimited                              |
+| transport     | framing                                                                       |
+|---------------|-------------------------------------------------------------------------------|
+| Unix socket   | one JSON object per line, `\n`-delimited                                      |
+| WebSocket     | one JSON object per `tungstenite::Message::Text` frame (via `roy-gateway` relay) |
+| Journal file  | one JSON object per line, `\n`-delimited (same as Unix socket)                 |
+| CLI stdout    | one JSON object per line, `\n`-delimited                                       |
+
+The daemon speaks only the `\n`-delimited Unix framing. The `Message::Text`
+framing for WebSocket clients is provided by the WS relay in `roy-gateway`
+(`crates/roy-gateway/src/ws.rs`), which bridges each WS connection to a
+dedicated Unix-socket connection to the daemon.
 
 ## Versioning
 
