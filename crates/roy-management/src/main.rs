@@ -1,13 +1,8 @@
-mod http;
-mod roy_client;
-mod state;
-
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
-
-use crate::state::AppState;
+use roy_management::{http, state::AppState};
 
 #[derive(Parser, Debug)]
 #[command(name = "roy-management", about = "Agent store + HTTP API for roy")]
