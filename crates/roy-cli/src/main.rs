@@ -367,6 +367,18 @@ async fn connect() -> anyhow::Result<UnixStream> {
     })
 }
 
+/// Open a daemon connection and split it into a writer + a line-framed reader,
+/// ready for one command/response cycle. Mirrors the same helper in `roy-mcp`.
+async fn open_daemon() -> anyhow::Result<(
+    tokio::net::unix::OwnedWriteHalf,
+    tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+)> {
+    let stream = connect().await?;
+    let (reader, writer) = stream.into_split();
+    let events = BufReader::new(reader).lines();
+    Ok((writer, events))
+}
+
 /// Print a one-line JSON health report and return the matching exit code.
 /// `status` is `"up"` when the socket accepts a connection, `"down"` otherwise.
 /// `pid` is the value in `<socket>.pid` if present — useful for diagnostics
@@ -409,9 +421,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         (None, inline) => inline,
     };
 
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     // Spawn the session.
     send_cmd(
@@ -533,9 +543,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
 }
 
 async fn cmd_attach(args: AttachArgs) -> anyhow::Result<ExitCode> {
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     send_cmd(
         &mut writer,
@@ -557,9 +565,7 @@ async fn cmd_attach(args: AttachArgs) -> anyhow::Result<ExitCode> {
 }
 
 async fn cmd_list(archived: bool) -> anyhow::Result<()> {
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     let cmd = if archived {
         ClientCommand::ListArchived
@@ -579,9 +585,7 @@ async fn cmd_list(archived: bool) -> anyhow::Result<()> {
 }
 
 async fn cmd_resume(args: ResumeArgs) -> anyhow::Result<()> {
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     send_cmd(
         &mut writer,
@@ -617,9 +621,7 @@ async fn cmd_resume(args: ResumeArgs) -> anyhow::Result<()> {
 }
 
 async fn cmd_close(args: CloseArgs) -> anyhow::Result<()> {
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     send_cmd(
         &mut writer,
@@ -638,9 +640,7 @@ async fn cmd_close(args: CloseArgs) -> anyhow::Result<()> {
 }
 
 async fn cmd_inject(args: InjectArgs) -> anyhow::Result<ExitCode> {
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     send_cmd(
         &mut writer,
@@ -670,9 +670,7 @@ async fn cmd_inject(args: InjectArgs) -> anyhow::Result<ExitCode> {
 }
 
 async fn cmd_set_tags(args: SetTagsArgs) -> anyhow::Result<()> {
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     let tags: BTreeMap<String, String> = args.tags.into_iter().collect();
 
@@ -706,9 +704,7 @@ async fn cmd_set_tags(args: SetTagsArgs) -> anyhow::Result<()> {
 }
 
 async fn cmd_wait(args: WaitArgs) -> anyhow::Result<ExitCode> {
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     send_cmd(
         &mut writer,
@@ -780,9 +776,7 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
 
     let tags: BTreeMap<String, String> = args.tags.into_iter().collect();
 
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     send_cmd(
         &mut writer,
@@ -861,9 +855,7 @@ async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<ExitCode> {
 }
 
 async fn cmd_agents_list(args: AgentsListArgs) -> anyhow::Result<ExitCode> {
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     send_cmd(&mut writer, &ClientCommand::ListAgents).await?;
     let ev = read_event(&mut events).await?;
@@ -927,9 +919,7 @@ async fn cmd_agents_list(args: AgentsListArgs) -> anyhow::Result<ExitCode> {
 }
 
 async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<()> {
-    let stream = connect().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut events = BufReader::new(reader).lines();
+    let (mut writer, mut events) = open_daemon().await?;
 
     match cmd {
         ProjectsCmd::List => {
