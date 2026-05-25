@@ -245,12 +245,15 @@ impl SessionEngine {
     /// Append a `Note` event to the journal + broadcast. Unlike a prompt this
     /// takes no input lease and never touches the transport, so it lands even
     /// while an interactive client holds the lease. Returns the appended seq.
-    pub async fn inject_note(
-        &self,
-        text: String,
-        source_session: Option<String>,
-    ) -> Result<Seq> {
-        let entry = publish(self, TurnEvent::Note { text, source_session }).await?;
+    pub async fn inject_note(&self, text: String, source_session: Option<String>) -> Result<Seq> {
+        let entry = publish(
+            self,
+            TurnEvent::Note {
+                text,
+                source_session,
+            },
+        )
+        .await?;
         Ok(entry.seq)
     }
 

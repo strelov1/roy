@@ -73,7 +73,8 @@ impl Renderer {
                     Some(sid) => format!("📎 <i>background ({})</i>", escape(sid)),
                     None => "📎 <i>background</i>".to_string(),
                 };
-                self.finalized.push(format!("{}\n{}", header, escape(&text)));
+                self.finalized
+                    .push(format!("{}\n{}", header, escape(&text)));
             }
             TurnEvent::Raw(value) => {
                 self.finalize_active();

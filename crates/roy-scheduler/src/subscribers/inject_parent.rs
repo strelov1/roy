@@ -55,9 +55,7 @@ pub async fn execute(
 
     match outcome {
         Ok(InjectOutcome::Noted { .. }) | Ok(InjectOutcome::Done(_)) => super::Outcome::ok(),
-        Ok(InjectOutcome::Timeout { .. }) => {
-            super::Outcome::error("parent stayed busy past 5min")
-        }
+        Ok(InjectOutcome::Timeout { .. }) => super::Outcome::error("parent stayed busy past 5min"),
         Ok(InjectOutcome::Error { code, message, .. }) => {
             super::Outcome::error(format!("{code}: {message}"))
         }
