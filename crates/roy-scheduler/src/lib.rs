@@ -7,6 +7,7 @@
 //! `StopReason`). Never reaches into Daemon, SessionManager, Engine,
 //! Journal, Transport.
 
+pub mod cli;
 pub mod db;
 pub mod driver;
 pub mod plan;
