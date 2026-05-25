@@ -647,8 +647,7 @@ async fn drive_turn(
 }
 
 async fn publish(engine: &SessionEngine, event: TurnEvent) -> Result<JournalEntry> {
-    let seq = engine.journal.append(event.clone()).await?;
-    let entry = JournalEntry { seq, event };
+    let entry = engine.journal.append(event).await?;
     engine.touch_activity();
     // No receivers is not an error.
     let _ = engine.broadcast_tx.send(entry.clone());

@@ -2,9 +2,10 @@
 //! the shared `agents.db` SqlitePool. Migrations live in
 //! `crates/roy-management/migrations/sqlite/` and share the database's
 //! `_sqlx_migrations` table with `roy-agents`. Versions are coordinated
-//! across crates: `roy-agents` owns v1, `roy-management` owns v2. Each
-//! crate's `Migrator` runs with `set_ignore_missing(true)` so it tolerates
-//! rows owned by the other crate. Apply with
+//! across crates: `roy-agents` currently owns v1-v3; `roy-management` starts
+//! at v4 (`migrations/sqlite/0004_*`). Each crate's `Migrator` runs with
+//! `set_ignore_missing(true)` so it tolerates rows owned by the other
+//! crate. Apply with
 //! `MetaStore::apply_migrations(pool)` after `roy_agents::open` has applied
 //! its own migrations.
 
@@ -430,7 +431,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![(1,), (2,)]);
+        assert_eq!(versions, vec![(1,), (2,), (3,), (4,)]);
     }
 
     fn meta_with(session_id: &str, tags: &[(&str, &str)]) -> SessionMeta {

@@ -45,6 +45,7 @@ impl From<StoreError> for ApiError {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/agents", get(list_agents).post(create_agent))
+        .route("/agents/_builder", post(start_builder))
         .route(
             "/agents/{id}",
             get(get_agent).put(update_agent).delete(delete_agent),
@@ -119,6 +120,73 @@ async fn run_agent(
     .await
     .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(json!({ "session": session, "agent_id": agent.id })))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct BuilderReq {
+    #[serde(default)]
+    existing_id: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct BuilderResp {
+    agent_id: String,
+    session: String,
+}
+
+async fn start_builder(
+    State(s): State<AppState>,
+    body: Option<Json<BuilderReq>>,
+) -> Result<(StatusCode, Json<BuilderResp>), ApiError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+
+    let target = if let Some(id) = req.existing_id {
+        s.store.get(&id).await?
+    } else {
+        s.store
+            .create(NewAgent {
+                name: "Untitled".into(),
+                description: None,
+                preset: "claude".into(),
+                model: None,
+                prompt: String::new(),
+                task: None,
+                persistent: false,
+            })
+            .await?
+    };
+
+    let builder = s.store.get_by_slug("builder").await.map_err(|e| match e {
+        StoreError::NotFound(_) => ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "builder seed missing — migration did not run".into(),
+        ),
+        other => other.into(),
+    })?;
+
+    let system_prompt = format!(
+        "{base}\n\n## Current task\nYou are editing agent id={id}. \
+         Use only `roy agents update {id} ...` to apply changes. Never call create or delete.",
+        base = builder.prompt,
+        id = target.id,
+    );
+
+    let session = roy_client::spawn(
+        &s.socket_path,
+        &builder.preset,
+        builder.model.clone(),
+        Some(system_prompt),
+    )
+    .await
+    .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(BuilderResp {
+            agent_id: target.id,
+            session,
+        }),
+    ))
 }
 
 /// Preset must be one the daemon spawns. Kept as a const list rather than
@@ -647,5 +715,145 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let back = st.meta.get_session_meta("sid").await.unwrap().unwrap();
         assert_eq!(back.tags, BTreeMap::from([("new".into(), "2".into())]));
+    }
+
+    async fn state_for_builder_test(socket: PathBuf) -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = roy_agents::open(&dir.path().join("agents.db"))
+            .await
+            .unwrap();
+        crate::meta_store::MetaStore::apply_migrations(&pool)
+            .await
+            .unwrap();
+        // Leak the tempdir: pool keeps reading from this file for the test.
+        std::mem::forget(dir);
+        AppState {
+            store: roy_agents::Store::new(pool.clone()),
+            meta: crate::meta_store::MetaStore::new(pool),
+            daemon: std::sync::Arc::new(crate::roy_client::mock::MockDaemonClient::new()),
+            socket_path: socket,
+        }
+    }
+
+    #[tokio::test]
+    async fn _builder_endpoint_creates_stub_and_returns_session() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("roy.sock");
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        let socket_for_task = socket.clone();
+        let daemon = tokio::spawn(async move {
+            let l = UnixListener::bind(&socket_for_task).unwrap();
+            let (s, _) = l.accept().await.unwrap();
+            let (r, mut w) = s.into_split();
+            let mut lines = BufReader::new(r).lines();
+            let raw = lines.next_line().await.unwrap().unwrap();
+            let _ = tx.send(serde_json::from_str(&raw).unwrap());
+            w.write_all(b"{\"kind\":\"spawning\",\"agent\":\"claude\"}\n")
+                .await
+                .unwrap();
+            w.write_all(b"{\"kind\":\"spawned\",\"session\":\"sess-99\"}\n")
+                .await
+                .unwrap();
+            w.flush().await.unwrap();
+        });
+
+        let state = state_for_builder_test(socket).await;
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::post("/agents/_builder")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let agent_id = json["agent_id"].as_str().unwrap().to_string();
+        assert!(!agent_id.is_empty());
+        assert_eq!(json["session"], "sess-99");
+
+        let stub = state.store.get(&agent_id).await.unwrap();
+        assert_eq!(stub.name, "Untitled");
+
+        let cmd = rx.await.unwrap();
+        assert_eq!(cmd["op"], "spawn");
+        let sp = cmd["system_prompt"].as_str().unwrap();
+        assert!(sp.contains("Agent Builder"), "got: {sp}");
+        assert!(sp.contains(&agent_id), "got: {sp}");
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn _builder_endpoint_with_existing_id_reuses_agent() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("roy.sock");
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        let socket_for_task = socket.clone();
+        let daemon = tokio::spawn(async move {
+            let l = UnixListener::bind(&socket_for_task).unwrap();
+            let (s, _) = l.accept().await.unwrap();
+            let (r, mut w) = s.into_split();
+            let mut lines = BufReader::new(r).lines();
+            let raw = lines.next_line().await.unwrap().unwrap();
+            let _ = tx.send(serde_json::from_str(&raw).unwrap());
+            w.write_all(b"{\"kind\":\"spawning\",\"agent\":\"claude\"}\n")
+                .await
+                .unwrap();
+            w.write_all(b"{\"kind\":\"spawned\",\"session\":\"sess-edit\"}\n")
+                .await
+                .unwrap();
+            w.flush().await.unwrap();
+        });
+
+        let state = state_for_builder_test(socket).await;
+        let existing = state
+            .store
+            .create(roy_agents::NewAgent {
+                name: "Pre-existing".into(),
+                description: None,
+                preset: "claude".into(),
+                model: None,
+                prompt: "already here".into(),
+                task: None,
+                persistent: false,
+            })
+            .await
+            .unwrap();
+
+        let body = serde_json::json!({ "existing_id": existing.id }).to_string();
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::post("/agents/_builder")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["agent_id"], existing.id);
+        assert_eq!(json["session"], "sess-edit");
+
+        let all = state.store.list().await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        let cmd = rx.await.unwrap();
+        let sp = cmd["system_prompt"].as_str().unwrap();
+        assert!(sp.contains(&existing.id), "got: {sp}");
+        daemon.await.unwrap();
     }
 }

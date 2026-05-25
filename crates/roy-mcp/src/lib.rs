@@ -210,8 +210,8 @@ fn tools_list() -> Value {
                 }
             },
             {
-                "name": "roy_list_agents",
-                "description": "List agents configured in ~/.config/roy/agents.toml with their available models. Use to discover what `agent` string and `model` id values are valid for roy_run.",
+                "name": "roy_list_engines",
+                "description": "List engines (preset+model catalog) configured in ~/.config/roy/agents.toml with their available models. Use to discover what `agent` string and `model` id values are valid for roy_run.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
             }
         ]
@@ -232,7 +232,7 @@ async fn tools_call(id: Value, req: &Value, socket_path: &Path) -> Value {
         "roy_close" => tool_close(socket_path, args).await,
         "roy_wait_for_result" => tool_wait_for_result(socket_path, args).await,
         "roy_fire" => tool_fire(socket_path, args).await,
-        "roy_list_agents" => tool_list_agents(socket_path).await,
+        "roy_list_engines" => tool_list_engines(socket_path).await,
         other => Err(anyhow!("unknown tool: {other}")),
     };
 
@@ -811,7 +811,7 @@ async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<St
     }
 }
 
-async fn tool_list_agents(socket_path: &Path) -> anyhow::Result<String> {
+async fn tool_list_engines(socket_path: &Path) -> anyhow::Result<String> {
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
     send_cmd(&mut writer, &ClientCommand::ListAgents).await?;
     match next_event(&mut lines).await? {
@@ -864,7 +864,7 @@ mod tests {
                 "roy_close",
                 "roy_wait_for_result",
                 "roy_fire",
-                "roy_list_agents",
+                "roy_list_engines",
             ]
         );
     }

@@ -38,15 +38,41 @@ pub struct NewAgent {
     pub persistent: bool,
 }
 
-/// Partial update. Every field is optional; `None` leaves the column unchanged.
-/// `name` change does NOT re-slug (the slug is stable once minted).
+/// Partial update. Every field is optional; an absent field leaves the column
+/// unchanged. `name` change does NOT re-slug (the slug is stable once minted).
+///
+/// Nullable columns (`description`, `model`, `task`) use the double-Option
+/// pattern to distinguish three states on the wire:
+///
+/// - field absent in JSON → outer `None` → leave alone
+/// - field present as `null` → `Some(None)` → clear the column to NULL
+/// - field present with value → `Some(Some(x))` → set the column to `x`
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AgentUpdate {
+    #[serde(default)]
     pub name: Option<String>,
-    pub description: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub description: Option<Option<String>>,
+    #[serde(default)]
     pub preset: Option<String>,
-    pub model: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub model: Option<Option<String>>,
+    #[serde(default)]
     pub prompt: Option<String>,
-    pub task: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub task: Option<Option<String>>,
+    #[serde(default)]
     pub persistent: Option<bool>,
+}
+
+/// Forces serde to call the inner `Option::deserialize` even when the JSON
+/// value is `null`, so we can distinguish "field absent" (handled by
+/// `#[serde(default)]` returning the outer `None`) from "field set to null"
+/// (this function returning `Some(None)`).
+fn deserialize_optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }

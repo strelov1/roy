@@ -19,6 +19,7 @@ HTTP service that owns the canonical agent store (via the shared `roy-agents` li
 | `DELETE` | `/agents/{id}`       | —                | 204 / 404 |
 | `GET`    | `/presets`           | —                | Daemon catalog JSON (`AgentsList` event); 502 if the daemon is down |
 | `POST`   | `/agents/{id}/run`   | —                | `{"session": "...", "agent_id": "..."}`; 404 if agent missing, 502 on daemon error |
+| `POST`   | `/agents/_builder`   | `{existing_id?}` | `{"agent_id": "...", "session_id": "..."}` — creates a stub agent (when no body) or reuses `existing_id`; spawns a builder session bound to the target for conversational editing |
 
 ### Agent shape
 

@@ -289,6 +289,7 @@ mod tests {
                         session: "sid".into(),
                         entry: JE {
                             seq: 1,
+                            ts_ms: 0,
                             event: TurnEvent::Result {
                                 cost_usd: None,
                                 stop_reason: StopReason::EndTurn,

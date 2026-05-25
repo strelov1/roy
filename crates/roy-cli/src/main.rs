@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use roy::{
     daemon::{Daemon, DefaultTransportFactory},
     AgentsConfigStatus, ClientCommand, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 mod management;
+mod management_client;
 
 #[derive(Parser)]
 #[command(
@@ -71,7 +72,12 @@ enum Cmd {
     Scheduler(roy_scheduler::cli::Cli),
     /// Run the management HTTP API (agent CRUD + spawn endpoints).
     Management(roy_management::Args),
-    /// Inspect configured agents at `~/.config/roy/agents.toml`.
+    /// Inspect configured engines at `~/.config/roy/agents.toml`.
+    Engines {
+        #[command(subcommand)]
+        cmd: EnginesCmd,
+    },
+    /// Manage agent personas via roy-management (CRUD + run).
     Agents {
         #[command(subcommand)]
         cmd: AgentsCmd,
@@ -227,18 +233,116 @@ struct McpArgs {
     socket: Option<PathBuf>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum AgentsCmd {
-    /// List configured agents (and optionally their models).
-    List(AgentsListArgs),
+    /// List all agent personas.
+    List(MgmtBaseArgs),
+    /// Show one agent persona (by id or slug).
+    Get {
+        #[command(flatten)]
+        base: MgmtBaseArgs,
+        /// Agent id or slug.
+        id: String,
+    },
+    /// Create a new agent persona.
+    Create {
+        #[command(flatten)]
+        base: MgmtBaseArgs,
+        #[arg(long)]
+        name: String,
+        #[arg(long, value_parser = ["claude", "gemini", "opencode", "codex"])]
+        preset: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// Path to a file containing the system prompt body.
+        #[arg(long)]
+        prompt_file: std::path::PathBuf,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        persistent: bool,
+    },
+    /// Update fields of an existing agent. Only fields you pass are changed.
+    ///
+    /// Nullable columns (`description`, `model`) accept either a value
+    /// (`--description "…"`) or an explicit clear (`--clear-description`).
+    /// The two are mutually exclusive per field; omit both to leave the
+    /// column alone.
+    Update(AgentsUpdateArgs),
+    /// Delete an agent persona. Requires --yes (deletion is permanent).
+    Delete {
+        #[command(flatten)]
+        base: MgmtBaseArgs,
+        /// Agent id or slug.
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Spawn a session for this agent. Prints {"session":"<uuid>","agent_id":"<id>"} JSON.
+    Run {
+        #[command(flatten)]
+        base: MgmtBaseArgs,
+        /// Agent id or slug.
+        id: String,
+    },
+}
+
+#[derive(Args, Debug)]
+struct MgmtBaseArgs {
+    /// roy-management base URL. Overrides $ROY_MANAGEMENT_URL.
+    #[arg(
+        long,
+        env = "ROY_MANAGEMENT_URL",
+        default_value = "http://127.0.0.1:8079"
+    )]
+    mgmt_url: String,
+}
+
+#[derive(Args, Debug)]
+struct AgentsUpdateArgs {
+    #[command(flatten)]
+    base: MgmtBaseArgs,
+    /// Agent id or slug.
+    id: String,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long, value_parser = ["claude", "gemini", "opencode", "codex"])]
+    preset: Option<String>,
+    #[arg(long, conflicts_with = "clear_model")]
+    model: Option<String>,
+    /// Clear the model column (NULL in DB) — engine default applies.
+    #[arg(long)]
+    clear_model: bool,
+    #[arg(long)]
+    prompt_file: Option<std::path::PathBuf>,
+    #[arg(long, conflicts_with = "clear_description")]
+    description: Option<String>,
+    /// Clear the description column (NULL in DB).
+    #[arg(long)]
+    clear_description: bool,
+    /// Standing instruction text for scheduled fires.
+    #[arg(long, conflicts_with = "clear_task")]
+    task: Option<String>,
+    /// Clear the task column (NULL in DB).
+    #[arg(long)]
+    clear_task: bool,
+    /// When set, toggles `persistent` to the given value.
+    #[arg(long)]
+    persistent: Option<bool>,
+}
+
+#[derive(Subcommand)]
+enum EnginesCmd {
+    /// List configured engines (and optionally their models).
+    List(EnginesListArgs),
 }
 
 #[derive(clap::Args)]
-struct AgentsListArgs {
-    /// One row per (agent, model) instead of summary per agent.
+struct EnginesListArgs {
+    /// One row per (engine, model) instead of summary per engine.
     #[arg(long)]
     models: bool,
-    /// Machine-readable JSON output — the full AgentsList event.
+    /// Machine-readable JSON output — the full EnginesList event.
     #[arg(long)]
     json: bool,
 }
@@ -287,6 +391,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Gateway(args) => roy_gateway::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Scheduler(args) => roy_scheduler::cli::run(args).await,
         Cmd::Management(args) => roy_management::run(args).await.map(|()| ExitCode::SUCCESS),
+        Cmd::Engines { cmd } => cmd_engines(cmd).await,
         Cmd::Agents { cmd } => cmd_agents(cmd).await,
         Cmd::Projects { cmd } => cmd_projects(cmd).await,
         Cmd::SetTags(args) => cmd_set_tags(args).await,
@@ -876,11 +981,152 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
 
 async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<ExitCode> {
     match cmd {
-        AgentsCmd::List(args) => cmd_agents_list(args).await,
+        AgentsCmd::List(a) => cmd_agents_list(a).await,
+        AgentsCmd::Get { base, id } => cmd_agents_get(base, id).await,
+        AgentsCmd::Create {
+            base,
+            name,
+            preset,
+            model,
+            prompt_file,
+            description,
+            persistent,
+        } => {
+            cmd_agents_create(
+                base,
+                name,
+                preset,
+                model,
+                prompt_file,
+                description,
+                persistent,
+            )
+            .await
+        }
+        AgentsCmd::Update(args) => cmd_agents_update(args).await,
+        AgentsCmd::Delete { base, id, yes } => cmd_agents_delete(base, id, yes).await,
+        AgentsCmd::Run { base, id } => cmd_agents_run(base, id).await,
     }
 }
 
-async fn cmd_agents_list(args: AgentsListArgs) -> anyhow::Result<ExitCode> {
+async fn cmd_agents_list(args: MgmtBaseArgs) -> anyhow::Result<ExitCode> {
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let all = c.list().await?;
+    println!("{}", serde_json::to_string_pretty(&all)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_agents_get(args: MgmtBaseArgs, id: String) -> anyhow::Result<ExitCode> {
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let resolved = c.resolve(&id).await?;
+    let agent = c.get(&resolved).await?;
+    println!("{}", serde_json::to_string_pretty(&agent)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_agents_create(
+    args: MgmtBaseArgs,
+    name: String,
+    preset: String,
+    model: Option<String>,
+    prompt_file: std::path::PathBuf,
+    description: Option<String>,
+    persistent: bool,
+) -> anyhow::Result<ExitCode> {
+    let prompt = std::fs::read_to_string(&prompt_file)
+        .with_context(|| format!("reading --prompt-file {}", prompt_file.display()))?;
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let body = crate::management_client::NewAgent {
+        name,
+        description,
+        preset,
+        model,
+        prompt,
+        task: None,
+        persistent,
+    };
+    let created = c.create(&body).await?;
+    println!("{}", serde_json::to_string_pretty(&created)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_agents_update(args: AgentsUpdateArgs) -> anyhow::Result<ExitCode> {
+    let AgentsUpdateArgs {
+        base,
+        id,
+        name,
+        preset,
+        model,
+        clear_model,
+        prompt_file,
+        description,
+        clear_description,
+        task,
+        clear_task,
+        persistent,
+    } = args;
+    let prompt = match prompt_file {
+        Some(p) => Some(
+            std::fs::read_to_string(&p)
+                .with_context(|| format!("reading --prompt-file {}", p.display()))?,
+        ),
+        None => None,
+    };
+    let c = crate::management_client::ManagementClient::new(&base.mgmt_url);
+    let resolved = c.resolve(&id).await?;
+    let patch = crate::management_client::AgentPatch {
+        name,
+        description: nullable_arg(description, clear_description),
+        preset,
+        model: nullable_arg(model, clear_model),
+        prompt,
+        task: nullable_arg(task, clear_task),
+        persistent,
+    };
+    let updated = c.update(&resolved, &patch).await?;
+    println!("{}", serde_json::to_string_pretty(&updated)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Translate a `(--field value, --clear-field)` arg pair into the wire
+/// tri-state expected by roy-management. `clap`'s `conflicts_with` guarantees
+/// the two are never both set.
+fn nullable_arg(value: Option<String>, clear: bool) -> Option<Option<String>> {
+    if clear {
+        Some(None)
+    } else {
+        value.map(Some)
+    }
+}
+
+async fn cmd_agents_delete(args: MgmtBaseArgs, id: String, yes: bool) -> anyhow::Result<ExitCode> {
+    if !yes {
+        return Err(anyhow::anyhow!(
+            "refusing without --yes (deletion is permanent)"
+        ));
+    }
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let resolved = c.resolve(&id).await?;
+    c.delete(&resolved).await?;
+    eprintln!("deleted {resolved}");
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_agents_run(args: MgmtBaseArgs, id: String) -> anyhow::Result<ExitCode> {
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let resolved = c.resolve(&id).await?;
+    let resp = c.run(&resolved).await?;
+    println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_engines(cmd: EnginesCmd) -> anyhow::Result<ExitCode> {
+    match cmd {
+        EnginesCmd::List(args) => cmd_engines_list(args).await,
+    }
+}
+
+async fn cmd_engines_list(args: EnginesListArgs) -> anyhow::Result<ExitCode> {
     let (mut writer, mut events) = open_daemon().await?;
 
     send_cmd(&mut writer, &ClientCommand::ListAgents).await?;
@@ -913,7 +1159,7 @@ async fn cmd_agents_list(args: AgentsListArgs) -> anyhow::Result<ExitCode> {
             return Ok(ExitCode::from(1));
         }
         AgentsConfigStatus::Ok if agents.is_empty() => {
-            eprintln!("no agents configured in {}", config_path.display());
+            eprintln!("no engines configured in {}", config_path.display());
         }
         AgentsConfigStatus::Ok => {}
     }
@@ -976,11 +1222,7 @@ fn validate_flags(args: &RunArgs) -> anyhow::Result<()> {
 
 fn print_entry(entry: &JournalEntry, with_seq: bool) {
     let line = if with_seq {
-        serde_json::to_string(&serde_json::json!({
-            "seq": entry.seq,
-            "event": entry.event,
-        }))
-        .expect("serialize")
+        serde_json::to_string(entry).expect("serialize")
     } else {
         serde_json::to_string(&entry.event).expect("serialize")
     };
