@@ -3,6 +3,7 @@
 //! tests link this library directly to exercise the real wire code paths.
 
 pub mod http;
+pub mod meta_store;
 pub mod roy_client;
 pub mod state;
 
