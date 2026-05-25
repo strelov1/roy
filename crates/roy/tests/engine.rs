@@ -315,6 +315,31 @@ async fn is_busy_false_when_idle_and_inject_prompt_drives_turn() {
     let _ = std::fs::remove_dir_all(&journal_dir);
 }
 
+#[tokio::test]
+async fn inject_prompt_receiver_resolves_with_this_turns_result() {
+    let journal_dir = tmp_journal_dir();
+    let engine = SessionEngine::spawn(fake_acp_transport(), opts(journal_dir.clone()), test_cfg())
+        .await
+        .unwrap();
+
+    // The receiver returned by inject_prompt resolves with THIS turn's own
+    // terminal outcome — no external seq guessing, so it's correct even when
+    // other turns run first.
+    let rx = engine.inject_prompt("hello".into()).expect("inject_prompt");
+    let outcome = rx
+        .await
+        .expect("actor kept the sender alive")
+        .expect("journal read ok");
+    let (_seq, result, _text) = outcome.expect("turn produced a terminal Result");
+    assert!(
+        matches!(result, TurnEvent::Result { .. }),
+        "outcome carries the terminal Result, got {result:?}",
+    );
+
+    engine.close().unwrap();
+    let _ = std::fs::remove_dir_all(&journal_dir);
+}
+
 async fn collect_all(
     mut stream: std::pin::Pin<Box<dyn futures::Stream<Item = roy::JournalEntry> + Send>>,
 ) -> Vec<roy::JournalEntry> {
