@@ -370,18 +370,16 @@ async fn run_fire_for_agent(
     Ok(fire)
 }
 
-/// The prompt sent to the agent on a fire. When the agent has a `notify_session`,
-/// append an instruction so it can self-report into that session via the CLI.
+/// The prompt sent to the agent on a fire. When the agent has a
+/// `notify_session`, append a single-line marker carrying the parent session
+/// id. Operational guidance (when/how to call `roy inject`) lives in the
+/// `roy-inject` skill loaded by the agent — its `description` matches this
+/// marker, so the agent learns what to do from its skill, not from a long
+/// instruction baked into every prompt.
 fn effective_prompt(agent: &Agent) -> String {
     match &agent.notify_session {
         None => agent.task.clone(),
-        Some(sid) => format!(
-            "{}\n\n[notify] You are running in the background. When you have a \
-finding to report, run exactly one Bash command:\n    roy inject {} \"<your \
-concise message>\"\nIf you have nothing to report, do not call it. Do not \
-inject more than once.",
-            agent.task, sid
-        ),
+        Some(sid) => format!("{}\n\n[roy-bg] notify_session={sid}", agent.task),
     }
 }
 
@@ -427,11 +425,17 @@ mod tests {
     }
 
     #[test]
-    fn effective_prompt_appends_notify_when_set() {
-        let agent = agent_with("t", Some("main-sid"));
+    fn effective_prompt_appends_notify_marker_when_set() {
+        // The marker is what the agent-side `roy-inject` skill keys off of;
+        // keep it stable across refactors.
+        let sid = "11111111-1111-4111-8111-111111111111";
+        let agent = agent_with("t", Some(sid));
         let p = effective_prompt(&agent);
         assert!(p.starts_with("t"), "preserves task at the start");
-        assert!(p.contains("roy inject main-sid"), "templates the notify id");
+        assert!(
+            p.contains(&format!("[roy-bg] notify_session={sid}")),
+            "carries the marker so the agent's skill can pick the id up: {p:?}",
+        );
     }
 
     #[test]
