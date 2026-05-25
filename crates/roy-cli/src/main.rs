@@ -225,6 +225,44 @@ enum AgentsCmd {
         /// Agent id or slug.
         id: String,
     },
+    /// Create a new agent persona.
+    Create {
+        #[command(flatten)]
+        base: MgmtBaseArgs,
+        #[arg(long)]
+        name: String,
+        #[arg(long, value_parser = ["claude", "gemini", "opencode", "codex"])]
+        preset: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// Path to a file containing the system prompt body.
+        #[arg(long)]
+        prompt_file: std::path::PathBuf,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        persistent: bool,
+    },
+    /// Update fields of an existing agent. Only fields you pass are changed.
+    Update {
+        #[command(flatten)]
+        base: MgmtBaseArgs,
+        /// Agent id or slug.
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, value_parser = ["claude", "gemini", "opencode", "codex"])]
+        preset: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        prompt_file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        description: Option<String>,
+        /// When set, toggles `persistent` to the given value.
+        #[arg(long)]
+        persistent: Option<bool>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -880,6 +918,10 @@ async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<ExitCode> {
     match cmd {
         AgentsCmd::List(a) => cmd_agents_list(a).await,
         AgentsCmd::Get { base, id } => cmd_agents_get(base, id).await,
+        AgentsCmd::Create { base, name, preset, model, prompt_file, description, persistent } =>
+            cmd_agents_create(base, name, preset, model, prompt_file, description, persistent).await,
+        AgentsCmd::Update { base, id, name, preset, model, prompt_file, description, persistent } =>
+            cmd_agents_update(base, id, name, preset, model, prompt_file, description, persistent).await,
     }
 }
 
@@ -895,6 +937,65 @@ async fn cmd_agents_get(args: MgmtBaseArgs, id: String) -> anyhow::Result<ExitCo
     let resolved = c.resolve(&id).await?;
     let agent = c.get(&resolved).await?;
     println!("{}", serde_json::to_string_pretty(&agent)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_agents_create(
+    args: MgmtBaseArgs,
+    name: String,
+    preset: String,
+    model: Option<String>,
+    prompt_file: std::path::PathBuf,
+    description: Option<String>,
+    persistent: bool,
+) -> anyhow::Result<ExitCode> {
+    let prompt = std::fs::read_to_string(&prompt_file)
+        .with_context(|| format!("reading --prompt-file {}", prompt_file.display()))?;
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let body = crate::management_client::NewAgent {
+        name,
+        description,
+        preset,
+        model,
+        prompt,
+        task: None,
+        persistent,
+    };
+    let created = c.create(&body).await?;
+    println!("{}", serde_json::to_string_pretty(&created)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_agents_update(
+    args: MgmtBaseArgs,
+    id: String,
+    name: Option<String>,
+    preset: Option<String>,
+    model: Option<String>,
+    prompt_file: Option<std::path::PathBuf>,
+    description: Option<String>,
+    persistent: Option<bool>,
+) -> anyhow::Result<ExitCode> {
+    let prompt = match prompt_file {
+        Some(p) => Some(
+            std::fs::read_to_string(&p)
+                .with_context(|| format!("reading --prompt-file {}", p.display()))?,
+        ),
+        None => None,
+    };
+    let c = crate::management_client::ManagementClient::new(&args.mgmt_url);
+    let resolved = c.resolve(&id).await?;
+    let patch = crate::management_client::AgentPatch {
+        name,
+        description,
+        preset,
+        model,
+        prompt,
+        task: None,
+        persistent,
+    };
+    let updated = c.update(&resolved, &patch).await?;
+    println!("{}", serde_json::to_string_pretty(&updated)?);
     Ok(ExitCode::SUCCESS)
 }
 
