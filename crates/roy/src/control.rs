@@ -341,7 +341,7 @@ pub enum ServerEvent {
     InputAcquired { session: String, acquired: bool },
     /// Response to `ReleaseInput`.
     InputReleased { session: String },
-    /// Response to `Inject { respond: false }`: the seq of the appended `Note`.
+    /// Response to `Inject`: the seq of the appended `Note`.
     Injected { session: String, seq: Seq },
     /// Response to `Detach`.
     Detached { session: String },
