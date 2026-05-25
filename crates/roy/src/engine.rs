@@ -18,6 +18,7 @@ use crate::error::{Result, RoyError};
 use crate::event::{StopReason, TurnEvent};
 use crate::journal::{Journal, JournalEntry, Seq};
 use crate::session_meta::{write_metadata, SessionMetadata};
+use crate::session_store::SessionStore;
 use crate::transport::{Handle, Transport};
 
 /// Tunables for `SessionEngine::spawn`.
@@ -41,19 +42,19 @@ impl EngineOpts {
     }
 }
 
-/// Inputs that uniquely identify a session at spawn (or resume) time. Stored
-/// as `SessionMetadata` beside the journal so the daemon can resurrect a live
+/// Inputs that uniquely identify a session at spawn (or resume) time. Persisted
+/// as a `SessionRow` in the session store so the daemon can resurrect a live
 /// session after a restart.
 ///
-/// `project_id = None` means the session is orphan (lives at
-/// `<workspace>/<session_id>/`). `fixed_session_id` pins the UUID when the
-/// daemon needs to know it before the engine mints one — required for orphan
-/// sessions where the dir is pre-created as `<workspace>/<session_id>/`.
+/// `cwd = None` means the caller wants an orphan session: the manager allocates
+/// `<workspace>/<session_id>/` for it and rewrites `cwd` to that path before
+/// the engine is constructed. `fixed_session_id` pins the UUID when the daemon
+/// needs to know it before the engine mints one — required for orphan sessions
+/// where the dir is pre-created as `<workspace>/<session_id>/`.
 #[derive(Debug, Clone)]
 pub struct SessionSpawnConfig {
     pub agent: crate::agents_config::AgentPreset,
-    pub cwd: PathBuf,
-    pub project_id: Option<String>,
+    pub cwd: Option<PathBuf>,
     pub model: Option<String>,
     pub permission: Option<String>,
     /// Forwarded to `Transport::open` so the agent side resumes via its
@@ -64,9 +65,8 @@ pub struct SessionSpawnConfig {
     /// minting a fresh one. Used by orphan spawn so the daemon can name the
     /// workspace dir after the session id before the engine is constructed.
     pub fixed_session_id: Option<String>,
-    pub tags: BTreeMap<String, String>,
     /// Inline persona prompt. Forwarded to `Transport::open`; later snapshotted
-    /// into `SessionMetadata` and (for FirstTurn presets) injected as a first turn.
+    /// into the session store and (for FirstTurn presets) injected as a first turn.
     pub system_prompt: Option<String>,
 }
 
@@ -92,6 +92,10 @@ pub struct SessionEngine {
     /// (`publish`) or an incoming prompt (`Cmd::Prompt` arriving at the
     /// actor). Used by `SessionManager::sweep_idle` to GC quiet sessions.
     last_activity: StdMutex<Instant>,
+    /// Plumbed in T11; T12 wires journal-time row writes (`insert`,
+    /// `update_cursor`, `update_model`) onto this handle.
+    #[allow(dead_code)]
+    session_store: Arc<SessionStore>,
 }
 
 enum Cmd {
@@ -116,6 +120,7 @@ impl SessionEngine {
         transport: Arc<dyn Transport>,
         opts: EngineOpts,
         cfg: SessionSpawnConfig,
+        session_store: Arc<SessionStore>,
     ) -> Result<Arc<Self>> {
         let session_id = cfg
             .fixed_session_id
@@ -123,7 +128,7 @@ impl SessionEngine {
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let journal =
             Arc::new(Journal::open(&opts.journal_dir, &session_id, opts.mem_capacity).await?);
-        Self::start(transport, opts, session_id, journal, cfg).await
+        Self::start(transport, opts, session_id, journal, cfg, session_store).await
     }
 
     /// Resurrect a previously-closed session: open its existing journal in
@@ -135,10 +140,11 @@ impl SessionEngine {
         opts: EngineOpts,
         session_id: String,
         cfg: SessionSpawnConfig,
+        session_store: Arc<SessionStore>,
     ) -> Result<Arc<Self>> {
         let journal =
             Arc::new(Journal::resume(&opts.journal_dir, &session_id, opts.mem_capacity).await?);
-        Self::start(transport, opts, session_id, journal, cfg).await
+        Self::start(transport, opts, session_id, journal, cfg, session_store).await
     }
 
     async fn start(
@@ -147,15 +153,23 @@ impl SessionEngine {
         session_id: String,
         journal: Arc<Journal>,
         cfg: SessionSpawnConfig,
+        session_store: Arc<SessionStore>,
     ) -> Result<Arc<Self>> {
         let (broadcast_tx, _) = broadcast::channel::<JournalEntry>(opts.broadcast_capacity);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
+
+        // The manager always resolves `cfg.cwd` (allocating an orphan dir when
+        // the caller passed `None`) before handing the config to the engine.
+        let cwd = cfg
+            .cwd
+            .clone()
+            .expect("SessionManager must resolve cwd before SessionEngine::spawn/resume");
 
         let handle = transport
             .open(
                 &session_id,
                 cfg.resume_cursor.as_deref(),
-                cfg.cwd.clone(),
+                cwd.clone(),
                 cfg.system_prompt.as_deref(),
             )
             .await?;
@@ -165,34 +179,36 @@ impl SessionEngine {
             session_id: session_id.clone(),
             journal_dir: opts.journal_dir.clone(),
             agent: cfg.agent.to_string(),
-            cwd: cfg.cwd.clone(),
-            project_id: cfg.project_id.clone(),
+            cwd: cwd.clone(),
+            project_id: None,
             model: StdMutex::new(cfg.model.clone()),
             permission: cfg.permission.clone(),
             system_prompt: cfg.system_prompt.clone(),
             resume_cursor: StdMutex::new(initial_cursor.clone()),
-            tags: StdMutex::new(cfg.tags.clone()),
+            tags: StdMutex::new(BTreeMap::new()),
             journal,
             broadcast_tx,
             input_tx,
             input_lease_held: StdMutex::new(false),
             last_activity: StdMutex::new(Instant::now()),
+            session_store,
         });
 
         // Persist initial metadata so a daemon restart can find this session.
         // Propagate the error: without metadata on disk the session can't be
         // resumed, so a silent half-spawned state would be worse than failing.
+        // T12 replaces this on-disk metadata write with `SessionStore::insert`.
         write_metadata(
             &opts.journal_dir,
             &SessionMetadata {
                 session_id,
                 agent: cfg.agent.to_string(),
-                cwd: cfg.cwd,
-                project_id: cfg.project_id, // Option<String> — None = orphan
+                cwd,
+                project_id: None,
                 model: cfg.model,
                 permission: cfg.permission,
                 resume_cursor: initial_cursor,
-                tags: cfg.tags,
+                tags: BTreeMap::new(),
                 system_prompt: cfg.system_prompt.clone(),
                 agent_name: None,
             },
