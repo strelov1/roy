@@ -210,9 +210,9 @@ exposed:
 
 ## Resume + persistence
 
-Every session writes both a JSONL journal (`<session_id>.jsonl`) and a
-metadata file (`<session_id>.meta.json`) under the journal dir. After the
-daemon restarts:
+Every session writes a JSONL journal (`<session_id>.jsonl`) under the journal
+dir, and a boot-kit row in `~/.local/state/roy/sessions.db`. After the daemon
+restarts:
 
 - `roy list-archived` shows surviving session ids;
 - `roy attach <id>` returns a read-only replay of the journal;
