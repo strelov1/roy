@@ -589,6 +589,7 @@ impl Daemon {
             resume_cursor: resume,
             fixed_session_id,
             tags,
+            system_prompt: None,
         };
         match self.manager.spawn(cfg, 256, 1024).await {
             Ok(engine) => {
@@ -763,7 +764,11 @@ impl Daemon {
     ) {
         // 1. Spawn or Resume
         let engine = match target {
-            FireTarget::Spawn { preset, project_id, system_prompt: _ } => {
+            FireTarget::Spawn {
+                preset,
+                project_id,
+                system_prompt: _,
+            } => {
                 let parsed: AgentPreset = match preset.parse() {
                     Ok(p) => p,
                     Err(e) => {
@@ -800,6 +805,7 @@ impl Daemon {
                     resume_cursor: None,
                     fixed_session_id,
                     tags,
+                    system_prompt: None,
                 };
                 match self.manager.spawn(cfg, 256, 1024).await {
                     Ok(e) => e,

@@ -35,6 +35,7 @@ fn test_cfg() -> SessionSpawnConfig {
         resume_cursor: None,
         fixed_session_id: None,
         tags: std::collections::BTreeMap::new(),
+        system_prompt: None,
     }
 }
 

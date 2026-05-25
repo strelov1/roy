@@ -65,6 +65,9 @@ pub struct SessionSpawnConfig {
     /// workspace dir after the session id before the engine is constructed.
     pub fixed_session_id: Option<String>,
     pub tags: BTreeMap<String, String>,
+    /// Inline persona prompt. Forwarded to `Transport::open`; later snapshotted
+    /// into `SessionMetadata` and (for FirstTurn presets) injected as a first turn.
+    pub system_prompt: Option<String>,
 }
 
 /// Owned by `SessionManager` (or directly by callers in single-session use).
@@ -145,7 +148,12 @@ impl SessionEngine {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
 
         let handle = transport
-            .open(&session_id, cfg.resume_cursor.as_deref(), cfg.cwd.clone())
+            .open(
+                &session_id,
+                cfg.resume_cursor.as_deref(),
+                cfg.cwd.clone(),
+                cfg.system_prompt.as_deref(),
+            )
             .await?;
         let initial_cursor = handle.resume_cursor().or(cfg.resume_cursor.clone());
 
