@@ -1,9 +1,5 @@
 //! `roy-scheduler` CLI — clap-derive entry per spec §5.2.
 //!
-//! The types and `run` entry point are public so they can be embedded by
-//! `roy-cli` as the `roy scheduler` subcommand. The standalone
-//! `roy-scheduler` binary and `roy-cli` share this exact code path.
-//!
 //! Output convention: one JSON line on stdout per successful command,
 //! tracing on stderr (`RUST_LOG` overrides). Exit codes follow the same
 //! shape as the roy CLI:
@@ -31,11 +27,11 @@ use crate::{db, store};
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Top,
+    pub(crate) command: Top,
 }
 
 #[derive(Subcommand)]
-pub enum Top {
+pub(crate) enum Top {
     /// Run the driver loop (poll triggers + dispatch fires + subscribers).
     Serve(ServeArgs),
     /// Health-probe the scheduler. Reads `<pid_file>`, checks the process is
@@ -69,39 +65,39 @@ pub enum Top {
 }
 
 #[derive(clap::Args)]
-pub struct StatusArgs {
+pub(crate) struct StatusArgs {
     /// PidLock path to probe. Defaults to `~/.local/state/roy-scheduler/serve.pid`.
     #[arg(long)]
-    pub pid_file: Option<PathBuf>,
+    pub(crate) pid_file: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
-pub struct ServeArgs {
+pub(crate) struct ServeArgs {
     /// SQLite DB path. Overrides `ROY_SCHEDULER_DB`.
     #[arg(long)]
-    pub db: Option<PathBuf>,
+    pub(crate) db: Option<PathBuf>,
     /// roy daemon socket. Overrides `ROY_SOCKET`.
     #[arg(long)]
-    pub socket: Option<PathBuf>,
+    pub(crate) socket: Option<PathBuf>,
     /// Polling cadence in milliseconds.
     #[arg(long)]
-    pub poll_ms: Option<u64>,
+    pub(crate) poll_ms: Option<u64>,
     /// Max triggers claimed per tick.
     #[arg(long)]
-    pub batch_limit: Option<i64>,
+    pub(crate) batch_limit: Option<i64>,
     /// Max concurrent in-flight fires.
     #[arg(long)]
-    pub max_fires: Option<usize>,
+    pub(crate) max_fires: Option<usize>,
     /// Per-fire timeout (seconds).
     #[arg(long)]
-    pub fire_timeout: Option<u64>,
+    pub(crate) fire_timeout: Option<u64>,
     /// PidLock path. Defaults to `~/.local/state/roy-scheduler/serve.pid`.
     #[arg(long)]
-    pub pid_file: Option<PathBuf>,
+    pub(crate) pid_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
-pub enum AgentsCmd {
+pub(crate) enum AgentsCmd {
     /// Register a new agent.
     Add(AgentAddArgs),
     /// List all agents.
@@ -113,32 +109,32 @@ pub enum AgentsCmd {
 }
 
 #[derive(clap::Args)]
-pub struct AgentAddArgs {
+pub(crate) struct AgentAddArgs {
     #[arg(long)]
-    pub name: String,
+    pub(crate) name: String,
     /// claude | gemini | opencode | codex
     #[arg(long)]
-    pub preset: String,
+    pub(crate) preset: String,
     /// Prompt sent to the agent on every fire.
     #[arg(long)]
-    pub task: String,
+    pub(crate) task: String,
     /// Project id to fire under. Omit to fire as orphan.
     #[arg(long)]
-    pub project: Option<String>,
+    pub(crate) project: Option<String>,
     /// Optional model override.
     #[arg(long)]
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
     /// Persistent agent — every fire resumes the same session id.
     #[arg(long)]
-    pub persistent: bool,
+    pub(crate) persistent: bool,
     /// Roy session id to notify. When set, the agent's fired prompt gets a
     /// `roy inject <id> ...` instruction so it can self-report findings.
     #[arg(long)]
-    pub notify_session: Option<String>,
+    pub(crate) notify_session: Option<String>,
 }
 
 #[derive(Subcommand)]
-pub enum TriggersCmd {
+pub(crate) enum TriggersCmd {
     /// Add a new trigger. Exactly one of `--cron` or `--oneshot` is required.
     Add(TriggerAddArgs),
     /// List triggers (optionally filtered by agent).
@@ -156,23 +152,23 @@ pub enum TriggersCmd {
 
 #[derive(clap::Args)]
 #[command(group(ArgGroup::new("when").args(["cron", "oneshot"]).required(true)))]
-pub struct TriggerAddArgs {
+pub(crate) struct TriggerAddArgs {
     /// Agent id this trigger fires.
     #[arg(long)]
-    pub agent: String,
+    pub(crate) agent: String,
     /// 5-field cron expression (e.g. `0 9 * * *`). Validated at parse time.
     #[arg(long)]
-    pub cron: Option<String>,
+    pub(crate) cron: Option<String>,
     /// One-shot RFC-3339 instant (e.g. `2026-05-25T10:00:00+03:00`).
     #[arg(long)]
-    pub oneshot: Option<String>,
+    pub(crate) oneshot: Option<String>,
     /// IANA timezone for cron (e.g. `Europe/Moscow`). Defaults to `UTC`.
     #[arg(long, default_value = "UTC")]
-    pub tz: String,
+    pub(crate) tz: String,
 }
 
 #[derive(Subcommand)]
-pub enum SubscribersCmd {
+pub(crate) enum SubscribersCmd {
     /// Register a new subscriber. Exactly one of `--trigger` or `--agent` is required.
     Add(SubscriberAddArgs),
     /// List subscribers, optionally filtered by agent or trigger.
@@ -188,26 +184,26 @@ pub enum SubscribersCmd {
 
 #[derive(clap::Args)]
 #[command(group(ArgGroup::new("scope").args(["trigger", "agent"]).required(true)))]
-pub struct SubscriberAddArgs {
+pub(crate) struct SubscriberAddArgs {
     /// Trigger id to attach to (XOR with `--agent`).
     #[arg(long)]
-    pub trigger: Option<String>,
+    pub(crate) trigger: Option<String>,
     /// Agent id to attach to (XOR with `--trigger`).
     #[arg(long)]
-    pub agent: Option<String>,
+    pub(crate) agent: Option<String>,
     /// webhook | notify_native
     #[arg(long)]
-    pub kind: String,
+    pub(crate) kind: String,
     /// JSON config blob (per-kind shape). Stored verbatim.
     #[arg(long)]
-    pub config: String,
+    pub(crate) config: String,
     /// Optional order index within the fire's subscriber list (lower runs first).
     #[arg(long, default_value_t = 0)]
-    pub order: i64,
+    pub(crate) order: i64,
 }
 
 #[derive(Subcommand)]
-pub enum FiresCmd {
+pub(crate) enum FiresCmd {
     /// List fires for an agent (newest first).
     List {
         #[arg(long)]
@@ -220,17 +216,17 @@ pub enum FiresCmd {
 }
 
 #[derive(clap::Args)]
-pub struct FireNowArgs {
+pub(crate) struct FireNowArgs {
     /// Agent id to fire ad-hoc.
-    pub agent_id: String,
+    pub(crate) agent_id: String,
     /// Per-fire timeout (seconds). Defaults to 600.
     #[arg(long)]
-    pub fire_timeout: Option<u64>,
+    pub(crate) fire_timeout: Option<u64>,
     /// Session id of the caller. Recorded on the fire's session as the
     /// reserved tag `roy-scheduler:initiated_by_session` so the UI can link
     /// the fire back to its initiator.
     #[arg(long, value_name = "SESSION_ID")]
-    pub parent: Option<String>,
+    pub(crate) parent: Option<String>,
 }
 
 /// Dispatch the parsed CLI to the matching command. The caller owns the
@@ -277,7 +273,6 @@ async fn open_pool() -> anyhow::Result<SqlitePool> {
         .with_context(|| format!("opening DB at {}", path.display()))
 }
 
-/// Print one JSON line on stdout — the project-wide output convention.
 fn print_json(v: impl serde::Serialize) -> anyhow::Result<()> {
     let s = serde_json::to_string(&v).context("serializing JSON output")?;
     println!("{s}");

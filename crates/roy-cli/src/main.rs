@@ -68,8 +68,7 @@ enum Cmd {
     Gateway(roy_gateway::Args),
     /// Cron + one-shot fire dispatcher for roy. Has its own subcommands
     /// (`serve`, `status`, `migrate`, `agents`, `triggers`, `subscribers`,
-    /// `fires`, `fire-now`). Same code path as the standalone
-    /// `roy-scheduler` binary.
+    /// `fires`, `fire-now`).
     Scheduler(roy_scheduler::cli::Cli),
     /// Manage projects (list / create / rename / delete).
     Projects {
