@@ -17,3 +17,4 @@ pub mod formatting;
 pub mod orchestrator;
 pub mod telegram;
 pub mod typing;
+pub mod ws;
