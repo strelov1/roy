@@ -187,7 +187,7 @@ struct SubscriberAddArgs {
     /// Agent id to attach to (XOR with `--trigger`).
     #[arg(long)]
     agent: Option<String>,
-    /// inject_parent | webhook | notify_native
+    /// webhook | notify_native
     #[arg(long)]
     kind: String,
     /// JSON config blob (per-kind shape). Stored verbatim.
@@ -220,9 +220,7 @@ struct FireNowArgs {
     fire_timeout: Option<u64>,
     /// Session id of the caller. Recorded on the fire's session as the
     /// reserved tag `roy-scheduler:initiated_by_session` so the UI can link
-    /// the fire back to its initiator. Distinct from
-    /// `roy-scheduler:parent_session_id`, which is set by the
-    /// `inject_parent` subscriber.
+    /// the fire back to its initiator.
     #[arg(long, value_name = "SESSION_ID")]
     parent: Option<String>,
 }
@@ -518,7 +516,7 @@ async fn cmd_subscribers(cmd: SubscribersCmd) -> anyhow::Result<()> {
         SubscribersCmd::Add(a) => {
             let kind = roy_scheduler::types::SubscriberKind::parse(&a.kind).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown subscriber kind: {:?} (expected inject_parent|webhook|notify_native)",
+                    "unknown subscriber kind: {:?} (expected webhook|notify_native)",
                     a.kind
                 )
             })?;

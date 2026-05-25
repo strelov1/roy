@@ -15,7 +15,6 @@ pub fn registry() -> &'static HashMap<SubscriberKind, SubscriberCtor> {
     static R: OnceLock<HashMap<SubscriberKind, SubscriberCtor>> = OnceLock::new();
     R.get_or_init(|| {
         let mut m: HashMap<SubscriberKind, SubscriberCtor> = HashMap::new();
-        m.insert(SubscriberKind::InjectParent, super::inject_parent::build);
         m.insert(SubscriberKind::Webhook, super::webhook::build);
         m.insert(SubscriberKind::NotifyNative, super::notify_native::build);
         m
@@ -28,11 +27,7 @@ mod tests {
 
     #[test]
     fn all_kinds_registered() {
-        for kind in [
-            SubscriberKind::InjectParent,
-            SubscriberKind::Webhook,
-            SubscriberKind::NotifyNative,
-        ] {
+        for kind in [SubscriberKind::Webhook, SubscriberKind::NotifyNative] {
             assert!(
                 registry().contains_key(&kind),
                 "registry missing ctor for {:?}",

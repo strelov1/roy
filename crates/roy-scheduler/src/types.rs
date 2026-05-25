@@ -123,7 +123,6 @@ pub struct Fire {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscriberKind {
-    InjectParent,
     Webhook,
     NotifyNative,
 }
@@ -131,7 +130,6 @@ pub enum SubscriberKind {
 impl SubscriberKind {
     pub fn as_db(self) -> &'static str {
         match self {
-            SubscriberKind::InjectParent => "inject_parent",
             SubscriberKind::Webhook => "webhook",
             SubscriberKind::NotifyNative => "notify_native",
         }
@@ -139,7 +137,6 @@ impl SubscriberKind {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "inject_parent" => Some(Self::InjectParent),
             "webhook" => Some(Self::Webhook),
             "notify_native" => Some(Self::NotifyNative),
             _ => None,
@@ -186,11 +183,7 @@ mod tests {
 
     #[test]
     fn subscriber_kind_roundtrips() {
-        for kind in [
-            SubscriberKind::InjectParent,
-            SubscriberKind::Webhook,
-            SubscriberKind::NotifyNative,
-        ] {
+        for kind in [SubscriberKind::Webhook, SubscriberKind::NotifyNative] {
             assert_eq!(SubscriberKind::parse(kind.as_db()), Some(kind));
         }
         assert_eq!(SubscriberKind::parse("nope"), None);

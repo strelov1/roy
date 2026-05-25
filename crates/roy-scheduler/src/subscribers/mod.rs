@@ -7,7 +7,6 @@
 use async_trait::async_trait;
 
 pub mod dispatch;
-pub mod inject_parent;
 pub mod notify_native;
 pub mod registry;
 pub mod webhook;
