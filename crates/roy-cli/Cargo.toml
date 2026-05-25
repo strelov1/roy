@@ -12,6 +12,7 @@ doc = false
 
 [dependencies]
 roy = { path = "../roy" }
+roy-mcp = { path = "../roy-mcp" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "sync", "time"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

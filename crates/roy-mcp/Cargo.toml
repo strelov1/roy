@@ -1,0 +1,10 @@
+[package]
+name = "roy-mcp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+roy = { path = "../roy" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net"] }
+serde_json = "1"
+anyhow = "1"
