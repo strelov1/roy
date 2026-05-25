@@ -10,7 +10,7 @@ use crate::event::TurnEvent;
 
 pub mod acp;
 
-pub use acp::{AcpConfig, AcpTransport, PermissionPolicy};
+pub use acp::{AcpConfig, AcpTransport, PermissionPolicy, SystemPromptChannel};
 
 pub type TurnStream = Pin<Box<dyn Stream<Item = TurnEvent> + Send + 'static>>;
 
@@ -28,6 +28,7 @@ pub trait Transport: Send + Sync {
         session_id: &str,
         resume_cursor: Option<&str>,
         cwd: PathBuf,
+        system_prompt: Option<&str>,
     ) -> Result<Box<dyn Handle>>;
 }
 
@@ -41,4 +42,8 @@ pub trait Handle: Send {
     /// the agent-issued `sessionId` from `session/new`.
     fn resume_cursor(&self) -> Option<String>;
     async fn close(&mut self) -> Result<()>;
+    /// Persona to inject as the first turn, set only when the transport could
+    /// not apply it natively (FirstTurn channel) AND this was a fresh open.
+    /// Drains on first call. `None` for Meta channels and all resumes.
+    fn take_pending_persona(&mut self) -> Option<String>;
 }

@@ -21,6 +21,7 @@ import sys, json
 
 flags = set()
 flood_n = 0
+meta_out = None
 _argv = sys.argv[1:]
 _i = 0
 while _i < len(_argv):
@@ -28,9 +29,18 @@ while _i < len(_argv):
     if a == "--flood":
         flood_n = int(_argv[_i + 1])
         _i += 2
+    elif a == "--meta-out":
+        meta_out = _argv[_i + 1]
+        _i += 2
     else:
         flags.add(a)
         _i += 1
+
+
+def record_meta(m):
+    if meta_out is not None:
+        with open(meta_out, "w") as f:
+            json.dump(m.get("params", {}).get("_meta"), f)
 
 ALLOW_ID = "opt-allow-1"
 
@@ -78,8 +88,10 @@ for line in sys.stdin:
              "result": {"protocolVersion": 1,
                         "agentCapabilities": {"loadSession": True}}})
     elif method == "session/new":
+        record_meta(m)
         out({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "fake-acp-sid"}})
     elif method == "session/load":
+        record_meta(m)
         out({"jsonrpc": "2.0", "id": mid, "result": {}})
     elif method == "session/set_mode":
         out({"jsonrpc": "2.0", "id": mid, "result": {}})

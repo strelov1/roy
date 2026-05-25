@@ -104,7 +104,7 @@ tool result body). The JSON shapes are identical across all transports.
 
 | op                | fields                                                                                          |
 |-------------------|-------------------------------------------------------------------------------------------------|
-| `spawn`           | `agent`, optional `project_id`, `model`, `permission`, `resume`                                 |
+| `spawn`           | `agent`, optional `project_id`, `model`, `permission`, `resume`, `system_prompt`                |
 | `attach`          | `session`, optional `from_seq`                                                                  |
 | `acquire_input`   | `session`                                                                                       |
 | `send`            | `session`, `text`                                                                               |
@@ -123,6 +123,13 @@ tool result body). The JSON shapes are identical across all transports.
 
 `permission` is `"allow"` or `"deny"`. `agent` is one of `claude`,
 `gemini`, `opencode`, `codex` (with the default `TransportFactory`).
+
+`spawn.system_prompt` (also accepted on a `fire` command's `spawn` target) is
+an optional inline persona/system prompt. The daemon injects it via ACP
+`_meta.systemPrompt = { append }` for presets that support it (`claude`,
+`opencode`) and as a first journaled `System` turn otherwise (`gemini`,
+`codex`), and snapshots it into `SessionMetadata` so it is re-applied on
+`resume`.
 
 `spawn.project_id` is a UUID string referencing an existing project; omit or
 set to `null` for an orphan session. When `project_id` is given, the session's

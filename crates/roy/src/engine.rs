@@ -65,6 +65,9 @@ pub struct SessionSpawnConfig {
     /// workspace dir after the session id before the engine is constructed.
     pub fixed_session_id: Option<String>,
     pub tags: BTreeMap<String, String>,
+    /// Inline persona prompt. Forwarded to `Transport::open`; later snapshotted
+    /// into `SessionMetadata` and (for FirstTurn presets) injected as a first turn.
+    pub system_prompt: Option<String>,
 }
 
 /// Owned by `SessionManager` (or directly by callers in single-session use).
@@ -78,6 +81,7 @@ pub struct SessionEngine {
     /// transport. `set_model` mutates it and rewrites on-disk metadata.
     model: StdMutex<Option<String>>,
     permission: Option<String>,
+    system_prompt: Option<String>,
     resume_cursor: StdMutex<Option<String>>,
     tags: StdMutex<BTreeMap<String, String>>,
     journal: Arc<Journal>,
@@ -109,6 +113,9 @@ enum Cmd {
         text: String,
         done: oneshot::Sender<TurnOutcome>,
     },
+    /// Persona/system prompt injected as the first turn (FirstTurn presets).
+    /// Journaled as `System { subtype: "persona" }` rather than `UserPrompt`.
+    Persona(String),
     /// Abort the in-flight turn. No-op if no turn is running. The actor reacts
     /// by dropping the current `TurnStream`, which makes the transport send
     /// `session/cancel` to the agent; the synthesised terminal `Result` lands
@@ -162,7 +169,12 @@ impl SessionEngine {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
 
         let handle = transport
-            .open(&session_id, cfg.resume_cursor.as_deref(), cfg.cwd.clone())
+            .open(
+                &session_id,
+                cfg.resume_cursor.as_deref(),
+                cfg.cwd.clone(),
+                cfg.system_prompt.as_deref(),
+            )
             .await?;
         let initial_cursor = handle.resume_cursor().or(cfg.resume_cursor.clone());
 
@@ -174,6 +186,7 @@ impl SessionEngine {
             project_id: cfg.project_id.clone(),
             model: StdMutex::new(cfg.model.clone()),
             permission: cfg.permission.clone(),
+            system_prompt: cfg.system_prompt.clone(),
             resume_cursor: StdMutex::new(initial_cursor.clone()),
             tags: StdMutex::new(cfg.tags.clone()),
             journal,
@@ -197,10 +210,20 @@ impl SessionEngine {
                 permission: cfg.permission,
                 resume_cursor: initial_cursor,
                 tags: cfg.tags,
+                system_prompt: cfg.system_prompt.clone(),
+                agent_name: None,
             },
         )
         .await?;
 
+        // FirstTurn presets: the transport deferred the persona. Drain it now
+        // (while we still own the handle) and enqueue it as the first command,
+        // so it is injected as the first turn before any user prompt.
+        let mut handle = handle;
+        if let Some(persona) = handle.take_pending_persona() {
+            // Unbounded channel; this send precedes any external prompt.
+            let _ = engine.input_tx.send(Cmd::Persona(persona));
+        }
         let engine_for_actor = Arc::clone(&engine);
         tokio::spawn(run_actor(engine_for_actor, handle, input_rx));
 
@@ -439,8 +462,10 @@ impl SessionEngine {
             project_id: self.project_id.clone(), // Option<String> — None = orphan
             model: self.model.lock().unwrap().clone(),
             permission: self.permission.clone(),
+            system_prompt: self.system_prompt.clone(),
             resume_cursor: self.resume_cursor.lock().unwrap().clone(),
             tags: self.tags.lock().unwrap().clone(),
+            agent_name: None,
         }
     }
 
@@ -492,12 +517,15 @@ async fn run_actor(
     loop {
         // Drain injects queued during the previous turn before blocking for a
         // new command — they were deferred precisely so they'd run now.
-        let (text, done) = if let Some((text, done)) = pending.pop_front() {
-            (text, Some(done))
+        let (text, done, as_system) = if let Some((text, done)) = pending.pop_front() {
+            (text, Some(done), false)
         } else {
             match input_rx.recv().await {
-                Some(Cmd::Prompt(text)) => (text, None),
-                Some(Cmd::Inject { text, done }) => (text, Some(done)),
+                Some(Cmd::Prompt(text)) => (text, None, false),
+                Some(Cmd::Inject { text, done }) => (text, Some(done), false),
+                // Persona is the FirstTurn-preset system prompt, enqueued once
+                // before any user prompt; journaled as System, never queued.
+                Some(Cmd::Persona(text)) => (text, None, true),
                 // Cancel outside an active turn is a no-op; the turn-driving
                 // loop is the only place a cancel actually means something.
                 Some(Cmd::Cancel) => continue,
@@ -511,6 +539,7 @@ async fn run_actor(
             &mut input_rx,
             &mut pending,
             done,
+            as_system,
         )
         .await;
         // A `Close` (or channel hang-up) seen mid-turn is consumed inside
@@ -532,11 +561,12 @@ async fn run_actor(
     }
 }
 
-/// Journal the prompt, drive one turn to completion, persist the cursor, and —
+/// Journal the prelude, drive one turn to completion, persist the cursor, and —
 /// for an injected turn — report the outcome on `done`. Shared by the leased
-/// (`Prompt`) and lease-free (`Inject`) paths so both behave identically.
-/// Returns `true` if a `Close` / channel hang-up was observed mid-turn, so the
-/// caller knows to wind the actor down.
+/// (`Prompt`), lease-free (`Inject`), and first-turn (`Persona`) paths.
+/// `as_system` journals the prelude as `System { subtype: "persona" }` instead
+/// of `UserPrompt`. Returns `true` if a `Close` / channel hang-up was observed
+/// mid-turn, so the caller knows to wind the actor down.
 async fn run_one_turn(
     engine: &SessionEngine,
     handle: &mut dyn Handle,
@@ -544,27 +574,31 @@ async fn run_one_turn(
     input_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     pending: &mut VecDeque<PendingTurn>,
     done: Option<oneshot::Sender<TurnOutcome>>,
+    as_system: bool,
 ) -> bool {
-    // Captured before the UserPrompt is journaled so `wait_for_result` below
+    // Captured before the prelude is journaled so `wait_for_result` below
     // sees this turn's own terminal Result (turns run strictly serially, so
     // the first Result at `seq >= since` is unambiguously ours).
     let since = engine.next_seq().await;
     engine.touch_activity();
-    // Journal the user's prompt before driving the turn. Agents don't echo
-    // user input over ACP, so without this step a refresh / late attach can
-    // never reconstruct the user side of the conversation.
-    if let Err(e) = publish(
-        engine,
+    // Journal the prelude before driving the turn. Agents don't echo user
+    // input over ACP, so without this step a refresh / late attach can never
+    // reconstruct the user side of the conversation. A persona turn is
+    // journaled as System so the UI doesn't render it as a user message.
+    let prelude = if as_system {
+        TurnEvent::System {
+            subtype: "persona".to_string(),
+        }
+    } else {
         TurnEvent::UserPrompt {
             text: text.to_string(),
-        },
-    )
-    .await
-    {
+        }
+    };
+    if let Err(e) = publish(engine, prelude).await {
         tracing::error!(
             session = %engine.session_id,
             error = %e,
-            "failed to journal user prompt; turn still dispatched",
+            "failed to journal turn prelude; turn still dispatched",
         );
     }
     let closed = drive_turn(engine, handle, text, input_rx, pending).await;
@@ -654,6 +688,14 @@ async fn drive_turn(
                 Some(Cmd::Inject { text, done }) => {
                     // Queue, don't drop: run after the current turn finishes.
                     pending.push_back((text, done));
+                }
+                Some(Cmd::Persona(_)) => {
+                    // Persona is only enqueued before any turn starts, so this
+                    // is unreachable in practice; warn rather than drop silently.
+                    tracing::warn!(
+                        session = %engine.session_id,
+                        "ignoring Cmd::Persona during active turn",
+                    );
                 }
                 Some(Cmd::Close) | None => return true,
             },
