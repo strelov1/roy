@@ -16,10 +16,10 @@ Non-negotiable expectations for any change in this repo:
 A Cargo workspace with seven crates:
 
 - **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting metadata so sessions survive across daemon restarts.
-- **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket). The `roy mcp` subcommand delegates to `roy-mcp`.
+- **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket). The `roy mcp` and `roy gateway` subcommands delegate to `roy-mcp` and `roy-gateway` respectively, so a single binary covers every adapter.
 - **`crates/roy-mcp`** — library. MCP (Model Context Protocol) server: JSON-RPC 2.0 over stdio, exposes daemon control operations as MCP tools. Linked into `roy-cli` and dispatched via `roy mcp`.
 - **`crates/roy-scheduler`** — cron + one-shot fire dispatcher. Talks to the daemon over its Unix socket using `ClientCommand::Fire`; never reaches into `SessionManager`, `Engine`, or `Journal`. Owns its own SQLite state (`~/.local/state/roy-scheduler/state.db`) for triggers, fires, and subscribers.
-- **`crates/roy-gateway`** — chat-platform and WebSocket bridge to the daemon (Telegram adapter + WS relay). Same boundary rule as `roy-scheduler`. Persists `chat_id → roy session_id` in a JSON file so chats survive restarts.
+- **`crates/roy-gateway`** — library + thin binary. Chat-platform and WebSocket bridge to the daemon (Telegram adapter + WS relay). Exposes `pub async fn run(args)` so `roy-cli` can dispatch `roy gateway` to the same code as the standalone `roy-gateway` binary. Same boundary rule as `roy-scheduler`. Persists `chat_id → roy session_id` in a JSON file so chats survive restarts.
 - **`crates/roy-agents`** — library. Canonical agent store: `Agent` type (identity + persona `prompt` + optional scheduled `task`), SQLite CRUD with slug-collision suffixing. Used by `roy-management` today; `roy-scheduler` is planned to migrate onto it later. Shared DB file lives at `~/.local/state/roy/agents.db` (override with `ROY_AGENTS_DB`).
 - **`crates/roy-management`** — binary `roy-management`. axum HTTP service for agent CRUD and starting sessions. Same boundary rule as `roy-scheduler`/`roy-gateway`: talks to the daemon only over the Unix socket, passing `system_prompt = agent.prompt` inline on `Spawn`. Transitional note: `roy-scheduler` still has its own `agents` table until a future Plan C unifies it onto `roy-agents`.
 
