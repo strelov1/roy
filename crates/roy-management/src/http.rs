@@ -48,6 +48,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/agents/{id}/run", post(run_agent))
         .route("/presets", get(list_presets))
+        .route("/projects", get(list_projects).post(create_project))
+        .route("/projects/{id}", axum::routing::delete(delete_project))
         .with_state(state)
 }
 
@@ -129,6 +131,46 @@ fn validate_preset(preset: &str) -> Result<(), ApiError> {
                 VALID_PRESETS.join(", ")
             ),
         ))
+    }
+}
+
+async fn list_projects(
+    State(s): State<AppState>,
+) -> Result<Json<Vec<crate::meta_store::Project>>, ApiError> {
+    s.meta.list_projects().await.map(Json).map_err(meta_to_api)
+}
+
+#[derive(serde::Deserialize)]
+struct NewProject {
+    name: String,
+}
+
+async fn create_project(
+    State(s): State<AppState>,
+    Json(req): Json<NewProject>,
+) -> Result<(StatusCode, Json<crate::meta_store::Project>), ApiError> {
+    let p = s.meta.create_project(&req.name).await.map_err(meta_to_api)?;
+    Ok((StatusCode::CREATED, Json(p)))
+}
+
+async fn delete_project(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    s.meta.delete_project(&id).await.map_err(meta_to_api)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn meta_to_api(e: crate::meta_store::MetaError) -> ApiError {
+    use crate::meta_store::MetaError::*;
+    match e {
+        NotFound(m) => ApiError(StatusCode::NOT_FOUND, m),
+        Conflict(m) => ApiError(StatusCode::CONFLICT, m),
+        Invalid(m) => ApiError(StatusCode::BAD_REQUEST, m),
+        Db(e) => {
+            tracing::error!(error=%e, "meta db error");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+        }
     }
 }
 
@@ -217,5 +259,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn projects_create_list_delete() {
+        let app = router(test_state().await);
+        // create
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&json!({"name":"p1"})).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let p: crate::meta_store::Project =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(p.name, "p1");
+
+        // list
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/projects").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let listed: Vec<crate::meta_store::Project> =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(listed.len(), 1);
+
+        // duplicate is 409
+        let dup = app
+            .clone()
+            .oneshot(
+                Request::post("/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&json!({"name":"p1"})).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dup.status(), StatusCode::CONFLICT);
+
+        // delete
+        let del = app
+            .oneshot(
+                Request::delete(format!("/projects/{}", p.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
     }
 }
