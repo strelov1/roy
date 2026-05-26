@@ -89,30 +89,49 @@ impl InboundDispatcher {
 
         // Binding writes: only on success when we deliberately Spawned a
         // sticky/persistent session.
-        if matches!(result.outcome_kind, OutcomeKind::Ok) {
-            if let (Some(pb), Some(sid)) = (pending, result.session_id.as_ref()) {
-                self.bindings
-                    .upsert(
-                        &pb.source_id,
-                        &pb.sender_id,
-                        &pb.agent_id,
-                        pb.strategy_db_label,
-                        sid,
-                    )
-                    .await?;
-            } else if was_resume {
-                // Touch the existing binding row so last_active_at moves forward.
-                // Touch the per-sender row first; if absent, try the persistent_one wildcard row.
+        match &result.outcome_kind {
+            OutcomeKind::Ok => {
+                if let (Some(pb), Some(sid)) = (pending, result.session_id.as_ref()) {
+                    self.bindings
+                        .upsert(
+                            &pb.source_id,
+                            &pb.sender_id,
+                            &pb.agent_id,
+                            pb.strategy_db_label,
+                            sid,
+                        )
+                        .await?;
+                } else if was_resume {
+                    // Touch the existing binding so last_active_at moves forward.
+                    if let Some(b) = self
+                        .bindings
+                        .lookup(&event.source_id, &event.sender_id)
+                        .await?
+                    {
+                        self.bindings.touch(&b.id).await?;
+                    } else if let Some(b) = self.bindings.lookup(&event.source_id, "*").await? {
+                        self.bindings.touch(&b.id).await?;
+                    }
+                }
+            }
+            // Stale-binding cleanup: a NoSession on a Resume means the
+            // persisted session id is dead. Delete the row so the next event
+            // from the same sender re-Spawns instead of hitting the same
+            // dead id forever. The current event's reply was already
+            // delivered as DaemonError by the hook — silent in-fire retry
+            // is documented as deferred (spec Open Q §6).
+            OutcomeKind::DaemonError(code) if code == "no_session" && was_resume => {
                 if let Some(b) = self
                     .bindings
                     .lookup(&event.source_id, &event.sender_id)
                     .await?
                 {
-                    self.bindings.touch(&b.id).await?;
+                    self.bindings.delete(&b.id).await?;
                 } else if let Some(b) = self.bindings.lookup(&event.source_id, "*").await? {
-                    self.bindings.touch(&b.id).await?;
+                    self.bindings.delete(&b.id).await?;
                 }
             }
+            _ => {}
         }
 
         Ok(())

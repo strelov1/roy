@@ -450,7 +450,7 @@ no graceful degradation):
 | Router returns None | reply hook invoked with `RouteRejected`. Webhook reply hook sends HTTP 404. |
 | Daemon socket open fails | `on_finish(DaemonError{...})`, binding not written |
 | Daemon returns error in stream | `on_finish(DaemonError{...})`, binding not written |
-| Daemon returns NoSession on Resume | dispatcher clears binding row, retries once as Spawn, then proceeds as usual |
+| Daemon returns NoSession on Resume | v1: hook delivers `DaemonError{code:no_session}` to the caller; dispatcher deletes the stale binding so the next event from the same sender re-Spawns clean. Silent in-fire retry (re-Spawn + new reply on the same request) is deferred — see Open question §6. |
 | Fire timeout (configurable per source, default 600s) | `on_finish(Timeout{partial_text})`, binding not written |
 | ReplyHook returns Err | logged at error level, dispatcher continues with next event |
 | ReplyHook panic | logged at error level, dispatcher continues |
@@ -509,3 +509,14 @@ implementation plan:
    the next event from that sender sees the expired row and triggers a
    fresh Spawn. Out-of-band sweep can be added with a periodic task in
    the dispatcher if storage growth becomes a concern.
+6. **NoSession silent retry**. v1 cannot transparently retry on a Resume
+   that hits a missing session because the oneshot `ReplyHandle` is
+   consumed by the first hook call. The dispatcher delivers
+   `DaemonError{code:no_session}` to the caller and deletes the stale
+   binding so the next event from the same sender re-Spawns clean — but
+   that one request still sees an error. To make the retry transparent
+   we'd need either (a) a reply pre-flight that doesn't commit the
+   oneshot until the dispatcher confirms a terminal outcome, or (b) a
+   non-oneshot reply primitive (channel) so multiple `on_finish` calls
+   during retries are coalesced. Revisit when the second sticky channel
+   (telegram-CS or email) lands.

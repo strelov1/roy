@@ -140,7 +140,7 @@ async fn handle(
         }
     }
 
-    let payload = build_payload(&method, &headers, &body);
+    let payload = build_payload(&method, &path, &headers, &body);
     let sender_id = extract_sender(&headers).unwrap_or_else(|| "anon".into());
     let id = Uuid::new_v4();
 
@@ -162,13 +162,24 @@ async fn handle(
         reply,
     };
 
-    if state.bus.send(ev).await.is_err() {
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(axum::body::Body::from(
-                r#"{"ok":false,"error":"bus_closed"}"#,
-            ))
-            .unwrap();
+    // Bus push with a 5s timeout — spec'd to surface backpressure to the
+    // caller as 503 rather than block indefinitely.
+    match tokio::time::timeout(Duration::from_secs(5), state.bus.send(ev)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(axum::body::Body::from(
+                    r#"{"ok":false,"error":"bus_closed"}"#,
+                ))
+                .unwrap();
+        }
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(axum::body::Body::from(r#"{"ok":false,"error":"bus_full"}"#))
+                .unwrap();
+        }
     }
 
     match rx {
@@ -196,7 +207,12 @@ async fn handle(
     }
 }
 
-fn build_payload(method: &Method, headers: &HeaderMap, body: &Bytes) -> serde_json::Value {
+fn build_payload(
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> serde_json::Value {
     let mut hdr_map = serde_json::Map::new();
     for (k, v) in headers.iter() {
         if let Ok(v_str) = v.to_str() {
@@ -210,6 +226,7 @@ fn build_payload(method: &Method, headers: &HeaderMap, body: &Bytes) -> serde_js
         .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(body).into_owned()));
     serde_json::json!({
         "method": method.as_str(),
+        "path": path,
         "headers": serde_json::Value::Object(hdr_map),
         "body": body_json,
     })
