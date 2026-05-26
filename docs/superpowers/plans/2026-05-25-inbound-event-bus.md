@@ -1165,7 +1165,6 @@ Replace the body of `SessionResolver::resolve`:
     ) -> Result<(FireTarget, Option<PendingBinding>)> {
         let spawn_target = || FireTarget::Spawn {
             preset: self.preset.clone(),
-            project_id: None,
             system_prompt: None,
         };
 
@@ -1950,7 +1949,7 @@ mod tests {
         let (tx, _rx) = oneshot::channel::<crate::bus::HttpReply>();
         let result = fire_with_hook(
             &p,
-            FireTarget::Spawn { preset: "claude".into(), project_id: None, system_prompt: None },
+            FireTarget::Spawn { preset: "claude".into(), system_prompt: None },
             "hello".into(),
             Default::default(),
             std::time::Duration::from_secs(5),
@@ -1978,7 +1977,7 @@ mod tests {
         let hook = Box::new(CapturingHook { captured: captured.clone() });
         let (tx, _rx) = oneshot::channel::<crate::bus::HttpReply>();
         let result = fire_with_hook(
-            &p, FireTarget::Spawn { preset: "claude".into(), project_id: None, system_prompt: None },
+            &p, FireTarget::Spawn { preset: "claude".into(), system_prompt: None },
             "x".into(), Default::default(), std::time::Duration::from_secs(5),
             hook, crate::bus::ReplyHandle::HttpSync(tx)).await.unwrap();
         assert_eq!(result.outcome_kind, OutcomeKind::DaemonError("no_session".into()));
@@ -2168,7 +2167,6 @@ The router needs the *full* event (payload + ids); rebind to keep the event arou
                 }
                 let fresh_target = FireTarget::Spawn {
                     preset: "claude".into(),
-                    project_id: None,
                     system_prompt: None,
                 };
                 // ReplyHandle was consumed already — no retry of the reply is possible.
