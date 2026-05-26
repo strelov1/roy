@@ -187,3 +187,114 @@ async fn login_rate_limit_blocks_after_5_failures() {
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     std::env::remove_var("ROY_TRUSTED_PROXIES");
 }
+
+#[serial_test::serial]
+#[tokio::test]
+async fn create_team_then_list_returns_it() {
+    let (app, pool, _ws) = test_app().await;
+    let _alice = roy_auth::test_support::make_user(&pool, "alice").await;
+    let cookie = login_as(&app, "alice", "test-password-1234").await;
+
+    let body = serde_json::to_vec(&serde_json::json!({"name":"eng"})).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/teams")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .oneshot(
+            Request::get("/teams")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v[0]["name"], "eng");
+    assert_eq!(v[0]["role"], "owner");
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn invite_create_then_accept_adds_member() {
+    let (app, pool, _ws) = test_app().await;
+    let _alice = roy_auth::test_support::make_user(&pool, "alice").await;
+    let _bob = roy_auth::test_support::make_user(&pool, "bob").await;
+    let cookie_a = login_as(&app, "alice", "test-password-1234").await;
+    let cookie_b = login_as(&app, "bob", "test-password-1234").await;
+
+    // alice creates team
+    let body = serde_json::to_vec(&serde_json::json!({"name":"eng"})).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/teams")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie_a)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let team: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let team_id = team["id"].as_str().unwrap().to_string();
+
+    // alice creates invite
+    let body = serde_json::to_vec(&serde_json::json!({"team_id": team_id})).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/auth/invites")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie_a)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let inv: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let token = inv["token"].as_str().unwrap().to_string();
+
+    // bob accepts
+    let body = serde_json::to_vec(&serde_json::json!({"token": token})).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/auth/accept-invite")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie_b)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // /auth/me for bob now shows the team
+    let resp = app
+        .oneshot(
+            Request::get("/auth/me")
+                .header("cookie", &cookie_b)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let me: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(me["teams"][0]["id"], team_id);
+}

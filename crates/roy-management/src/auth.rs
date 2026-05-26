@@ -26,10 +26,11 @@ use axum::{
 };
 use roy_auth::{
     cookie::{verify_cookie, COOKIE_NAME},
+    invite_store::InviteStore,
     jwt::{secret_from_env, sign_session},
     password::{verify_password, DUMMY_HASH},
     team_store::TeamStore,
-    types::UserProfile,
+    types::{NewTeam, UserProfile},
     user_store::UserStore,
 };
 use serde::Deserialize;
@@ -207,5 +208,145 @@ async fn profile_for(state: &AppState, user_id: &str) -> UserProfile {
         display_name: user.display_name,
         timezone: user.timezone,
         teams,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateTeamReq {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+pub async fn list_teams(
+    axum::extract::Extension(AuthUser(uid)): axum::extract::Extension<AuthUser>,
+    State(state): State<AppState>,
+) -> Response {
+    match TeamStore::new(state.pool.clone()).list_for_user(&uid).await {
+        Ok(teams) => Json(teams).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "list teams");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn create_team(
+    axum::extract::Extension(AuthUser(uid)): axum::extract::Extension<AuthUser>,
+    State(state): State<AppState>,
+    Json(req): Json<CreateTeamReq>,
+) -> Response {
+    match TeamStore::new(state.pool.clone())
+        .create(
+            NewTeam {
+                name: req.name,
+                description: req.description,
+            },
+            &uid,
+        )
+        .await
+    {
+        Ok(team) => Json(team).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "create team");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn delete_team(
+    axum::extract::Extension(AuthUser(uid)): axum::extract::Extension<AuthUser>,
+    State(state): State<AppState>,
+    axum::extract::Path(team_id): axum::extract::Path<String>,
+) -> Response {
+    if roy_auth::Acl::new(&state.pool, &uid)
+        .can_admin_team(&team_id)
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "forbidden"})),
+        )
+            .into_response();
+    }
+    match TeamStore::new(state.pool.clone()).delete(&team_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal"})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateInviteReq {
+    team_id: String,
+    #[serde(default)]
+    expires_at: Option<i64>,
+}
+
+pub async fn create_invite(
+    axum::extract::Extension(AuthUser(uid)): axum::extract::Extension<AuthUser>,
+    State(state): State<AppState>,
+    Json(req): Json<CreateInviteReq>,
+) -> Response {
+    if roy_auth::Acl::new(&state.pool, &uid)
+        .can_admin_team(&req.team_id)
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "forbidden"})),
+        )
+            .into_response();
+    }
+    match InviteStore::new(state.pool.clone())
+        .create(&req.team_id, &uid, req.expires_at)
+        .await
+    {
+        Ok(inv) => Json(serde_json::json!({
+            "token": inv.token,
+            "team_id": inv.team_id,
+        }))
+        .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal"})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AcceptInviteReq {
+    token: String,
+}
+
+pub async fn accept_invite(
+    axum::extract::Extension(AuthUser(uid)): axum::extract::Extension<AuthUser>,
+    State(state): State<AppState>,
+    Json(req): Json<AcceptInviteReq>,
+) -> Response {
+    match InviteStore::new(state.pool.clone())
+        .accept(&req.token, &uid)
+        .await
+    {
+        Ok(team_id) => Json(serde_json::json!({"team_id": team_id})).into_response(),
+        Err(_) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invite invalid"})),
+        )
+            .into_response(),
     }
 }

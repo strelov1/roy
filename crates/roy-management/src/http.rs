@@ -75,6 +75,10 @@ pub fn router(state: AppState) -> Router {
         .route("/scheduler/agents", get(list_scheduler_agents))
         .route("/scheduler/triggers", get(list_scheduler_triggers))
         .route("/scheduler/fires", get(list_scheduler_fires))
+        .route("/teams", get(auth::list_teams).post(auth::create_team))
+        .route("/teams/{id}", axum::routing::delete(auth::delete_team))
+        .route("/auth/invites", post(auth::create_invite))
+        .route("/auth/accept-invite", post(auth::accept_invite))
         .merge(auth::protected_router())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
