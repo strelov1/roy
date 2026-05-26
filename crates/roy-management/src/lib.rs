@@ -2,6 +2,7 @@
 //! The bin is a thin clap-driven entrypoint over these modules; integration
 //! tests link this library directly to exercise the real wire code paths.
 
+pub mod bootstrap;
 pub mod http;
 pub mod meta_store;
 pub mod orphan_sweep;
@@ -36,6 +37,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     meta_store::MetaStore::apply_migrations(&pool).await?;
     roy_auth::apply_migrations(&pool).await?;
+    bootstrap::ensure_root(&pool).await?;
     let socket = args.socket.unwrap_or_else(default_socket);
     let workspace_dir = meta_store::default_workspace_dir();
     std::fs::create_dir_all(&workspace_dir)?;

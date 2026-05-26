@@ -28,6 +28,8 @@ async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 thiserror = "2"
+rand = "0.8"
+hex = "0.4"
 
 [dev-dependencies]
 roy-auth = { path = "../roy-auth", features = ["test-support"] }
