@@ -475,7 +475,7 @@ async fn create_session(
     std::fs::create_dir_all(&cwd)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir cwd: {e}")))?;
 
-    let sid = s
+    let sid = match s
         .daemon
         .spawn(crate::roy_client::SpawnRequest {
             agent: req.agent.clone(),
@@ -485,7 +485,19 @@ async fn create_session(
             system_prompt: req.system_prompt.clone(),
         })
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("daemon: {e}")))?;
+    {
+        Ok(sid) => sid,
+        Err(e) => {
+            // Cleanup: the cwd directory was just mkdir'd for this session.
+            // Remove it so the workspace doesn't accumulate orphans on
+            // transient daemon failures. Ignore cleanup errors — we're
+            // already in an error path and the workspace might be RO.
+            if let Err(rm_err) = std::fs::remove_dir_all(&cwd) {
+                tracing::warn!(error = %rm_err, cwd = %cwd.display(), "failed to cleanup cwd after spawn failure");
+            }
+            return Err(ApiError(StatusCode::BAD_GATEWAY, format!("daemon: {e}")));
+        }
+    };
 
     let meta = crate::meta_store::SessionMeta {
         session_id: sid.clone(),
@@ -501,11 +513,15 @@ async fn create_session(
     if let Err(meta_err) = s.meta.upsert_session_meta(&meta).await {
         // Compensating action: the daemon already spawned the session, but
         // we couldn't persist metadata. Close the orphaned session so it
-        // doesn't leak. Log the close error if it also fails, but propagate
-        // the original meta error to the caller.
+        // doesn't leak, and remove the cwd directory we just mkdir'd. Log
+        // the close error if it also fails, but propagate the original
+        // meta error to the caller.
         tracing::error!(error = %meta_err, session = %sid, "meta persist failed; closing session");
         if let Err(close_err) = s.daemon.close(&sid).await {
             tracing::error!(error = %close_err, session = %sid, "compensating close failed");
+        }
+        if let Err(rm_err) = std::fs::remove_dir_all(&cwd) {
+            tracing::warn!(error = %rm_err, cwd = %cwd.display(), "failed to cleanup cwd after meta failure");
         }
         return Err(ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,

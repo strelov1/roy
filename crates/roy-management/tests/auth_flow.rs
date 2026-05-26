@@ -25,7 +25,7 @@ async fn bootstrap_creates_user_when_table_empty() {
     assert_eq!(user.username, "root");
 }
 
-async fn test_app() -> (axum::Router, sqlx::SqlitePool) {
+async fn test_app() -> (axum::Router, sqlx::SqlitePool, std::path::PathBuf) {
     std::env::set_var("ROY_JWT_SECRET", TEST_JWT_SECRET);
     // Use `roy_agents::open` so the shared `agents.db` gets the full migration
     // stack (roy-agents v1-v3 + roy-management v4+) before roy-auth's
@@ -56,16 +56,16 @@ async fn test_app() -> (axum::Router, sqlx::SqlitePool) {
         socket_path: std::path::PathBuf::from("/tmp/fake.sock"),
         scheduler_pool: None,
         pool: pool.clone(),
-        workspace_dir,
+        workspace_dir: workspace_dir.clone(),
         login_limiter: std::sync::Arc::new(roy_management::rate_limit::LoginLimiter::default()),
     };
-    (router_for_tests(state), pool)
+    (router_for_tests(state), pool, workspace_dir)
 }
 
 #[serial_test::serial]
 #[tokio::test]
 async fn login_sets_cookie_then_me_returns_profile() {
-    let (app, pool) = test_app().await;
+    let (app, pool, _ws) = test_app().await;
     let _alice = roy_auth::test_support::make_user(&pool, "alice").await;
 
     let body = serde_json::to_vec(
@@ -110,7 +110,7 @@ async fn login_sets_cookie_then_me_returns_profile() {
 #[serial_test::serial]
 #[tokio::test]
 async fn me_without_cookie_is_unauthorized() {
-    let (app, _pool) = test_app().await;
+    let (app, _pool, _ws) = test_app().await;
     let resp = app
         .oneshot(Request::get("/auth/me").body(Body::empty()).unwrap())
         .await
@@ -121,7 +121,7 @@ async fn me_without_cookie_is_unauthorized() {
 #[serial_test::serial]
 #[tokio::test]
 async fn login_wrong_password_is_401() {
-    let (app, pool) = test_app().await;
+    let (app, pool, _ws) = test_app().await;
     let _ = roy_auth::test_support::make_user(&pool, "alice").await;
     let body =
         serde_json::to_vec(&serde_json::json!({"username":"alice","password":"WRONG-PASSWORD"}))
@@ -162,15 +162,14 @@ async fn login_as(app: &axum::Router, username: &str, password: &str) -> String 
 
 /// End-to-end: a logged-in user POSTs /sessions; the handler runs ACL
 /// checks, resolves a per-scope cwd under `users/<uid>/sessions/<sid>`,
-/// mkdir's it, persists session_meta, and returns 201. Asserting on the
-/// cwd path inside the MockDaemonClient would require downcasting through
-/// `Arc<dyn DaemonClient>`, which is awkward; the 201 plus a passing
-/// auth/ACL chain is sufficient signal that the full flow succeeded.
+/// mkdir's it, persists session_meta, and returns 201. Verify the cwd
+/// landed under `<workspace>/users/<uid>/` by walking the filesystem —
+/// exactly one session directory should exist there after the POST.
 #[serial_test::serial]
 #[tokio::test]
 async fn create_session_cwd_is_under_user_dir() {
-    let (app, pool) = test_app().await;
-    let _alice = roy_auth::test_support::make_user(&pool, "alice").await;
+    let (app, pool, workspace_dir) = test_app().await;
+    let alice = roy_auth::test_support::make_user(&pool, "alice").await;
     let cookie = login_as(&app, "alice", "test-password-1234").await;
 
     let body = serde_json::to_vec(&serde_json::json!({
@@ -194,13 +193,27 @@ async fn create_session_cwd_is_under_user_dir() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v["session_id"], "sess-1");
+
+    // Exactly one session directory should exist under
+    // <workspace>/users/<alice.id>/sessions/.
+    let sessions_dir = workspace_dir.join("users").join(&alice.id).join("sessions");
+    let entries: Vec<_> = std::fs::read_dir(&sessions_dir)
+        .unwrap_or_else(|e| panic!("read_dir {sessions_dir:?}: {e}"))
+        .map(|e| e.unwrap())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one session dir under {sessions_dir:?}, got {entries:?}"
+    );
+    assert!(entries[0].file_type().unwrap().is_dir());
 }
 
 #[serial_test::serial]
 #[tokio::test]
 async fn login_rate_limit_blocks_after_5_failures() {
     std::env::set_var("ROY_TRUSTED_PROXIES", "*");
-    let (app, _pool) = test_app().await;
+    let (app, _pool, _ws) = test_app().await;
     for _ in 0..5 {
         let body =
             serde_json::to_vec(&serde_json::json!({"username":"nope","password":"nope"})).unwrap();
