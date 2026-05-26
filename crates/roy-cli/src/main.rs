@@ -116,9 +116,26 @@ enum AuthCmd {
     Login,
     /// Show the currently-authenticated user (calls /auth/me with saved cookie).
     Whoami,
+    /// Provision a new user directly in the agents DB. No server / no current
+    /// session needed — local-DB-access is the credential. Password resolution
+    /// order: --password, $ROY_NEW_PASSWORD, piped stdin, interactive prompt.
+    Create {
+        username: String,
+        /// Display name shown in UIs. Defaults to the username.
+        #[arg(long)]
+        display_name: Option<String>,
+        /// Password (visible in `ps` — prefer piping or interactive prompt).
+        #[arg(long)]
+        password: Option<String>,
+    },
     /// Reset a user's password directly in the agents DB. No login required —
     /// this is the local escape hatch when no one can sign in.
-    Reset { username: String },
+    Reset {
+        username: String,
+        /// Password (visible in `ps` — prefer piping or interactive prompt).
+        #[arg(long)]
+        password: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -436,7 +453,17 @@ async fn cmd_auth(args: AuthArgs) -> anyhow::Result<ExitCode> {
     match args.cmd {
         AuthCmd::Login => crate::auth::login(&args.api).await?,
         AuthCmd::Whoami => crate::auth::whoami(&args.api).await?,
-        AuthCmd::Reset { username } => crate::auth::reset_password(&username).await?,
+        AuthCmd::Create {
+            username,
+            display_name,
+            password,
+        } => {
+            crate::auth::create_user(&username, display_name.as_deref(), password.as_deref())
+                .await?
+        }
+        AuthCmd::Reset { username, password } => {
+            crate::auth::reset_password(&username, password.as_deref()).await?
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
