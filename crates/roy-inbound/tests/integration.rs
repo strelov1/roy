@@ -148,3 +148,177 @@ reply_mode = "sync"
     cancel.cancel();
     let _ = tokio::join!(h_disp, h_pub);
 }
+
+/// Mock daemon that accepts N successive Fire connections and replies with
+/// the script in order.
+async fn spawn_mock_daemon_seq(path: PathBuf, replies: Vec<ServerEvent>) {
+    let listener = UnixListener::bind(&path).unwrap();
+    tokio::spawn(async move {
+        for reply in replies {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (rd, mut wr) = sock.into_split();
+            let mut lines = BufReader::new(rd).lines();
+            let _ = lines.next_line().await.unwrap();
+            let line = serde_json::to_string(&reply).unwrap();
+            wr.write_all(line.as_bytes()).await.unwrap();
+            wr.write_all(b"\n").await.unwrap();
+        }
+    });
+}
+
+/// First POST spawns + writes binding; second POST resumes; binding
+/// last_active_at is updated. Covers the sticky-session flow end-to-end.
+#[tokio::test]
+async fn webhook_sticky_session_resumes_second_post() {
+    let dir = tempdir().unwrap();
+    let sock_path = dir.path().join("daemon.sock");
+
+    spawn_mock_daemon_seq(
+        sock_path.clone(),
+        vec![
+            ServerEvent::FireDone {
+                session: "sid-first".into(),
+                seq_range: (1, 3),
+                result: TurnEvent::Result {
+                    cost_usd: None,
+                    stop_reason: StopReason::EndTurn,
+                },
+                assistant_text: "hi-1".into(),
+            },
+            ServerEvent::FireDone {
+                session: "sid-first".into(),
+                seq_range: (4, 6),
+                result: TurnEvent::Result {
+                    cost_usd: None,
+                    stop_reason: StopReason::EndTurn,
+                },
+                assistant_text: "hi-2".into(),
+            },
+        ],
+    )
+    .await;
+
+    let pool = db::open(&dir.path().join("inbound.db")).await.unwrap();
+    let bindings = Arc::new(BindingStore::new(pool));
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let toml_cfg = format!(
+        r#"
+[server]
+bind = "127.0.0.1:{port}"
+
+[[sources]]
+id = "support"
+kind = "webhook"
+agent_id = "support-bot"
+session = {{ kind = "per_sender_sticky", idle_timeout_secs = 3600 }}
+template = "Msg: {{{{payload.body.text}}}}"
+fire_timeout_secs = 5
+[sources.webhook]
+path = "/support"
+reply_mode = "sync"
+"#
+    );
+    let cfg_path = dir.path().join("c.toml");
+    std::fs::write(&cfg_path, toml_cfg).unwrap();
+    let cfg = roy_inbound::config::InboundConfig::load(&cfg_path).unwrap();
+
+    let (tx, rx) = bus::channel(16);
+    let mut hooks = ReplyHookRegistry::new();
+    hooks.register(
+        "webhook",
+        Box::new(|ev: &EventRef| -> Box<dyn ReplyHook> {
+            Box::new(
+                roy_inbound::channels::webhook::reply::WebhookReplyHook::new(ev.id.to_string()),
+            )
+        }),
+    );
+    let hooks = Arc::new(hooks);
+    let router: Arc<dyn Router> = Arc::new(ConfigRouter::from_config(&cfg));
+    let resolver = SessionResolver::new(bindings.clone(), "claude".into());
+
+    let dispatcher = InboundDispatcher {
+        bus: rx,
+        router,
+        resolver,
+        bindings: bindings.clone(),
+        hooks: hooks.clone(),
+        socket_path: sock_path.clone(),
+    };
+
+    let webhook = Arc::new(
+        WebhookPublisher::new(
+            format!("127.0.0.1:{port}").parse().unwrap(),
+            vec![WebhookSourceSpec {
+                source_id: "support".into(),
+                config: WebhookConfig {
+                    path: "/support".into(),
+                    secret_env: None,
+                    reply_mode: roy_inbound::channels::webhook::config::ReplyMode::Sync,
+                },
+            }],
+        )
+        .unwrap(),
+    );
+
+    let cancel = CancellationToken::new();
+    let cd = cancel.clone();
+    let cp = cancel.clone();
+    let h_disp = tokio::spawn(async move { dispatcher.run(cd).await.ok() });
+    let h_pub = tokio::spawn(async move { webhook.run(tx, cp).await.ok() });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let client = reqwest::Client::new();
+
+    // First POST — should Spawn + write binding.
+    let r1 = client
+        .post(format!("http://127.0.0.1:{port}/support"))
+        .header("x-forwarded-for", "alice")
+        .json(&serde_json::json!({"text": "first"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), 200);
+
+    let b1 = bindings.lookup("support", "alice").await.unwrap();
+    assert!(b1.is_some(), "binding should exist after first POST");
+    let b1 = b1.unwrap();
+    assert_eq!(b1.session_id, "sid-first");
+    let first_active = b1.last_active_at;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Second POST — should Resume on the same session id and touch the binding.
+    let r2 = client
+        .post(format!("http://127.0.0.1:{port}/support"))
+        .header("x-forwarded-for", "alice")
+        .json(&serde_json::json!({"text": "second"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), 200);
+
+    // The HTTP reply is sent inside `on_finish` (via the oneshot) before the
+    // dispatcher does the post-fire `touch`. Poll the binding briefly.
+    let mut b2 = bindings.lookup("support", "alice").await.unwrap().unwrap();
+    for _ in 0..40 {
+        if b2.last_active_at > first_active {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        b2 = bindings.lookup("support", "alice").await.unwrap().unwrap();
+    }
+    assert_eq!(b2.id, b1.id, "binding row id must be stable across resumes");
+    assert_eq!(b2.session_id, "sid-first");
+    assert!(
+        b2.last_active_at > first_active,
+        "last_active_at must advance on Resume",
+    );
+
+    cancel.cancel();
+    let _ = tokio::join!(h_disp, h_pub);
+}

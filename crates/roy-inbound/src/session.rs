@@ -97,16 +97,6 @@ impl From<&SessionStrategyConfig> for SessionStrategy {
     }
 }
 
-impl SessionStrategy {
-    fn db_label(&self) -> &'static str {
-        match self {
-            Self::Ephemeral => "ephemeral",
-            Self::PersistentOne => "persistent_one",
-            Self::PerSenderSticky { .. } => "per_sender_sticky",
-        }
-    }
-}
-
 pub struct SessionResolver {
     bindings: Arc<BindingStore>,
     preset: String,
