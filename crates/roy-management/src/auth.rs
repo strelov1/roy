@@ -31,7 +31,7 @@ use roy_auth::{
     password::{verify_password, DUMMY_HASH},
     team_store::TeamStore,
     types::{NewTeam, UserProfile},
-    user_store::UserStore,
+    user_store::{UserStore, UserStoreError},
 };
 use serde::Deserialize;
 
@@ -97,8 +97,15 @@ pub async fn require_user(
 /// we trust the first entry of `X-Forwarded-For` (typical reverse-proxy
 /// deployment). Otherwise we fall back to a fixed loopback address — axum's
 /// `tower::Service`-level tests don't carry a real peer IP, and pinning to
-/// loopback is the only sensible bucket for direct, untrusted-header traffic.
-fn extract_ip(headers: &HeaderMap, trust_proxies: bool) -> std::net::IpAddr {
+/// Resolve the client IP for rate-limit bucketing. Preference order:
+///   1. `X-Forwarded-For` (only when `ROY_TRUSTED_PROXIES` is set)
+///   2. The actual TCP peer address (axum `ConnectInfo`)
+///   3. Loopback (only reachable from tower-level tests with no peer info)
+fn extract_ip(
+    headers: &HeaderMap,
+    trust_proxies: bool,
+    peer: Option<std::net::SocketAddr>,
+) -> std::net::IpAddr {
     if trust_proxies {
         if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             if let Some(first) = xff.split(',').next() {
@@ -108,16 +115,20 @@ fn extract_ip(headers: &HeaderMap, trust_proxies: bool) -> std::net::IpAddr {
             }
         }
     }
+    if let Some(addr) = peer {
+        return addr.ip();
+    }
     std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
 }
 
-async fn login(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<LoginReq>,
-) -> Response {
+async fn login(State(state): State<AppState>, req: axum::extract::Request<Body>) -> Response {
+    let (parts, body) = req.into_parts();
+    let peer = parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0);
     let trust = std::env::var("ROY_TRUSTED_PROXIES").is_ok();
-    let ip = extract_ip(&headers, trust);
+    let ip = extract_ip(&parts.headers, trust, peer);
     if !state.login_limiter.check(ip) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -125,6 +136,26 @@ async fn login(
         )
             .into_response();
     }
+    let bytes = match axum::body::to_bytes(body, 16 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid body"})),
+            )
+                .into_response()
+        }
+    };
+    let req: LoginReq = match serde_json::from_slice(&bytes) {
+        Ok(r) => r,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid body"})),
+            )
+                .into_response()
+        }
+    };
     let secret = match secret_from_env() {
         Ok(s) => s,
         Err(_) => {
@@ -171,7 +202,10 @@ async fn login(
         "{COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={COOKIE_MAX_AGE}{}",
         if secure { "; Secure" } else { "" },
     );
-    let profile = profile_for(&state, &user.id).await;
+    let profile = match profile_for(&state, &user.id).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
     let mut resp = Json(profile).into_response();
     resp.headers_mut()
         .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
@@ -190,25 +224,45 @@ async fn me(
     axum::extract::Extension(AuthUser(uid)): axum::extract::Extension<AuthUser>,
     State(state): State<AppState>,
 ) -> Response {
-    Json(profile_for(&state, &uid).await).into_response()
+    match profile_for(&state, &uid).await {
+        Ok(p) => Json(p).into_response(),
+        Err(r) => r,
+    }
 }
 
-async fn profile_for(state: &AppState, user_id: &str) -> UserProfile {
+/// Build the user's profile. A deleted user with a still-valid JWT (live
+/// 7-day cookie + admin removed the row) maps to 401, forcing re-login.
+/// Other DB errors collapse to 500.
+async fn profile_for(state: &AppState, user_id: &str) -> Result<UserProfile, Response> {
     let user = UserStore::new(state.pool.clone())
         .get(user_id)
         .await
-        .expect("user gone");
+        .map_err(|e| match e {
+            UserStoreError::NotFound(_) => (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "session invalid"})),
+            )
+                .into_response(),
+            _ => {
+                tracing::warn!(error = %e, "profile_for user lookup");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "internal"})),
+                )
+                    .into_response()
+            }
+        })?;
     let teams = TeamStore::new(state.pool.clone())
         .list_for_user(user_id)
         .await
         .unwrap_or_default();
-    UserProfile {
+    Ok(UserProfile {
         id: user.id,
         username: user.username,
         display_name: user.display_name,
         timezone: user.timezone,
         teams,
-    }
+    })
 }
 
 #[derive(Deserialize)]
