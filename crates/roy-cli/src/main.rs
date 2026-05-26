@@ -72,6 +72,8 @@ enum Cmd {
     Scheduler(roy_scheduler::cli::Cli),
     /// Run the management HTTP API (agent CRUD + spawn endpoints).
     Management(roy_management::Args),
+    /// Start the inbound event bus (axum webhook server + dispatcher).
+    Inbound(roy_inbound::cli::Args),
     /// Inspect configured engines at `~/.config/roy/agents.toml`.
     Engines {
         #[command(subcommand)]
@@ -391,6 +393,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Gateway(args) => roy_gateway::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Scheduler(args) => roy_scheduler::cli::run(args).await,
         Cmd::Management(args) => roy_management::run(args).await.map(|()| ExitCode::SUCCESS),
+        Cmd::Inbound(args) => roy_inbound::cli::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Engines { cmd } => cmd_engines(cmd).await,
         Cmd::Agents { cmd } => cmd_agents(cmd).await,
         Cmd::Projects { cmd } => cmd_projects(cmd).await,
