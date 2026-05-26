@@ -2,7 +2,6 @@
 //! axum 0.8 path syntax uses `{id}` (not `:id`).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use axum::{
     extract::{Path, Query, State},
@@ -12,6 +11,7 @@ use axum::{
     Json, Router,
 };
 use roy_agents::{Agent, AgentUpdate, NewAgent, StoreError};
+use roy_auth::types::Scope;
 use roy_scheduler::{
     store as sched_store,
     types::{Agent as SchedulerAgent, Fire, Trigger},
@@ -388,10 +388,14 @@ async fn update_project(
 #[derive(serde::Deserialize, Default)]
 struct CreateSessionReq {
     agent: String,
+    /// "personal" (default) or "team". Determines whether the session's cwd
+    /// lives under `users/<uid>/` or `teams/<tid>/`.
+    #[serde(default = "default_scope_str")]
+    scope: String,
+    #[serde(default)]
+    team_id: Option<String>,
     #[serde(default)]
     project_id: Option<String>,
-    #[serde(default)]
-    cwd: Option<String>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -404,6 +408,10 @@ struct CreateSessionReq {
     tags: BTreeMap<String, String>,
 }
 
+fn default_scope_str() -> String {
+    "personal".into()
+}
+
 async fn create_session(
     axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
         crate::auth::AuthUser,
@@ -411,38 +419,67 @@ async fn create_session(
     State(s): State<AppState>,
     Json(req): Json<CreateSessionReq>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    // ACL: if a project is named, the caller must be able to access it. The
-    // full per-scope cwd resolution lands in C2; for B5 we only thread the
-    // authenticated user_id through and gate the project_id path.
+    // Parse scope. `team` requires `team_id`; anything else is invalid.
+    let scope = match req.scope.as_str() {
+        "personal" => Scope::Personal,
+        "team" => Scope::Team {
+            team_id: req.team_id.clone().ok_or(ApiError(
+                StatusCode::BAD_REQUEST,
+                "team_id required for team scope".into(),
+            ))?,
+        },
+        other => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("invalid scope: {other}"),
+            ));
+        }
+    };
+
+    // ACL: gate scope (team-membership check for team scope) and project_id.
+    // Both checks run before any FS write or DB write — `resolve_cwd` will
+    // mkdir parent dirs, so a forbidden caller must never get that far.
+    let acl = roy_auth::Acl::new(&s.pool, &user_id);
+    acl.can_access_scope(&scope)
+        .await
+        .map_err(|_| ApiError(StatusCode::FORBIDDEN, "forbidden".into()))?;
     if let Some(pid) = &req.project_id {
-        roy_auth::Acl::new(&s.pool, &user_id)
-            .can_access_project(pid)
-            .await
-            .map_err(|e| match e {
-                roy_auth::AclError::NotFound => {
-                    ApiError(StatusCode::BAD_REQUEST, format!("invalid project: {pid}"))
-                }
-                _ => ApiError(StatusCode::FORBIDDEN, "forbidden".into()),
-            })?;
+        acl.can_access_project(pid).await.map_err(|e| match e {
+            roy_auth::AclError::NotFound => {
+                ApiError(StatusCode::BAD_REQUEST, format!("invalid project: {pid}"))
+            }
+            _ => ApiError(StatusCode::FORBIDDEN, "forbidden".into()),
+        })?;
     }
 
-    // Resolve project_id -> cwd if provided; else use req.cwd verbatim.
-    let cwd: Option<PathBuf> = if let Some(pid) = &req.project_id {
-        let projects = s.meta.list_projects().await.map_err(meta_to_api)?;
-        let p = projects
-            .into_iter()
-            .find(|p| &p.id == pid)
-            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("invalid project: {pid}")))?;
-        Some(PathBuf::from(p.path))
-    } else {
-        req.cwd.clone().map(PathBuf::from)
+    // Resolve and materialize the per-scope cwd. The session_id used in the
+    // path is a fresh UUID — independent of the daemon-assigned session id we
+    // get back from `spawn`. The directory is the working directory the agent
+    // runs in; the daemon's id is the handle we expose on the wire.
+    let cwd_session_id = uuid::Uuid::new_v4().to_string();
+    let cwd_scope = match &scope {
+        Scope::Personal => crate::cwd::CwdScope::Personal,
+        Scope::Team { .. } => crate::cwd::CwdScope::Team,
     };
+    let cwd = crate::cwd::resolve_cwd(
+        &s.workspace_dir,
+        crate::cwd::CwdInput {
+            scope: cwd_scope,
+            user_id: user_id.clone(),
+            team_id: req.team_id.clone(),
+            project_id: req.project_id.clone(),
+            session_id: cwd_session_id,
+        },
+    )
+    .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    std::fs::create_dir_all(&cwd)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir cwd: {e}")))?;
 
     let sid = s
         .daemon
         .spawn(crate::roy_client::SpawnRequest {
             agent: req.agent.clone(),
-            cwd,
+            cwd: Some(cwd.clone()),
             model: req.model.clone(),
             permission: req.permission.clone(),
             system_prompt: req.system_prompt.clone(),
@@ -457,7 +494,7 @@ async fn create_session(
         agent_name: req.agent_name.clone(),
         display_label: None,
         created_by: user_id.clone(),
-        team_id: None,
+        team_id: req.team_id.clone(),
         tags: req.tags.clone(),
         created_at: chrono::Utc::now().timestamp(),
     };
@@ -613,6 +650,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use std::path::PathBuf;
     use tower::ServiceExt;
 
     /// Direct INSERT into `users` with id="root" to mirror B3's
@@ -658,6 +696,9 @@ mod tests {
         seed_root_user(&pool).await;
         let alice = roy_auth::test_support::make_user(&pool, "alice").await;
         let workspace = dir.path().join("workspace");
+        // resolve_cwd canonicalizes the workspace dir; it must exist on disk
+        // before create_session is invoked.
+        std::fs::create_dir_all(&workspace).unwrap();
         // Keep the temp dir alive for the test process lifetime — dropping it
         // would invalidate the SQLite file referenced by the pool.
         std::mem::forget(dir);
@@ -1102,6 +1143,7 @@ mod tests {
         roy_auth::apply_migrations(&pool).await.unwrap();
         seed_root_user(&pool).await;
         let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
         // Leak the tempdir: pool keeps reading from this file for the test.
         std::mem::forget(dir);
         AppState {
@@ -1269,6 +1311,7 @@ mod tests {
         roy_auth::apply_migrations(&agents_pool).await.unwrap();
         seed_root_user(&agents_pool).await;
         let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
         let sched_pool = roy_scheduler::db::open(&dir.path().join("scheduler.db"))
             .await
             .unwrap();

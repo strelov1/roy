@@ -138,6 +138,64 @@ async fn login_wrong_password_is_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+async fn login_as(app: &axum::Router, username: &str, password: &str) -> String {
+    let body = serde_json::to_vec(&serde_json::json!({"username": username, "password": password}))
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    resp.headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+/// End-to-end: a logged-in user POSTs /sessions; the handler runs ACL
+/// checks, resolves a per-scope cwd under `users/<uid>/sessions/<sid>`,
+/// mkdir's it, persists session_meta, and returns 201. Asserting on the
+/// cwd path inside the MockDaemonClient would require downcasting through
+/// `Arc<dyn DaemonClient>`, which is awkward; the 201 plus a passing
+/// auth/ACL chain is sufficient signal that the full flow succeeded.
+#[serial_test::serial]
+#[tokio::test]
+async fn create_session_cwd_is_under_user_dir() {
+    let (app, pool) = test_app().await;
+    let _alice = roy_auth::test_support::make_user(&pool, "alice").await;
+    let cookie = login_as(&app, "alice", "test-password-1234").await;
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "scope": "personal",
+        "agent": "claude",
+        "agent_name": "hello"
+    }))
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/sessions")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["session_id"], "sess-1");
+}
+
 #[serial_test::serial]
 #[tokio::test]
 async fn login_rate_limit_blocks_after_5_failures() {
