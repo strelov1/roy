@@ -137,6 +137,23 @@ impl AcpConfig {
             system_prompt_channel: SystemPromptChannel::Meta,
         }
     }
+
+    /// pi coding agent via the pi-acp adapter. The adapter is a standalone
+    /// binary (`npm install -g pi-acp`) that spawns `pi --mode rpc` under the
+    /// hood and bridges ACP↔stdio. No ACP modes. pi-acp does not currently
+    /// honor `_meta.systemPrompt`, so the persona is injected as a real first
+    /// turn instead.
+    pub fn pi() -> Self {
+        Self {
+            command: "pi-acp".to_string(),
+            args: Vec::new(),
+            mode_id: None,
+            permission_policy: PermissionPolicy::AllowAll,
+            open_timeout: Duration::from_secs(30),
+            env_remove: Vec::new(),
+            system_prompt_channel: SystemPromptChannel::FirstTurn,
+        }
+    }
 }
 
 pub struct AcpTransport {
@@ -722,6 +739,7 @@ mod tests {
         assert!(AcpConfig::gemini().env_remove.is_empty());
         assert!(AcpConfig::opencode().env_remove.is_empty());
         assert!(AcpConfig::codex().env_remove.is_empty());
+        assert!(AcpConfig::pi().env_remove.is_empty());
     }
 
     #[test]
@@ -731,6 +749,7 @@ mod tests {
         assert_eq!(AcpConfig::opencode().system_prompt_channel, Meta);
         assert_eq!(AcpConfig::gemini().system_prompt_channel, FirstTurn);
         assert_eq!(AcpConfig::codex().system_prompt_channel, FirstTurn);
+        assert_eq!(AcpConfig::pi().system_prompt_channel, FirstTurn);
     }
 
     #[test]

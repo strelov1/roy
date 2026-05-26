@@ -91,3 +91,27 @@
 # [[agent.models]]
 # id = "kimi/kimi-k2-0905-preview"
 # label = "Kimi K2 0905"
+
+# ---------- pi-acp (pi coding agent) ----------
+# Requires `npm install -g pi-acp` + provider API keys configured in `pi`.
+# Model ids are pi's "<provider>/<model>" patterns; run `pi --list-models`
+# to see what's actually available with your configured providers.
+# [[agent]]
+# preset = "pi"
+#
+# [[agent.models]]
+# id = "cerebras/gpt-oss-120b"
+# label = "GPT-OSS 120B (Cerebras)"
+# default = true
+#
+# [[agent.models]]
+# id = "cerebras/qwen-3-235b-a22b-instruct-2507"
+# label = "Qwen 3 235B (Cerebras)"
+#
+# [[agent.models]]
+# id = "cerebras/zai-glm-4.7"
+# label = "GLM 4.7 (Cerebras)"
+#
+# [[agent.models]]
+# id = "cerebras/llama3.1-8b"
+# label = "Llama 3.1 8B (Cerebras)"
