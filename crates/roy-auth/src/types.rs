@@ -60,10 +60,15 @@ pub struct TeamMembership {
     pub role: Role,
 }
 
-// --- Team-invite stub (untouched until Task A8) ---
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TeamInvite {
     pub token: String,
+    pub team_id: String,
+    pub created_by: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub accepted_by: Option<String>,
+    pub accepted_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
