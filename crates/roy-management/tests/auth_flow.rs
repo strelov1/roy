@@ -57,6 +57,7 @@ async fn test_app() -> (axum::Router, sqlx::SqlitePool) {
         scheduler_pool: None,
         pool: pool.clone(),
         workspace_dir,
+        login_limiter: std::sync::Arc::new(roy_management::rate_limit::LoginLimiter::default()),
     };
     (router_for_tests(state), pool)
 }
@@ -135,4 +136,41 @@ async fn login_wrong_password_is_401() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn login_rate_limit_blocks_after_5_failures() {
+    std::env::set_var("ROY_TRUSTED_PROXIES", "*");
+    let (app, _pool) = test_app().await;
+    for _ in 0..5 {
+        let body =
+            serde_json::to_vec(&serde_json::json!({"username":"nope","password":"nope"})).unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/auth/login")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", "1.2.3.4")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+    let body =
+        serde_json::to_vec(&serde_json::json!({"username":"nope","password":"nope"})).unwrap();
+    let resp = app
+        .oneshot(
+            Request::post("/auth/login")
+                .header("content-type", "application/json")
+                .header("x-forwarded-for", "1.2.3.4")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    std::env::remove_var("ROY_TRUSTED_PROXIES");
 }

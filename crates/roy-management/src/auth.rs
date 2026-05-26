@@ -92,11 +92,38 @@ pub async fn require_user(
     }
 }
 
+/// Resolve the client IP for rate-limiting. When `ROY_TRUSTED_PROXIES` is set
+/// we trust the first entry of `X-Forwarded-For` (typical reverse-proxy
+/// deployment). Otherwise we fall back to a fixed loopback address — axum's
+/// `tower::Service`-level tests don't carry a real peer IP, and pinning to
+/// loopback is the only sensible bucket for direct, untrusted-header traffic.
+fn extract_ip(headers: &HeaderMap, trust_proxies: bool) -> std::net::IpAddr {
+    if trust_proxies {
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = xff.split(',').next() {
+                if let Ok(ip) = first.trim().parse() {
+                    return ip;
+                }
+            }
+        }
+    }
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+}
+
 async fn login(
     State(state): State<AppState>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     Json(req): Json<LoginReq>,
 ) -> Response {
+    let trust = std::env::var("ROY_TRUSTED_PROXIES").is_ok();
+    let ip = extract_ip(&headers, trust);
+    if !state.login_limiter.check(ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "too many attempts"})),
+        )
+            .into_response();
+    }
     let secret = match secret_from_env() {
         Ok(s) => s,
         Err(_) => {

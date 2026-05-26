@@ -26,4 +26,9 @@ pub struct AppState {
     pub pool: SqlitePool,
     /// Workspace root for resolve_cwd (Phase C).
     pub workspace_dir: PathBuf,
+    /// In-memory token-bucket rate limiter for `POST /auth/login`. Process-
+    /// global state; resets on restart. Shared per-`AppState` via `Arc` so the
+    /// `Clone` derive on `AppState` keeps all clones pointing at the same
+    /// buckets.
+    pub login_limiter: Arc<crate::rate_limit::LoginLimiter>,
 }

@@ -669,6 +669,7 @@ mod tests {
             scheduler_pool: None,
             pool,
             workspace_dir: workspace,
+            login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
         };
         (state, alice.id)
     }
@@ -1111,6 +1112,7 @@ mod tests {
             scheduler_pool: None,
             pool,
             workspace_dir: workspace,
+            login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
         }
     }
 
@@ -1279,6 +1281,7 @@ mod tests {
             scheduler_pool: Some(sched_pool),
             pool: agents_pool,
             workspace_dir: workspace,
+            login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
         }
     }
 

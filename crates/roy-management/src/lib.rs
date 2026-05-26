@@ -7,6 +7,7 @@ pub mod bootstrap;
 pub mod http;
 pub mod meta_store;
 pub mod orphan_sweep;
+pub mod rate_limit;
 pub mod roy_client;
 pub mod state;
 
@@ -71,6 +72,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         scheduler_pool,
         pool,
         workspace_dir,
+        login_limiter: Arc::new(crate::rate_limit::LoginLimiter::default()),
     };
 
     orphan_sweep::spawn(state.meta.clone(), Arc::clone(&state.daemon));
