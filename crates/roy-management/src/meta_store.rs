@@ -135,6 +135,36 @@ impl MetaStore {
         Ok(())
     }
 
+    /// Rename a project. `name` is validated by `validate_project_name` (same
+    /// rules as `create_project`); a unique-violation surfaces as
+    /// `MetaError::Conflict`. The `path` is left untouched — the on-disk
+    /// workspace dir keeps its original name so existing sessions don't see
+    /// their `cwd` move out from under them.
+    pub async fn update_project(&self, id: &str, name: &str) -> Result<Project, MetaError> {
+        validate_project_name(name)?;
+        let result = sqlx::query_as::<_, (String, String, String, i64)>(
+            "UPDATE projects SET name = ? WHERE id = ? \
+             RETURNING id, name, path, created_at",
+        )
+        .bind(name)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await;
+        match result {
+            Ok(Some((id, name, path, created_at))) => Ok(Project {
+                id,
+                name,
+                path,
+                created_at,
+            }),
+            Ok(None) => Err(MetaError::NotFound(id.into())),
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => Err(MetaError::Conflict(
+                format!("project name already exists: {name}"),
+            )),
+            Err(e) => Err(MetaError::Db(e)),
+        }
+    }
+
     pub async fn upsert_session_meta(&self, meta: &SessionMeta) -> Result<(), MetaError> {
         let mut tx = self.pool.begin().await?;
 
@@ -437,6 +467,52 @@ mod tests {
             store.delete_project(&p.id).await,
             Err(MetaError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn update_project_renames_in_place() {
+        let store = fresh_store().await;
+        let p = store.create_project("old-name").await.unwrap();
+        let renamed = store.update_project(&p.id, "new-name").await.unwrap();
+        assert_eq!(renamed.id, p.id);
+        assert_eq!(renamed.name, "new-name");
+        // path stays unchanged — on-disk dir keeps its original name
+        assert_eq!(renamed.path, p.path);
+        assert_eq!(renamed.created_at, p.created_at);
+        let listed = store.list_projects().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "new-name");
+    }
+
+    #[tokio::test]
+    async fn update_project_unknown_id_is_not_found() {
+        let store = fresh_store().await;
+        let err = store
+            .update_project("nonexistent", "whatever")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MetaError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn update_project_invalid_name_rejected() {
+        let store = fresh_store().await;
+        let p = store.create_project("ok").await.unwrap();
+        for bad in ["", ".hidden", "has space", "has/slash"] {
+            assert!(matches!(
+                store.update_project(&p.id, bad).await,
+                Err(MetaError::Invalid(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn update_project_to_existing_name_is_conflict() {
+        let store = fresh_store().await;
+        store.create_project("a").await.unwrap();
+        let b = store.create_project("b").await.unwrap();
+        let err = store.update_project(&b.id, "a").await.unwrap_err();
+        assert!(matches!(err, MetaError::Conflict(_)));
     }
 
     /// `roy-agents` and `roy-management` share `_sqlx_migrations` and each

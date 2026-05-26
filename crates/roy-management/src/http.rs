@@ -59,7 +59,10 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/{id}/run", post(run_agent))
         .route("/presets", get(list_presets))
         .route("/projects", get(list_projects).post(create_project))
-        .route("/projects/{id}", axum::routing::delete(delete_project))
+        .route(
+            "/projects/{id}",
+            axum::routing::delete(delete_project).put(update_project),
+        )
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).patch(patch_session))
         .route("/sessions/{id}/tags", axum::routing::put(put_tags))
@@ -311,6 +314,23 @@ async fn delete_project(
 ) -> Result<StatusCode, ApiError> {
     s.meta.delete_project(&id).await.map_err(meta_to_api)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+struct ProjectUpdate {
+    name: String,
+}
+
+async fn update_project(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ProjectUpdate>,
+) -> Result<Json<crate::meta_store::Project>, ApiError> {
+    s.meta
+        .update_project(&id, &req.name)
+        .await
+        .map(Json)
+        .map_err(meta_to_api)
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -660,6 +680,111 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn project_put_renames_and_reflects_in_list() {
+        let app = router(test_state().await);
+        // create
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"name":"old"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let p: crate::meta_store::Project =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+        // PUT new name
+        let renamed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri(format!("/projects/{}", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"name":"shiny"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.status(), StatusCode::OK);
+        let renamed_body: crate::meta_store::Project =
+            serde_json::from_slice(&renamed.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(renamed_body.id, p.id);
+        assert_eq!(renamed_body.name, "shiny");
+
+        // GET list reflects new name
+        let resp = app
+            .oneshot(Request::get("/projects").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let listed: Vec<crate::meta_store::Project> =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "shiny");
+    }
+
+    #[tokio::test]
+    async fn project_put_empty_name_is_400() {
+        let app = router(test_state().await);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"name":"keep-me"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let p: crate::meta_store::Project =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+        let bad = app
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri(format!("/projects/{}", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&json!({"name":""})).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn project_put_unknown_id_is_404() {
+        let app = router(test_state().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri("/projects/nope")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"name":"x"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
