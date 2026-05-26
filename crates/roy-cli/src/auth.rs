@@ -12,6 +12,33 @@
 
 use std::path::PathBuf;
 
+/// Resolve a password value with graceful fallbacks. When `prompt_confirm` is
+/// true and the password isn't supplied non-interactively, the interactive
+/// prompt asks twice and verifies they match.
+fn resolve_password(flag: Option<&str>, prompt: &str, prompt_confirm: bool) -> anyhow::Result<String> {
+    use std::io::IsTerminal;
+    if let Some(p) = flag {
+        return Ok(p.trim().to_string());
+    }
+    if let Ok(p) = std::env::var("ROY_NEW_PASSWORD") {
+        return Ok(p.trim().to_string());
+    }
+    if !std::io::stdin().is_terminal() {
+        // Piped input — read one line.
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        return Ok(line.trim().to_string());
+    }
+    let pw = rpassword::prompt_password(prompt)?;
+    if prompt_confirm {
+        let confirm = rpassword::prompt_password("confirm password: ")?;
+        if pw != confirm {
+            anyhow::bail!("passwords don't match");
+        }
+    }
+    Ok(pw.trim().to_string())
+}
+
 pub fn cookie_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -83,15 +110,20 @@ pub async fn whoami(api: &str) -> anyhow::Result<()> {
 /// Local admin escape hatch: provision a fresh user directly against the
 /// shared agents.db, bypassing the HTTP layer. Same security model as
 /// `reset_password` — anyone who can read/write the DB file can already
-/// create users; this is just the ergonomic surface. Prompts for the
-/// password interactively (echo-off).
-pub async fn create_user(username: &str, display_name: Option<&str>) -> anyhow::Result<()> {
-    let new_pw = rpassword::prompt_password("new password: ")?;
-    let confirm = rpassword::prompt_password("confirm password: ")?;
-    if new_pw != confirm {
-        anyhow::bail!("passwords don't match");
-    }
-    if new_pw.trim().len() < 8 {
+/// create users; this is just the ergonomic surface.
+///
+/// Password resolution order:
+///   1. `--password` flag (most explicit, but visible in `ps`)
+///   2. `ROY_NEW_PASSWORD` env var (scripted, not in `ps`)
+///   3. Non-TTY stdin (one line — useful for `echo pw | roy auth create …`)
+///   4. Interactive rpassword prompt (echo-off, requires controlling tty)
+pub async fn create_user(
+    username: &str,
+    display_name: Option<&str>,
+    password: Option<&str>,
+) -> anyhow::Result<()> {
+    let new_pw = resolve_password(password, "new password: ", true)?;
+    if new_pw.len() < 8 {
         anyhow::bail!("password too short (min 8)");
     }
     let db = roy_agents::default_db_path();
@@ -116,9 +148,9 @@ pub async fn create_user(username: &str, display_name: Option<&str>) -> anyhow::
     Ok(())
 }
 
-pub async fn reset_password(username: &str) -> anyhow::Result<()> {
-    let new_pw = rpassword::prompt_password("new password: ")?;
-    if new_pw.trim().len() < 8 {
+pub async fn reset_password(username: &str, password: Option<&str>) -> anyhow::Result<()> {
+    let new_pw = resolve_password(password, "new password: ", true)?;
+    if new_pw.len() < 8 {
         anyhow::bail!("password too short (min 8)");
     }
     let db = roy_agents::default_db_path();
