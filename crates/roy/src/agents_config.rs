@@ -23,9 +23,11 @@ pub struct AgentEntry {
     pub models: Vec<ModelEntry>,
 }
 
-/// The four hardcoded ACP presets. This is the single source of truth for
-/// the set of supported agents; `daemon.rs::DefaultTransportFactory::build`
-/// matches on this enum, not on a string.
+/// The hardcoded ACP presets. This is the single source of truth for the set
+/// of supported agents; `daemon.rs::DefaultTransportFactory::build` matches
+/// on this enum, not on a string. Adding a preset means: extend `ALL` and
+/// `as_str` — `Display`, `FromStr`, the clap value_parser in `roy-cli`, and
+/// the MCP JSON-schema enum in `roy-mcp` all derive from those.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentPreset {
@@ -33,17 +35,32 @@ pub enum AgentPreset {
     Gemini,
     Opencode,
     Codex,
+    Pi,
 }
 
-impl std::fmt::Display for AgentPreset {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+impl AgentPreset {
+    pub const ALL: &'static [AgentPreset] = &[
+        AgentPreset::Claude,
+        AgentPreset::Gemini,
+        AgentPreset::Opencode,
+        AgentPreset::Codex,
+        AgentPreset::Pi,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
             AgentPreset::Claude => "claude",
             AgentPreset::Gemini => "gemini",
             AgentPreset::Opencode => "opencode",
             AgentPreset::Codex => "codex",
-        };
-        f.write_str(s)
+            AgentPreset::Pi => "pi",
+        }
+    }
+}
+
+impl std::fmt::Display for AgentPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -51,13 +68,11 @@ impl std::str::FromStr for AgentPreset {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "claude" => Ok(AgentPreset::Claude),
-            "gemini" => Ok(AgentPreset::Gemini),
-            "opencode" => Ok(AgentPreset::Opencode),
-            "codex" => Ok(AgentPreset::Codex),
-            other => Err(format!("unknown agent: {other}")),
-        }
+        AgentPreset::ALL
+            .iter()
+            .copied()
+            .find(|p| p.as_str() == s)
+            .ok_or_else(|| format!("unknown agent: {s}"))
     }
 }
 
