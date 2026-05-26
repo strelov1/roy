@@ -1,18 +1,14 @@
-//! Filesystem-based discovery of slash commands. Three sources, merged:
+//! Filesystem-based discovery of slash commands. Single source:
 //!
-//!   - `~/.roy/skills/<name>/SKILL.md`       (source = `roy`, harness-agnostic)
-//!   - `~/.claude/skills/<name>/SKILL.md`    (source = `claude`, legacy)
-//!   - `~/.claude/plugins/marketplaces/<m>/(plugins|external_plugins)/<p>/skills/<name>/SKILL.md`
-//!     (source = `<p>@<m>`, gated by enabledPlugins in `~/.claude/settings.json`)
+//!   - `~/.roy/skills/<name>/SKILL.md`  — the canonical, harness-agnostic store.
 //!
 //! Each SKILL.md starts with YAML frontmatter (`name`, `description`) and is
 //! followed by the markdown body. The body is what roy-web injects into the
-//! prompt when the user picks the command — so it works for any harness, not
-//! just Claude.
+//! prompt when the user picks the command — so it works for any harness.
 //!
-//! Writes go to `~/.roy/skills/` only (POST /commands). The Claude-side
-//! directory and plugin marketplaces are read-only as far as roy-management
-//! is concerned.
+//! `~/.claude/skills/` and plugin marketplaces are deliberately NOT scanned:
+//! roy owns its catalog. Existing Claude-side skills must be copied (or
+//! symlinked) into `~/.roy/skills/` to surface in the popover.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -45,8 +41,7 @@ impl CommandsCache {
             }
         }
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-        let plugins = read_enabled_plugins(&home).unwrap_or_default();
-        let v = list_commands_from(&home, &plugins).await;
+        let v = list_commands_from(&home).await;
         let mut g = self.inner.lock().unwrap();
         *g = Some((Instant::now(), v.clone()));
         v
@@ -63,35 +58,9 @@ pub fn roy_skills_dir(home: &Path) -> PathBuf {
     home.join(".roy/skills")
 }
 
-pub fn claude_skills_dir(home: &Path) -> PathBuf {
-    home.join(".claude/skills")
-}
-
-pub async fn list_commands_from(home: &Path, enabled_plugins: &[String]) -> Vec<CommandInfo> {
+pub async fn list_commands_from(home: &Path) -> Vec<CommandInfo> {
     let mut out = scan_dir(&roy_skills_dir(home), "roy").await;
-    out.extend(scan_dir(&claude_skills_dir(home), "claude").await);
-    for plugin in enabled_plugins {
-        let Some((p, m)) = plugin.split_once('@') else {
-            continue;
-        };
-        let dir = home
-            .join(".claude/plugins/marketplaces")
-            .join(m)
-            .join("plugins")
-            .join(p)
-            .join("skills");
-        out.extend(scan_dir(&dir, plugin).await);
-        let dir2 = home
-            .join(".claude/plugins/marketplaces")
-            .join(m)
-            .join("external_plugins")
-            .join(p)
-            .join("skills");
-        out.extend(scan_dir(&dir2, plugin).await);
-    }
-    // Stable ordering. Same name from two sources (e.g. `roy` shadowing
-    // `claude`) keeps both visible — the popover surfaces the source tag.
-    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.source.cmp(&b.source)));
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
@@ -117,49 +86,17 @@ async fn scan_dir(dir: &Path, source: &str) -> Vec<CommandInfo> {
     out
 }
 
-/// Read a single skill's body (the markdown after the frontmatter). Searches
-/// every source in the same precedence as `list_commands_from`; the first
-/// match wins, so a `~/.roy/skills/<name>` entry shadows a same-name Claude
-/// or plugin skill.
+/// Read a single skill's body (the markdown after the frontmatter) from
+/// `~/.roy/skills/<name>/SKILL.md`.
 pub async fn read_command_body(home: &Path, name: &str) -> Option<String> {
     // Validate the name so a request like `/commands/..%2F..%2Fetc%2Fpasswd`
     // can't escape the skills tree.
     if !is_safe_skill_name(name) {
         return None;
     }
-    let candidates = [roy_skills_dir(home), claude_skills_dir(home)];
-    for dir in &candidates {
-        let path = dir.join(name).join("SKILL.md");
-        if let Ok(contents) = tokio::fs::read_to_string(&path).await {
-            if let Some((_, _, body)) = parse_skill_md(&contents) {
-                return Some(body);
-            }
-        }
-    }
-    // Plugin marketplaces — we don't know the plugin name from the skill
-    // name alone, so walk the marketplaces tree until we hit a match.
-    let plugins = read_enabled_plugins(home).unwrap_or_default();
-    for plugin in &plugins {
-        let Some((p, m)) = plugin.split_once('@') else {
-            continue;
-        };
-        for sub in ["plugins", "external_plugins"] {
-            let path = home
-                .join(".claude/plugins/marketplaces")
-                .join(m)
-                .join(sub)
-                .join(p)
-                .join("skills")
-                .join(name)
-                .join("SKILL.md");
-            if let Ok(contents) = tokio::fs::read_to_string(&path).await {
-                if let Some((_, _, body)) = parse_skill_md(&contents) {
-                    return Some(body);
-                }
-            }
-        }
-    }
-    None
+    let path = roy_skills_dir(home).join(name).join("SKILL.md");
+    let contents = tokio::fs::read_to_string(&path).await.ok()?;
+    parse_skill_md(&contents).map(|(_, _, body)| body)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -242,18 +179,6 @@ fn is_safe_skill_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn read_enabled_plugins(home: &Path) -> Option<Vec<String>> {
-    let raw = std::fs::read_to_string(home.join(".claude/settings.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let map = v.get("enabledPlugins")?.as_object()?;
-    Some(
-        map.iter()
-            .filter(|(_, v)| v.as_bool() == Some(true))
-            .map(|(k, _)| k.clone())
-            .collect(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,41 +191,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lists_roy_then_claude() {
+    async fn lists_roy_skills_only() {
         let home = TempDir::new().unwrap();
         write_skill(
             &roy_skills_dir(home.path()),
-            "shared",
-            "---\nname: shared\ndescription: from roy\n---\n\nROY BODY\n",
+            "first",
+            "---\nname: first\ndescription: r1\n---\n\nbody1\n",
+        );
+        // Anything outside `~/.roy/skills/` is ignored — even a same-name
+        // SKILL.md under `~/.claude/skills/` does not surface.
+        let claude = home.path().join(".claude/skills");
+        write_skill(
+            &claude,
+            "first",
+            "---\nname: first\ndescription: c1\n---\n\nfromclaude\n",
         );
         write_skill(
-            &claude_skills_dir(home.path()),
-            "shared",
-            "---\nname: shared\ndescription: from claude\n---\n\nCLAUDE BODY\n",
+            &claude,
+            "claude-only",
+            "---\nname: claude-only\ndescription: x\n---\n\nx\n",
         );
-        let list = list_commands_from(home.path(), &[]).await;
-        // Both entries surface, sorted by (name, source).
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].source, "claude");
-        assert_eq!(list[1].source, "roy");
-    }
+        let list = list_commands_from(home.path()).await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "first");
+        assert_eq!(list[0].source, "roy");
+        assert_eq!(list[0].description, "r1");
 
-    #[tokio::test]
-    async fn body_lookup_prefers_roy() {
-        let home = TempDir::new().unwrap();
-        write_skill(
-            &roy_skills_dir(home.path()),
-            "shared",
-            "---\nname: shared\ndescription: r\n---\n\nROY BODY\n",
-        );
-        write_skill(
-            &claude_skills_dir(home.path()),
-            "shared",
-            "---\nname: shared\ndescription: c\n---\n\nCLAUDE BODY\n",
-        );
-        let body = read_command_body(home.path(), "shared").await.unwrap();
-        assert!(body.contains("ROY BODY"));
-        assert!(!body.contains("CLAUDE BODY"));
+        // Body read also only sees the roy version.
+        let body = read_command_body(home.path(), "first").await.unwrap();
+        assert!(body.contains("body1"));
+        assert!(read_command_body(home.path(), "claude-only")
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -309,7 +231,7 @@ mod tests {
         create_command(home.path(), "review", "Review code", "Body text")
             .await
             .unwrap();
-        let list = list_commands_from(home.path(), &[]).await;
+        let list = list_commands_from(home.path()).await;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "review");
         assert_eq!(list[0].source, "roy");
@@ -318,7 +240,7 @@ mod tests {
         assert!(body.contains("Body text"));
 
         assert!(delete_command(home.path(), "review").await.unwrap());
-        let list = list_commands_from(home.path(), &[]).await;
+        let list = list_commands_from(home.path()).await;
         assert_eq!(list.len(), 0);
         assert!(!delete_command(home.path(), "review").await.unwrap());
     }
