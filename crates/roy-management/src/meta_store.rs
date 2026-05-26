@@ -34,16 +34,20 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub path: String,
+    pub created_by: String,
+    pub team_id: Option<String>,
     pub created_at: i64,
 }
 
 impl Project {
-    fn from_row(row: (String, String, String, i64)) -> Self {
-        let (id, name, path, created_at) = row;
+    fn from_row(row: (String, String, String, String, Option<String>, i64)) -> Self {
+        let (id, name, path, created_by, team_id, created_at) = row;
         Self {
             id,
             name,
             path,
+            created_by,
+            team_id,
             created_at,
         }
     }
@@ -56,6 +60,8 @@ pub struct SessionMeta {
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub display_label: Option<String>,
+    pub created_by: String,
+    pub team_id: Option<String>,
     pub tags: BTreeMap<String, String>,
     pub created_at: i64,
 }
@@ -91,23 +97,39 @@ impl MetaStore {
         migrator.run(pool).await.map_err(sqlx::Error::from)
     }
 
-    pub async fn create_project(&self, name: &str) -> Result<Project, MetaError> {
+    pub async fn create_project(
+        &self,
+        name: &str,
+        created_by: &str,
+        team_id: Option<&str>,
+    ) -> Result<Project, MetaError> {
         validate_project_name(name)?;
         let id = uuid::Uuid::new_v4().to_string();
         let dir = self.workspace_dir.join(name);
         std::fs::create_dir_all(&dir)?;
         let path = dir.to_string_lossy().into_owned();
         let created_at = chrono::Utc::now().timestamp();
-        let result =
-            sqlx::query("INSERT INTO projects (id, name, path, created_at) VALUES (?, ?, ?, ?)")
-                .bind(&id)
-                .bind(name)
-                .bind(&path)
-                .bind(created_at)
-                .execute(&self.pool)
-                .await;
+        let result = sqlx::query(
+            "INSERT INTO projects (id, name, path, created_by, team_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(&path)
+        .bind(created_by)
+        .bind(team_id)
+        .bind(created_at)
+        .execute(&self.pool)
+        .await;
         match result {
-            Ok(_) => Ok(Project::from_row((id, name.into(), path, created_at))),
+            Ok(_) => Ok(Project::from_row((
+                id,
+                name.into(),
+                path,
+                created_by.into(),
+                team_id.map(String::from),
+                created_at,
+            ))),
             Err(sqlx::Error::Database(db)) if db.is_unique_violation() => Err(MetaError::Conflict(
                 format!("project name already exists: {name}"),
             )),
@@ -116,10 +138,12 @@ impl MetaStore {
     }
 
     pub async fn list_projects(&self) -> Result<Vec<Project>, MetaError> {
-        let rows: Vec<(String, String, String, i64)> =
-            sqlx::query_as("SELECT id, name, path, created_at FROM projects ORDER BY created_at")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<(String, String, String, String, Option<String>, i64)> = sqlx::query_as(
+            "SELECT id, name, path, created_by, team_id, created_at \
+             FROM projects ORDER BY created_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.into_iter().map(Project::from_row).collect())
     }
 
@@ -141,9 +165,9 @@ impl MetaStore {
     /// their `cwd` move out from under them.
     pub async fn update_project(&self, id: &str, name: &str) -> Result<Project, MetaError> {
         validate_project_name(name)?;
-        let result = sqlx::query_as::<_, (String, String, String, i64)>(
+        let result = sqlx::query_as::<_, (String, String, String, String, Option<String>, i64)>(
             "UPDATE projects SET name = ? WHERE id = ? \
-             RETURNING id, name, path, created_at",
+                 RETURNING id, name, path, created_by, team_id, created_at",
         )
         .bind(name)
         .bind(id)
@@ -162,22 +186,28 @@ impl MetaStore {
     pub async fn upsert_session_meta(&self, meta: &SessionMeta) -> Result<(), MetaError> {
         let mut tx = self.pool.begin().await?;
 
+        // On conflict we keep ownership (`created_by`, `team_id`, `created_at`)
+        // pinned to the original insert — these identify *who* created the
+        // session and must not be silently rewritten by an upsert from a
+        // different caller.
         sqlx::query(
             "INSERT INTO session_meta \
-            (session_id, project_id, agent_id, agent_name, display_label, created_at) \
-            VALUES (?, ?, ?, ?, ?, ?) \
+            (session_id, project_id, agent_id, agent_name, display_label, \
+             created_by, team_id, created_at) \
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
             ON CONFLICT(session_id) DO UPDATE SET \
                 project_id = excluded.project_id, \
                 agent_id = excluded.agent_id, \
                 agent_name = excluded.agent_name, \
-                display_label = excluded.display_label, \
-                created_at = excluded.created_at",
+                display_label = excluded.display_label",
         )
         .bind(&meta.session_id)
         .bind(&meta.project_id)
         .bind(&meta.agent_id)
         .bind(&meta.agent_name)
         .bind(&meta.display_label)
+        .bind(&meta.created_by)
+        .bind(&meta.team_id)
         .bind(meta.created_at)
         .execute(&mut *tx)
         .await?;
@@ -210,9 +240,12 @@ impl MetaStore {
             Option<String>,
             Option<String>,
             Option<String>,
+            String,
+            Option<String>,
             i64,
         )> = sqlx::query_as(
-            "SELECT session_id, project_id, agent_id, agent_name, display_label, created_at \
+            "SELECT session_id, project_id, agent_id, agent_name, display_label, \
+                    created_by, team_id, created_at \
             FROM session_meta WHERE session_id = ?",
         )
         .bind(session_id)
@@ -221,7 +254,16 @@ impl MetaStore {
 
         match row {
             None => Ok(None),
-            Some((sid, proj_id, agent_id, agent_name, display_label, created_at)) => {
+            Some((
+                sid,
+                proj_id,
+                agent_id,
+                agent_name,
+                display_label,
+                created_by,
+                team_id,
+                created_at,
+            )) => {
                 let tag_rows: Vec<(String, String)> = sqlx::query_as(
                     "SELECT key, value FROM session_tags WHERE session_id = ? ORDER BY key",
                 )
@@ -237,6 +279,8 @@ impl MetaStore {
                     agent_id,
                     agent_name,
                     display_label,
+                    created_by,
+                    team_id,
                     tags,
                     created_at,
                 }))
@@ -260,7 +304,9 @@ impl MetaStore {
             .collect::<Vec<_>>()
             .join(",");
         let meta_sql = format!(
-            "SELECT session_id, project_id, agent_id, agent_name, display_label, created_at FROM session_meta WHERE session_id IN ({placeholders})"
+            "SELECT session_id, project_id, agent_id, agent_name, display_label, \
+                    created_by, team_id, created_at \
+             FROM session_meta WHERE session_id IN ({placeholders})"
         );
         let tag_sql = format!(
             "SELECT session_id, key, value FROM session_tags WHERE session_id IN ({placeholders})"
@@ -273,6 +319,8 @@ impl MetaStore {
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                Option<String>,
+                String,
                 Option<String>,
                 i64,
             ),
@@ -297,13 +345,24 @@ impl MetaStore {
         Ok(meta_rows
             .into_iter()
             .map(
-                |(sid, project_id, agent_id, agent_name, display_label, created_at)| SessionMeta {
+                |(
+                    sid,
+                    project_id,
+                    agent_id,
+                    agent_name,
+                    display_label,
+                    created_by,
+                    team_id,
+                    created_at,
+                )| SessionMeta {
                     tags: tags_by_sid.remove(&sid).unwrap_or_default(),
                     session_id: sid,
                     project_id,
                     agent_id,
                     agent_name,
                     display_label,
+                    created_by,
+                    team_id,
                     created_at,
                 },
             )
@@ -409,44 +468,52 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    async fn fresh_store() -> MetaStore {
+    /// Returns the store and the id of a freshly-seeded user (`"alice"`).
+    /// Tests need a real `users` row because `projects.created_by` and
+    /// `session_meta.created_by` are NOT NULL FKs into `users(id)`.
+    async fn fresh_store() -> (MetaStore, String) {
         let dir = tempdir().unwrap();
         let pool = roy_agents::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
+        roy_auth::apply_migrations(&pool).await.unwrap();
+        let user = roy_auth::test_support::make_user(&pool, "alice").await;
         let workspace = dir.path().join("workspace");
         // Leak the tempdir: the SqlitePool inside MetaStore must keep reading
         // the file for the rest of the test, but the dir would otherwise be
         // dropped when this function returns.
         std::mem::forget(dir);
-        MetaStore::new(pool, workspace)
+        (MetaStore::new(pool, workspace), user.id)
     }
 
     #[tokio::test]
     async fn create_then_list_project() {
-        let store = fresh_store().await;
-        let p = store.create_project("my-proj").await.unwrap();
+        let (store, uid) = fresh_store().await;
+        let p = store.create_project("my-proj", &uid, None).await.unwrap();
         assert_eq!(p.name, "my-proj");
+        assert_eq!(p.created_by, uid);
+        assert_eq!(p.team_id, None);
         let listed = store.list_projects().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, p.id);
+        assert_eq!(listed[0].created_by, uid);
     }
 
     #[tokio::test]
     async fn create_duplicate_is_conflict() {
-        let store = fresh_store().await;
-        store.create_project("dup").await.unwrap();
-        let err = store.create_project("dup").await.unwrap_err();
+        let (store, uid) = fresh_store().await;
+        store.create_project("dup", &uid, None).await.unwrap();
+        let err = store.create_project("dup", &uid, None).await.unwrap_err();
         assert!(matches!(err, MetaError::Conflict(_)));
     }
 
     #[tokio::test]
     async fn invalid_name_rejected() {
-        let store = fresh_store().await;
+        let (store, uid) = fresh_store().await;
         for bad in ["", ".hidden", "has/slash", "has space"] {
             assert!(matches!(
-                store.create_project(bad).await,
+                store.create_project(bad, &uid, None).await,
                 Err(MetaError::Invalid(_))
             ));
         }
@@ -454,8 +521,8 @@ mod tests {
 
     #[tokio::test]
     async fn delete_project() {
-        let store = fresh_store().await;
-        let p = store.create_project("del-me").await.unwrap();
+        let (store, uid) = fresh_store().await;
+        let p = store.create_project("del-me", &uid, None).await.unwrap();
         store.delete_project(&p.id).await.unwrap();
         assert!(matches!(
             store.delete_project(&p.id).await,
@@ -465,14 +532,17 @@ mod tests {
 
     #[tokio::test]
     async fn update_project_renames_in_place() {
-        let store = fresh_store().await;
-        let p = store.create_project("old-name").await.unwrap();
+        let (store, uid) = fresh_store().await;
+        let p = store.create_project("old-name", &uid, None).await.unwrap();
         let renamed = store.update_project(&p.id, "new-name").await.unwrap();
         assert_eq!(renamed.id, p.id);
         assert_eq!(renamed.name, "new-name");
         // path stays unchanged — on-disk dir keeps its original name
         assert_eq!(renamed.path, p.path);
         assert_eq!(renamed.created_at, p.created_at);
+        // ownership is preserved
+        assert_eq!(renamed.created_by, p.created_by);
+        assert_eq!(renamed.team_id, p.team_id);
         let listed = store.list_projects().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "new-name");
@@ -480,7 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_project_unknown_id_is_not_found() {
-        let store = fresh_store().await;
+        let (store, _uid) = fresh_store().await;
         let err = store
             .update_project("nonexistent", "whatever")
             .await
@@ -490,8 +560,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_project_invalid_name_rejected() {
-        let store = fresh_store().await;
-        let p = store.create_project("ok").await.unwrap();
+        let (store, uid) = fresh_store().await;
+        let p = store.create_project("ok", &uid, None).await.unwrap();
         for bad in ["", ".hidden", "has space", "has/slash"] {
             assert!(matches!(
                 store.update_project(&p.id, bad).await,
@@ -502,9 +572,9 @@ mod tests {
 
     #[tokio::test]
     async fn update_project_to_existing_name_is_conflict() {
-        let store = fresh_store().await;
-        store.create_project("a").await.unwrap();
-        let b = store.create_project("b").await.unwrap();
+        let (store, uid) = fresh_store().await;
+        store.create_project("a", &uid, None).await.unwrap();
+        let b = store.create_project("b", &uid, None).await.unwrap();
         let err = store.update_project(&b.id, "a").await.unwrap_err();
         assert!(matches!(err, MetaError::Conflict(_)));
     }
@@ -528,16 +598,18 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![(1,), (2,), (3,), (4,)]);
+        assert_eq!(versions, vec![(1,), (2,), (3,), (4,), (5,)]);
     }
 
-    fn meta_with(session_id: &str, tags: &[(&str, &str)]) -> SessionMeta {
+    fn meta_with(session_id: &str, created_by: &str, tags: &[(&str, &str)]) -> SessionMeta {
         SessionMeta {
             session_id: session_id.into(),
             project_id: None,
             agent_id: None,
             agent_name: Some("claude-sonnet-4-6".into()),
             display_label: Some("test session".into()),
+            created_by: created_by.into(),
+            team_id: None,
             tags: tags
                 .iter()
                 .map(|(k, v)| ((*k).into(), (*v).into()))
@@ -548,8 +620,8 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_then_get_session_meta() {
-        let store = fresh_store().await;
-        let meta = meta_with("sess1", &[("env", "prod"), ("team", "platform")]);
+        let (store, uid) = fresh_store().await;
+        let meta = meta_with("sess1", &uid, &[("env", "prod"), ("team", "platform")]);
         store.upsert_session_meta(&meta).await.unwrap();
 
         let retrieved = store
@@ -560,6 +632,8 @@ mod tests {
         assert_eq!(retrieved.session_id, "sess1");
         assert_eq!(retrieved.agent_name, Some("claude-sonnet-4-6".into()));
         assert_eq!(retrieved.display_label, Some("test session".into()));
+        assert_eq!(retrieved.created_by, uid);
+        assert_eq!(retrieved.team_id, None);
         assert_eq!(retrieved.tags.len(), 2);
         assert_eq!(retrieved.tags.get("env"), Some(&"prod".into()));
         assert_eq!(retrieved.tags.get("team"), Some(&"platform".into()));
@@ -567,11 +641,11 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_is_idempotent_and_replaces_tags() {
-        let store = fresh_store().await;
-        let meta1 = meta_with("sess2", &[("a", "1"), ("b", "2")]);
+        let (store, uid) = fresh_store().await;
+        let meta1 = meta_with("sess2", &uid, &[("a", "1"), ("b", "2")]);
         store.upsert_session_meta(&meta1).await.unwrap();
 
-        let meta2 = meta_with("sess2", &[("a", "9"), ("c", "3")]);
+        let meta2 = meta_with("sess2", &uid, &[("a", "9"), ("c", "3")]);
         store.upsert_session_meta(&meta2).await.unwrap();
 
         let retrieved = store
@@ -587,15 +661,15 @@ mod tests {
 
     #[tokio::test]
     async fn get_session_meta_missing_returns_none() {
-        let store = fresh_store().await;
+        let (store, _uid) = fresh_store().await;
         let result = store.get_session_meta("nonexistent").await.unwrap();
         assert_eq!(result, None);
     }
 
     #[tokio::test]
     async fn replace_tags_replaces_atomically() {
-        let store = fresh_store().await;
-        let meta = meta_with("sess3", &[("a", "1")]);
+        let (store, uid) = fresh_store().await;
+        let meta = meta_with("sess3", &uid, &[("a", "1")]);
         store.upsert_session_meta(&meta).await.unwrap();
 
         // Replace with empty tags
@@ -624,7 +698,7 @@ mod tests {
 
     #[tokio::test]
     async fn replace_tags_on_unknown_session_is_not_found() {
-        let store = fresh_store().await;
+        let (store, _uid) = fresh_store().await;
         let mut tags = BTreeMap::new();
         tags.insert("k".into(), "v".into());
         let err = store
@@ -642,13 +716,13 @@ mod tests {
 
     #[tokio::test]
     async fn list_session_metas_returns_known_only() {
-        let store = fresh_store().await;
+        let (store, uid) = fresh_store().await;
         store
-            .upsert_session_meta(&meta_with("a", &[("k", "v")]))
+            .upsert_session_meta(&meta_with("a", &uid, &[("k", "v")]))
             .await
             .unwrap();
         store
-            .upsert_session_meta(&meta_with("b", &[]))
+            .upsert_session_meta(&meta_with("b", &uid, &[]))
             .await
             .unwrap();
         let rows = store
@@ -662,8 +736,8 @@ mod tests {
 
     #[tokio::test]
     async fn delete_session_meta_removes_row_and_tags() {
-        let store = fresh_store().await;
-        let meta = meta_with("sess4", &[("env", "test")]);
+        let (store, uid) = fresh_store().await;
+        let meta = meta_with("sess4", &uid, &[("env", "test")]);
         store.upsert_session_meta(&meta).await.unwrap();
 
         // Verify tags exist

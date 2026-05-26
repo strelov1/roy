@@ -300,9 +300,14 @@ async fn create_project(
     State(s): State<AppState>,
     Json(req): Json<NewProject>,
 ) -> Result<(StatusCode, Json<crate::meta_store::Project>), ApiError> {
+    // FIXME: B5 — replace `"root"` stub with `Extension<AuthUser>` extraction
+    // once the auth middleware lands. Until B3's `ensure_root` runs, this
+    // string is not yet a real users(id) row; it becomes one as soon as the
+    // bootstrap step in B3 is wired.
+    let created_by = "root";
     let p = s
         .meta
-        .create_project(&req.name)
+        .create_project(&req.name, created_by, None)
         .await
         .map_err(meta_to_api)?;
     Ok((StatusCode::CREATED, Json(p)))
@@ -380,12 +385,16 @@ async fn create_session(
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("daemon: {e}")))?;
 
+    // FIXME: B5 — replace `"root"` stub with `Extension<AuthUser>` extraction.
+    let created_by = "root".to_string();
     let meta = crate::meta_store::SessionMeta {
         session_id: sid.clone(),
         project_id: req.project_id.clone(),
         agent_id: None,
         agent_name: req.agent_name.clone(),
         display_label: None,
+        created_by,
+        team_id: None,
         tags: req.tags.clone(),
         created_at: chrono::Utc::now().timestamp(),
     };
@@ -543,7 +552,25 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_state() -> AppState {
+    /// Direct INSERT into `users` with id="root" to mirror B3's
+    /// `ensure_root` bootstrap. `roy_auth::UserStore::create` would issue
+    /// a random UUID for the id, which doesn't match what the handler
+    /// stub binds (`created_by = "root"`).
+    async fn seed_root_user(pool: &sqlx::SqlitePool) {
+        sqlx::query(
+            "INSERT OR IGNORE INTO users \
+             (id, username, display_name, password_hash, timezone, created_at) \
+             VALUES ('root', 'root', 'root', 'x', NULL, 0)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Returns the state and the id of a freshly-seeded user. `created_by`
+    /// columns on projects/session_meta are NOT NULL FKs into `users(id)`,
+    /// so every test that writes either table needs a real user fixture.
+    async fn test_state() -> (AppState, String) {
         use crate::meta_store::MetaStore;
 
         let dir = tempfile::tempdir().unwrap();
@@ -552,11 +579,17 @@ mod tests {
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
         roy_auth::apply_migrations(&pool).await.unwrap();
+        // Seed a user with id="root" so the `created_by = "root"` stub in
+        // create_project / create_session handlers satisfies the FK to
+        // `users(id)`. B3's `ensure_root` bootstrap step will do the same in
+        // production. Plus a fixture user for tests that need a real id.
+        seed_root_user(&pool).await;
+        let alice = roy_auth::test_support::make_user(&pool, "alice").await;
         let workspace = dir.path().join("workspace");
         // Keep the temp dir alive for the test process lifetime — dropping it
         // would invalidate the SQLite file referenced by the pool.
         std::mem::forget(dir);
-        AppState {
+        let state = AppState {
             store: roy_agents::Store::new(pool.clone()),
             meta: MetaStore::new(pool.clone(), workspace.clone()),
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
@@ -564,12 +597,14 @@ mod tests {
             scheduler_pool: None,
             pool,
             workspace_dir: workspace,
-        }
+        };
+        (state, alice.id)
     }
 
     #[tokio::test]
     async fn create_then_get_roundtrips() {
-        let app = router(test_state().await);
+        let (st, _uid) = test_state().await;
+        let app = router(st);
         let body = serde_json::to_vec(&json!({
             "name": "Reviewer", "preset": "claude", "prompt": "Be terse."
         }))
@@ -602,7 +637,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_missing_is_404() {
-        let app = router(test_state().await);
+        let (st, _uid) = test_state().await;
+        let app = router(st);
         let resp = app
             .oneshot(Request::get("/agents/nope").body(Body::empty()).unwrap())
             .await
@@ -612,7 +648,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_with_bad_preset_is_400() {
-        let app = router(test_state().await);
+        let (st, _uid) = test_state().await;
+        let app = router(st);
         let body =
             serde_json::to_vec(&json!({ "name": "X", "preset": "klaude", "prompt": "" })).unwrap();
         let resp = app
@@ -629,7 +666,8 @@ mod tests {
 
     #[tokio::test]
     async fn projects_create_list_delete() {
-        let app = router(test_state().await);
+        let (st, _uid) = test_state().await;
+        let app = router(st);
         // create
         let resp = app
             .clone()
@@ -687,7 +725,8 @@ mod tests {
 
     #[tokio::test]
     async fn project_put_renames_and_reflects_in_list() {
-        let app = router(test_state().await);
+        let (st, _uid) = test_state().await;
+        let app = router(st);
         // create
         let resp = app
             .clone()
@@ -740,7 +779,8 @@ mod tests {
 
     #[tokio::test]
     async fn project_put_empty_name_is_400() {
-        let app = router(test_state().await);
+        let (st, _uid) = test_state().await;
+        let app = router(st);
         let resp = app
             .clone()
             .oneshot(
@@ -773,7 +813,8 @@ mod tests {
 
     #[tokio::test]
     async fn project_put_unknown_id_is_404() {
-        let app = router(test_state().await);
+        let (st, _uid) = test_state().await;
+        let app = router(st);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -794,7 +835,7 @@ mod tests {
     async fn sessions_post_happy_path() {
         use std::sync::Arc;
 
-        let mut st = test_state().await;
+        let (mut st, _uid) = test_state().await;
         let mock = Arc::new(crate::roy_client::mock::MockDaemonClient::new().with_spawn("sid-1"));
         st.daemon = mock.clone();
         let app = router(st);
@@ -829,7 +870,7 @@ mod tests {
     async fn list_sessions_joins_live_and_meta() {
         use std::sync::{Arc, Mutex};
 
-        let mut st = test_state().await;
+        let (mut st, uid) = test_state().await;
         let mock = Arc::new(crate::roy_client::mock::MockDaemonClient {
             spawn_response: Mutex::new(Some(Ok("sid-A".into()))),
             list_response: Mutex::new(Some(vec!["sid-A".into(), "sid-B".into()])),
@@ -844,6 +885,8 @@ mod tests {
                 agent_id: None,
                 agent_name: Some("Rev".into()),
                 display_label: None,
+                created_by: uid.clone(),
+                team_id: None,
                 tags: BTreeMap::from([("k".into(), "v".into())]),
                 created_at: 1,
             })
@@ -869,7 +912,7 @@ mod tests {
     async fn sessions_post_rollback_on_meta_failure() {
         use std::sync::Arc;
 
-        let mut st = test_state().await;
+        let (mut st, _uid) = test_state().await;
         let mock = Arc::new(crate::roy_client::mock::MockDaemonClient::new().with_spawn("sid-X"));
         st.daemon = mock.clone();
         // Force the upsert_session_meta to fail by closing the pool out from
@@ -896,7 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_tags_replaces() {
-        let st = test_state().await;
+        let (st, uid) = test_state().await;
         st.meta
             .upsert_session_meta(&crate::meta_store::SessionMeta {
                 session_id: "sid".into(),
@@ -904,6 +947,8 @@ mod tests {
                 agent_id: None,
                 agent_name: None,
                 display_label: None,
+                created_by: uid.clone(),
+                team_id: None,
                 tags: BTreeMap::from([("old".into(), "1".into())]),
                 created_at: 1,
             })
@@ -937,6 +982,7 @@ mod tests {
             .await
             .unwrap();
         roy_auth::apply_migrations(&pool).await.unwrap();
+        seed_root_user(&pool).await;
         let workspace = dir.path().join("workspace");
         // Leak the tempdir: pool keeps reading from this file for the test.
         std::mem::forget(dir);
@@ -1098,6 +1144,7 @@ mod tests {
             .unwrap();
         MetaStore::apply_migrations(&agents_pool).await.unwrap();
         roy_auth::apply_migrations(&agents_pool).await.unwrap();
+        seed_root_user(&agents_pool).await;
         let workspace = dir.path().join("workspace");
         let sched_pool = roy_scheduler::db::open(&dir.path().join("scheduler.db"))
             .await
@@ -1116,7 +1163,8 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_endpoints_503_when_unattached() {
-        let app = router(test_state().await);
+        let (st, _uid) = test_state().await;
+        let app = router(st);
         for path in [
             "/scheduler/agents",
             "/scheduler/triggers",
