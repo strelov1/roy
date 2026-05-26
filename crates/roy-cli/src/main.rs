@@ -11,7 +11,8 @@ use anyhow::{anyhow, Context};
 use clap::{Args, Parser, Subcommand};
 use roy::{
     daemon::{Daemon, DefaultTransportFactory},
-    AgentsConfigStatus, ClientCommand, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
+    AgentPreset, AgentsConfigStatus, ClientCommand, JournalEntry, ServeOpts, ServerEvent,
+    TurnEvent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -130,7 +131,7 @@ struct ServeArgs {
 
 #[derive(clap::Args)]
 struct RunArgs {
-    /// claude | gemini | opencode | codex
+    /// claude | gemini | opencode | codex | pi
     agent: String,
     task: String,
     /// Working directory to spawn the agent in. Omit to create an orphan
@@ -213,8 +214,8 @@ struct WaitArgs {
 struct FireArgs {
     /// The prompt to send to the agent.
     prompt: String,
-    /// Preset to spawn: claude | gemini | opencode | codex. Required when
-    /// `--resume` is absent.
+    /// Preset to spawn: claude | gemini | opencode | codex | pi. Required
+    /// when `--resume` is absent.
     #[arg(long, conflicts_with = "resume", required_unless_present = "resume")]
     agent: Option<String>,
     /// Resume an existing session id instead of spawning a new one.
@@ -250,7 +251,7 @@ enum AgentsCmd {
         base: MgmtBaseArgs,
         #[arg(long)]
         name: String,
-        #[arg(long, value_parser = ["claude", "gemini", "opencode", "codex"])]
+        #[arg(long, value_parser = agent_preset_parser())]
         preset: String,
         #[arg(long)]
         model: Option<String>,
@@ -306,7 +307,7 @@ struct AgentsUpdateArgs {
     id: String,
     #[arg(long)]
     name: Option<String>,
-    #[arg(long, value_parser = ["claude", "gemini", "opencode", "codex"])]
+    #[arg(long, value_parser = agent_preset_parser())]
     preset: Option<String>,
     #[arg(long, conflicts_with = "clear_model")]
     model: Option<String>,
@@ -1190,6 +1191,12 @@ async fn cmd_engines_list(args: EnginesListArgs) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Clap parser for `--agent`/`--preset` flags. Built from `AgentPreset::ALL`
+/// so adding a new preset is a single-place change in `agents_config.rs`.
+fn agent_preset_parser() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(AgentPreset::ALL.iter().map(|p| p.as_str()))
+}
+
 /// Parse a CLI `--tag k=v` argument. Empty key is rejected. The first `=`
 /// is the separator; subsequent `=` characters are part of the value.
 pub(crate) fn parse_tag_kv(s: &str) -> anyhow::Result<(String, String)> {
@@ -1203,14 +1210,12 @@ pub(crate) fn parse_tag_kv(s: &str) -> anyhow::Result<(String, String)> {
 }
 
 fn validate_flags(args: &RunArgs) -> anyhow::Result<()> {
-    let is_acp_only = matches!(args.agent.as_str(), "gemini" | "opencode" | "codex");
-    let is_claude_like = matches!(args.agent.as_str(), "claude");
-
-    if args.model.is_some() && !is_claude_like {
+    // Only claude-code-acp accepts a per-spawn `--model` switch over ACP
+    // (via its slash-command). For other presets the model is fixed by the
+    // CLI's own config or agents.toml, so a runtime `--model` would be
+    // silently ignored — bail loudly instead.
+    if args.model.is_some() && args.agent != "claude" {
         anyhow::bail!("--model only applies to claude");
-    }
-    if args.permission.is_some() && !(is_acp_only || is_claude_like) {
-        anyhow::bail!("--permission requires an ACP agent");
     }
     if let Some(p) = args.permission.as_deref() {
         if !matches!(p, "allow" | "deny") {
@@ -1295,14 +1300,19 @@ mod tests {
 
     #[test]
     fn validate_flags_accepts_acp_agents_without_optional_args() {
-        for agent in ["claude", "gemini", "opencode", "codex"] {
+        for preset in AgentPreset::ALL {
+            let agent = preset.as_str();
             validate_flags(&args(agent)).unwrap_or_else(|e| panic!("{agent}: {e}"));
         }
     }
 
     #[test]
     fn validate_flags_rejects_model_on_non_claude() {
-        for agent in ["gemini", "opencode", "codex"] {
+        for preset in AgentPreset::ALL {
+            if *preset == AgentPreset::Claude {
+                continue;
+            }
+            let agent = preset.as_str();
             let mut a = args(agent);
             a.model = Some("gpt-x".into());
             let err = validate_flags(&a).unwrap_err().to_string();

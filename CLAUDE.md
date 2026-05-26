@@ -35,6 +35,7 @@ Each preset maps to a specific binary that must be on `PATH` and pre-authenticat
 | `gemini` | `gemini` | Launched with `--acp --skip-trust`; uses `yolo` mode |
 | `opencode` | `opencode` | Launched with `acp`; no ACP modes |
 | `codex` | `codex-acp` | ACP adapter for Codex; uses `full-access` mode |
+| `pi` | `pi-acp` | ACP adapter for `pi` coding agent (spawns `pi --mode rpc` under the hood); install via `npm i -g pi-acp` |
 
 Which presets and models are *surfaced* to clients is controlled by
 `~/.config/roy/agents.toml` (see `docs/agents-config.md`). The four
