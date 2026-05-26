@@ -68,7 +68,14 @@ async fn login_sets_cookie_then_me_returns_profile() {
     assert_eq!(me.status(), StatusCode::OK);
     let bytes = me.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["username"], "alice");
+    assert_eq!(json["user"]["username"], "alice");
+    let ws_token = json["ws_token"].as_str().unwrap();
+    assert!(!ws_token.is_empty(), "ws_token must be non-empty");
+    assert_eq!(
+        ws_token.matches('.').count(),
+        2,
+        "ws_token looks like a JWT"
+    );
 }
 
 #[serial_test::serial]
@@ -296,5 +303,5 @@ async fn invite_create_then_accept_adds_member() {
         .unwrap();
     let me: serde_json::Value =
         serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(me["teams"][0]["id"], team_id);
+    assert_eq!(me["user"]["teams"][0]["id"], team_id);
 }

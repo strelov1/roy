@@ -206,7 +206,8 @@ async fn login(State(state): State<AppState>, req: axum::extract::Request<Body>)
         Ok(p) => p,
         Err(r) => return r,
     };
-    let mut resp = Json(profile).into_response();
+    let body = serde_json::json!({ "user": profile, "ws_token": token });
+    let mut resp = Json(body).into_response();
     resp.headers_mut()
         .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
     resp
@@ -223,11 +224,22 @@ async fn logout() -> Response {
 async fn me(
     axum::extract::Extension(AuthUser(uid)): axum::extract::Extension<AuthUser>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Response {
-    match profile_for(&state, &uid).await {
-        Ok(p) => Json(p).into_response(),
-        Err(r) => r,
-    }
+    let profile = match profile_for(&state, &uid).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    // Echo the JWT cookie value back as `ws_token` so JS (which can't read
+    // the HttpOnly cookie) has something to pass to the WS subprotocol on
+    // page reloads. The middleware already verified this token; we're just
+    // surfacing it in the JSON body.
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let ws_token = roy_auth::cookie::read_jwt_cookie(cookie_header).unwrap_or("");
+    Json(serde_json::json!({ "user": profile, "ws_token": ws_token })).into_response()
 }
 
 /// Build the user's profile. A deleted user with a still-valid JWT (live
