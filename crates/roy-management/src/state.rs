@@ -31,4 +31,7 @@ pub struct AppState {
     /// `Clone` derive on `AppState` keeps all clones pointing at the same
     /// buckets.
     pub login_limiter: Arc<crate::rate_limit::LoginLimiter>,
+    /// 30s TTL cache for filesystem-discovered slash commands. Shared via
+    /// `Arc` so all `AppState` clones see the same cache state.
+    pub commands_cache: Arc<crate::commands::CommandsCache>,
 }

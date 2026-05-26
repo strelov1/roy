@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod bootstrap;
+pub mod commands;
 pub mod cwd;
 pub mod http;
 pub mod meta_store;
@@ -74,6 +75,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         pool,
         workspace_dir,
         login_limiter: Arc::new(crate::rate_limit::LoginLimiter::default()),
+        commands_cache: Arc::new(crate::commands::CommandsCache::default()),
     };
 
     orphan_sweep::spawn(state.meta.clone(), Arc::clone(&state.daemon));

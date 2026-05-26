@@ -38,6 +38,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 thiserror = "2"
 rand = "0.8"
 hex = "0.4"
+dirs = "5"
 
 [dev-dependencies]
 # Self-referencing path enables the `test-support` feature for integration

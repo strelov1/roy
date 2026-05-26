@@ -75,6 +75,7 @@ pub fn router(state: AppState) -> Router {
         .route("/scheduler/agents", get(list_scheduler_agents))
         .route("/scheduler/triggers", get(list_scheduler_triggers))
         .route("/scheduler/fires", get(list_scheduler_fires))
+        .route("/commands", get(list_commands))
         .route("/teams", get(auth::list_teams).post(auth::create_team))
         .route("/teams/{id}", axum::routing::delete(auth::delete_team))
         .route("/auth/invites", post(auth::create_invite))
@@ -106,6 +107,12 @@ fn sched_pool(state: &AppState) -> Result<&SqlitePool, ApiError> {
 fn db_to_api(e: anyhow::Error) -> ApiError {
     tracing::error!(error = %e, "scheduler db error");
     ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+}
+
+async fn list_commands(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::commands::CommandInfo>>, ApiError> {
+    Ok(Json(state.commands_cache.get().await))
 }
 
 async fn list_scheduler_agents(
@@ -731,6 +738,7 @@ mod tests {
             pool,
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
+            commands_cache: std::sync::Arc::new(crate::commands::CommandsCache::default()),
         };
         (state, alice.id)
     }
@@ -1175,6 +1183,7 @@ mod tests {
             pool,
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
+            commands_cache: std::sync::Arc::new(crate::commands::CommandsCache::default()),
         }
     }
 
@@ -1345,6 +1354,7 @@ mod tests {
             pool: agents_pool,
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
+            commands_cache: std::sync::Arc::new(crate::commands::CommandsCache::default()),
         }
     }
 
