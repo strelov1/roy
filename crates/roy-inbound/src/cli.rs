@@ -103,7 +103,9 @@ pub async fn run(args: Args) -> Result<()> {
         }
     });
 
-    tokio::signal::ctrl_c().await.context("waiting for ctrl-c")?;
+    tokio::signal::ctrl_c()
+        .await
+        .context("waiting for ctrl-c")?;
     tracing::info!("ctrl-c received; shutting down");
     cancel.cancel();
     let _ = tokio::join!(dispatcher_handle, pub_handle);

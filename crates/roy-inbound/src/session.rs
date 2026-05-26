@@ -1,6 +1,6 @@
 //! Session strategy + resolver. Resolver impl lands in Task 6.
-use std::time::Duration;
 use serde::Deserialize;
+use std::time::Duration;
 
 // Manual Deserialize below — do NOT also derive(Deserialize) on this enum.
 #[derive(Debug, Clone)]
@@ -20,7 +20,10 @@ impl<'de> serde::Deserialize<'de> for SessionStrategyConfig {
         #[serde(untagged)]
         enum Helper {
             Short(String),
-            Tagged { kind: String, idle_timeout_secs: Option<u64> },
+            Tagged {
+                kind: String,
+                idle_timeout_secs: Option<u64>,
+            },
         }
         match Helper::deserialize(de)? {
             Helper::Short(s) => match s.as_str() {
@@ -30,14 +33,19 @@ impl<'de> serde::Deserialize<'de> for SessionStrategyConfig {
                     "unknown session strategy '{other}' (use tagged form for per_sender_sticky)"
                 ))),
             },
-            Helper::Tagged { kind, idle_timeout_secs } => match kind.as_str() {
+            Helper::Tagged {
+                kind,
+                idle_timeout_secs,
+            } => match kind.as_str() {
                 "ephemeral" => Ok(Self::Ephemeral),
                 "persistent_one" => Ok(Self::PersistentOne),
                 "per_sender_sticky" => {
                     let secs = idle_timeout_secs.ok_or_else(|| {
                         serde::de::Error::custom("per_sender_sticky requires idle_timeout_secs")
                     })?;
-                    Ok(Self::PerSenderSticky { idle_timeout_secs: secs })
+                    Ok(Self::PerSenderSticky {
+                        idle_timeout_secs: secs,
+                    })
                 }
                 other => Err(serde::de::Error::custom(format!("unknown kind '{other}'"))),
             },
@@ -56,9 +64,9 @@ impl SessionStrategyConfig {
     }
 }
 
+use anyhow::Result;
 use roy::FireTarget;
 use std::sync::Arc;
-use anyhow::Result;
 
 use crate::store::bindings::BindingStore;
 
@@ -82,9 +90,9 @@ impl From<&SessionStrategyConfig> for SessionStrategy {
         match c {
             SessionStrategyConfig::Ephemeral => Self::Ephemeral,
             SessionStrategyConfig::PersistentOne => Self::PersistentOne,
-            SessionStrategyConfig::PerSenderSticky { idle_timeout_secs } => {
-                Self::PerSenderSticky { idle_timeout: Duration::from_secs(*idle_timeout_secs) }
-            }
+            SessionStrategyConfig::PerSenderSticky { idle_timeout_secs } => Self::PerSenderSticky {
+                idle_timeout: Duration::from_secs(*idle_timeout_secs),
+            },
         }
     }
 }
@@ -132,11 +140,19 @@ impl SessionResolver {
             SessionStrategy::Ephemeral => Ok((spawn_target(), None)),
             SessionStrategy::PersistentOne => {
                 if let Some(b) = self.bindings.lookup(source_id, "*").await? {
-                    Ok((FireTarget::Resume { session_id: b.session_id }, None))
+                    Ok((
+                        FireTarget::Resume {
+                            session_id: b.session_id,
+                        },
+                        None,
+                    ))
                 } else {
                     Ok((
                         spawn_target(),
-                        Some(PendingBinding { sender_id: "*".into(), ..pending("persistent_one") }),
+                        Some(PendingBinding {
+                            sender_id: "*".into(),
+                            ..pending("persistent_one")
+                        }),
                     ))
                 }
             }
@@ -146,7 +162,12 @@ impl SessionResolver {
                     if age.to_std().map(|d| d > idle_timeout).unwrap_or(false) {
                         Ok((spawn_target(), Some(pending("per_sender_sticky"))))
                     } else {
-                        Ok((FireTarget::Resume { session_id: b.session_id }, None))
+                        Ok((
+                            FireTarget::Resume {
+                                session_id: b.session_id,
+                            },
+                            None,
+                        ))
                     }
                 } else {
                     Ok((spawn_target(), Some(pending("per_sender_sticky"))))
@@ -172,8 +193,10 @@ mod resolver_tests {
     #[tokio::test]
     async fn ephemeral_always_spawn_no_binding() {
         let (_d, r) = resolver().await;
-        let (t, pb) =
-            r.resolve("src", "alice", "agent-1", SessionStrategy::Ephemeral).await.unwrap();
+        let (t, pb) = r
+            .resolve("src", "alice", "agent-1", SessionStrategy::Ephemeral)
+            .await
+            .unwrap();
         assert!(matches!(t, FireTarget::Spawn { .. }));
         assert!(pb.is_none());
     }
@@ -181,7 +204,9 @@ mod resolver_tests {
     #[tokio::test]
     async fn sticky_miss_returns_spawn_plus_pending() {
         let (_d, r) = resolver().await;
-        let strat = SessionStrategy::PerSenderSticky { idle_timeout: Duration::from_secs(3600) };
+        let strat = SessionStrategy::PerSenderSticky {
+            idle_timeout: Duration::from_secs(3600),
+        };
         let (t, pb) = r.resolve("src", "alice", "agent-1", strat).await.unwrap();
         assert!(matches!(t, FireTarget::Spawn { .. }));
         let pb = pb.unwrap();
@@ -196,7 +221,9 @@ mod resolver_tests {
             .upsert("src", "alice", "agent-1", "per_sender_sticky", "sid-old")
             .await
             .unwrap();
-        let strat = SessionStrategy::PerSenderSticky { idle_timeout: Duration::from_secs(3600) };
+        let strat = SessionStrategy::PerSenderSticky {
+            idle_timeout: Duration::from_secs(3600),
+        };
         let (t, pb) = r.resolve("src", "alice", "agent-1", strat).await.unwrap();
         assert!(matches!(t, FireTarget::Resume { ref session_id } if session_id == "sid-old"));
         assert!(pb.is_none());
@@ -216,7 +243,9 @@ mod resolver_tests {
         .execute(r.bindings.pool_for_test())
         .await
         .unwrap();
-        let strat = SessionStrategy::PerSenderSticky { idle_timeout: Duration::from_secs(3600) };
+        let strat = SessionStrategy::PerSenderSticky {
+            idle_timeout: Duration::from_secs(3600),
+        };
         let (t, pb) = r.resolve("src", "alice", "agent-1", strat).await.unwrap();
         assert!(matches!(t, FireTarget::Spawn { .. }));
         assert!(pb.is_some());
@@ -229,8 +258,10 @@ mod resolver_tests {
             .upsert("src", "*", "agent-1", "persistent_one", "sid-pone")
             .await
             .unwrap();
-        let (t, pb) =
-            r.resolve("src", "anything", "agent-1", SessionStrategy::PersistentOne).await.unwrap();
+        let (t, pb) = r
+            .resolve("src", "anything", "agent-1", SessionStrategy::PersistentOne)
+            .await
+            .unwrap();
         assert!(matches!(t, FireTarget::Resume { ref session_id } if session_id == "sid-pone"));
         assert!(pb.is_none());
     }

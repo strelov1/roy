@@ -124,7 +124,10 @@ mod tests {
     #[tokio::test]
     async fn upsert_then_lookup_returns_row() {
         let (_d, s) = store().await;
-        let b = s.upsert("src", "alice", "agent-1", "per_sender_sticky", "sid-1").await.unwrap();
+        let b = s
+            .upsert("src", "alice", "agent-1", "per_sender_sticky", "sid-1")
+            .await
+            .unwrap();
         assert_eq!(b.session_id, "sid-1");
         let b2 = s.lookup("src", "alice").await.unwrap().unwrap();
         assert_eq!(b2.id, b.id);
@@ -133,10 +136,14 @@ mod tests {
     #[tokio::test]
     async fn upsert_overwrites_existing() {
         let (_d, s) = store().await;
-        let first =
-            s.upsert("src", "alice", "agent-1", "per_sender_sticky", "old").await.unwrap();
-        let second =
-            s.upsert("src", "alice", "agent-1", "per_sender_sticky", "new").await.unwrap();
+        let first = s
+            .upsert("src", "alice", "agent-1", "per_sender_sticky", "old")
+            .await
+            .unwrap();
+        let second = s
+            .upsert("src", "alice", "agent-1", "per_sender_sticky", "new")
+            .await
+            .unwrap();
         assert_eq!(first.id, second.id, "upsert keeps same row id");
         assert_eq!(second.session_id, "new");
     }
@@ -144,7 +151,10 @@ mod tests {
     #[tokio::test]
     async fn touch_updates_last_active() {
         let (_d, s) = store().await;
-        let b = s.upsert("src", "alice", "a", "per_sender_sticky", "sid").await.unwrap();
+        let b = s
+            .upsert("src", "alice", "a", "per_sender_sticky", "sid")
+            .await
+            .unwrap();
         let before = b.last_active_at;
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         s.touch(&b.id).await.unwrap();
@@ -155,7 +165,10 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_row() {
         let (_d, s) = store().await;
-        let b = s.upsert("src", "alice", "a", "per_sender_sticky", "sid").await.unwrap();
+        let b = s
+            .upsert("src", "alice", "a", "per_sender_sticky", "sid")
+            .await
+            .unwrap();
         s.delete(&b.id).await.unwrap();
         assert!(s.lookup("src", "alice").await.unwrap().is_none());
     }

@@ -1,0 +1,30 @@
+[bus]
+capacity = 256
+
+[server]
+bind = "127.0.0.1:8090"
+
+# Synchronous webhook returning the agent's answer in the HTTP response.
+[[sources]]
+id = "orders"
+kind = "webhook"
+agent_id = "order-bot"
+session = "ephemeral"
+fire_timeout_secs = 600
+template = "New order: {{payload.body}}"
+  [sources.webhook]
+  path = "/webhooks/orders"
+  secret_env = "ORDERS_WEBHOOK_SECRET"
+  reply_mode = "sync"
+
+# Async / fire-and-forget — caller gets 202 immediately.
+[[sources]]
+id = "cron-alert"
+kind = "webhook"
+agent_id = "alert-bot"
+session = "ephemeral"
+fire_timeout_secs = 60
+template = "Alert: {{payload.body.message}}"
+  [sources.webhook]
+  path = "/webhooks/alert"
+  reply_mode = "async"

@@ -13,7 +13,7 @@ Non-negotiable expectations for any change in this repo:
 
 ## What this is
 
-A Cargo workspace with seven crates:
+A Cargo workspace with eight crates:
 
 - **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting boot-kit metadata in SQLite (`~/.local/state/roy/sessions.db`) so sessions survive across daemon restarts.
 - **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket). The `roy mcp`, `roy gateway`, `roy scheduler`, and `roy management` subcommands delegate to the matching adapter crates, so a single binary covers every adapter.
@@ -22,8 +22,9 @@ A Cargo workspace with seven crates:
 - **`crates/roy-gateway`** — library. Chat-platform and WebSocket bridge to the daemon (Telegram adapter + WS relay). Exposes `pub async fn run(args)`; `roy-cli` dispatches `roy gateway` to it. Same boundary rule as `roy-scheduler`. Persists `chat_id → roy session_id` in a JSON file so chats survive restarts.
 - **`crates/roy-agents`** — library. Canonical agent store: `Agent` type (identity + persona `prompt` + optional scheduled `task`), SQLite CRUD with slug-collision suffixing. Used by `roy-management` today; `roy-scheduler` is planned to migrate onto it later. Shared DB file lives at `~/.local/state/roy/agents.db` (override with `ROY_AGENTS_DB`).
 - **`crates/roy-management`** — library. axum HTTP service for agent CRUD, session coordination, and project/tag management. Exposes `pub async fn run(args)`; `roy-cli` dispatches `roy management` to it. Owns `MetaStore` (SQLite at `~/.local/state/roy/agents.db`): `projects`, `session_meta`, `session_tags` tables co-located with `roy-agents`'s `agents` table. Talks to the daemon over Unix socket via `DaemonClient` trait (for session operations that need coordination); routes project/tag operations directly to the database. Transitional note: `roy-scheduler` still has its own `agents` table until a future Plan C unifies it onto `roy-agents`.
+- **`crates/roy-inbound`** — library + thin binary. Inbound event bus for external systems (HTTP webhook today, IMAP / WhatsApp / Telegram-customer-support later). Pure publishers normalize external events into `InboundEvent`s onto an in-process `tokio::mpsc` bus; a single dispatcher resolves a per-source session strategy (`ephemeral`/`persistent_one`/`per_sender_sticky`), fires the agent over the daemon Unix socket, and a per-channel `ReplyHook` delivers the result back. Same boundary rule as `roy-scheduler`/`roy-gateway`. Owns SQLite state at `~/.local/state/roy-inbound/state.db` (table `bindings`). Configured via TOML (`~/.config/roy/inbound.toml`).
 
-External crates (`roy-mcp`, `roy-scheduler`, `roy-gateway`, `roy-management`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API.
+External crates (`roy-mcp`, `roy-scheduler`, `roy-gateway`, `roy-management`, `roy-inbound`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API.
 
 Roy spawns agent CLIs; it does not install them. The agent's working directory comes from the client: `roy run --cwd …`, MCP `cwd` argument, or `ClientCommand::Spawn.cwd`. When no client supplies one, the daemon falls back to `ROY_CWD` (env), then its own `current_dir`. Set `ROY_CWD` on the systemd/launchd unit to pin a default project root for every default-cwd session.
 

@@ -13,9 +13,18 @@ use crate::bus::{EventRef, ReplyHandle};
 
 #[derive(Debug, Clone)]
 pub enum FireOutcome {
-    Ok { assistant_text: String, cost_usd: Option<f64>, stop_reason: String },
-    DaemonError { code: ErrorCode, message: String },
-    Timeout { partial_text: Option<String> },
+    Ok {
+        assistant_text: String,
+        cost_usd: Option<f64>,
+        stop_reason: String,
+    },
+    DaemonError {
+        code: ErrorCode,
+        message: String,
+    },
+    Timeout {
+        partial_text: Option<String>,
+    },
     Cancelled,
     RouteRejected,
 }
@@ -35,7 +44,11 @@ pub struct ReplyHookRegistry {
 }
 
 impl ReplyHookRegistry {
-    pub fn new() -> Self { Self { factories: HashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            factories: HashMap::new(),
+        }
+    }
 
     pub fn register(&mut self, kind: &str, factory: ReplyHookFactory) {
         self.factories.insert(kind.into(), factory);
@@ -47,5 +60,7 @@ impl ReplyHookRegistry {
 }
 
 impl Default for ReplyHookRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
