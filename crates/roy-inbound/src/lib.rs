@@ -4,6 +4,7 @@
 pub mod bus;
 pub mod channels;
 pub mod config;
+pub mod router;
 pub mod session;
 pub mod store;
 pub mod template;
