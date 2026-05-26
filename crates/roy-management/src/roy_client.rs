@@ -160,8 +160,8 @@ async fn connect_and_send(
     Ok(BufReader::new(reader).lines())
 }
 
-#[cfg(test)]
-pub(crate) mod mock {
+#[cfg(any(test, feature = "test-support"))]
+pub mod mock {
     use super::*;
     use std::sync::Mutex;
 
@@ -184,6 +184,18 @@ pub(crate) mod mock {
         pub fn with_spawn(mut self, sid: &str) -> Self {
             self.spawn_response = Mutex::new(Some(Ok(sid.into())));
             self
+        }
+
+        /// Returns the most recent spawn request recorded by this mock.
+        /// Panics if no spawn has been recorded yet — intended for tests that
+        /// have already issued a request and want to assert on its shape.
+        pub fn last_spawn(&self) -> SpawnRequest {
+            self.recorded_spawns
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("no spawn recorded")
         }
     }
 
@@ -236,6 +248,7 @@ pub async fn spawn(
     model: Option<String>,
     system_prompt: Option<String>,
     tags: BTreeMap<String, String>,
+    created_by: &str,
 ) -> Result<String> {
     let session = UnixSocketDaemonClient::new(socket.to_path_buf())
         .spawn(SpawnRequest {
@@ -249,12 +262,17 @@ pub async fn spawn(
     // Persist tags into management-owned meta so `GET /sessions` returns
     // them. If this fails after the daemon spawned, the session leaks meta —
     // log and surface the error so the caller can decide how to handle it.
+    // `created_by` is the authenticated user_id threaded from the HTTP handler;
+    // the wire-format `SpawnRequest` carries no user identity (the daemon is
+    // trusted), so ownership is recorded only in management-side meta.
     let row = SessionMeta {
         session_id: session.clone(),
         project_id: None,
         agent_id: None,
         agent_name: None,
         display_label: None,
+        created_by: created_by.into(),
+        team_id: None,
         tags,
         created_at: chrono::Utc::now().timestamp(),
     };

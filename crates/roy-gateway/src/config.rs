@@ -57,13 +57,11 @@ pub struct BinderConfig {
 #[derive(Debug, Deserialize)]
 pub struct WebsocketConfig {
     /// Address to bind the WS listener on. Loopback-only by default; set an
-    /// external address only behind your own TLS termination.
+    /// external address only behind your own TLS termination. Auth is now
+    /// JWT-based via `Sec-WebSocket-Protocol` (see `roy-auth`), so no token
+    /// file lives in this config.
     #[serde(default = "default_ws_bind")]
     pub bind: String,
-    /// Path to the shared-secret token file. When `None`, defaults to
-    /// `~/.local/state/roy-gateway/ws.token`.
-    #[serde(default)]
-    pub token_path: Option<String>,
 }
 
 fn default_ws_bind() -> String {
@@ -111,7 +109,6 @@ mod tests {
 
             [websocket]
             bind = "127.0.0.1:9001"
-            token_path = "/tmp/ws.token"
         "#;
         let cfg: GatewayConfig = toml::from_str(raw).unwrap();
         assert_eq!(cfg.daemon.socket.as_deref(), Some("/tmp/roy.sock"));
@@ -119,7 +116,6 @@ mod tests {
         assert_eq!(tg.token, "1234:abc");
         let ws = cfg.websocket.as_ref().unwrap();
         assert_eq!(ws.bind, "127.0.0.1:9001");
-        assert_eq!(ws.token_path.as_deref(), Some("/tmp/ws.token"));
     }
 
     #[test]
@@ -133,7 +129,6 @@ mod tests {
         assert!(cfg.binder.is_none());
         let ws = cfg.websocket.as_ref().unwrap();
         assert_eq!(ws.bind, "127.0.0.1:8787");
-        assert!(ws.token_path.is_none());
         cfg.validate().expect("ws-only is valid");
     }
 

@@ -2,9 +2,14 @@
 //! The bin is a thin clap-driven entrypoint over these modules; integration
 //! tests link this library directly to exercise the real wire code paths.
 
+pub mod auth;
+pub mod bootstrap;
+pub mod commands;
+pub mod cwd;
 pub mod http;
 pub mod meta_store;
 pub mod orphan_sweep;
+pub mod rate_limit;
 pub mod roy_client;
 pub mod state;
 
@@ -31,14 +36,22 @@ pub struct Args {
 pub async fn run(args: Args) -> anyhow::Result<()> {
     use std::sync::Arc;
 
+    // Fail fast on a misconfigured JWT secret before touching any SQLite
+    // files. `secret_from_env` returns the secret string but we throw it
+    // away here — each `/auth/login` call re-reads it from env.
+    roy_auth::jwt::secret_from_env()
+        .map_err(|e| anyhow::anyhow!("ROY_JWT_SECRET missing or shorter than 32 bytes: {e}"))?;
+
     let db_path = args.db.unwrap_or_else(roy_agents::default_db_path);
     let pool = roy_agents::open(&db_path).await?;
 
     meta_store::MetaStore::apply_migrations(&pool).await?;
+    roy_auth::apply_migrations(&pool).await?;
+    bootstrap::ensure_root(&pool).await?;
     let socket = args.socket.unwrap_or_else(default_socket);
     let workspace_dir = meta_store::default_workspace_dir();
     std::fs::create_dir_all(&workspace_dir)?;
-    let meta = meta_store::MetaStore::new(pool.clone(), workspace_dir);
+    let meta = meta_store::MetaStore::new(pool.clone(), workspace_dir.clone());
     let daemon: Arc<dyn roy_client::DaemonClient> =
         Arc::new(roy_client::UnixSocketDaemonClient::new(socket.clone()));
 
@@ -60,11 +73,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     };
 
     let state = AppState {
-        store: roy_agents::Store::new(pool),
+        store: roy_agents::Store::new(pool.clone()),
         meta,
         daemon,
         socket_path: socket,
         scheduler_pool,
+        pool,
+        workspace_dir,
+        login_limiter: Arc::new(crate::rate_limit::LoginLimiter::default()),
+        commands_cache: Arc::new(crate::commands::CommandsCache::default()),
     };
 
     orphan_sweep::spawn(state.meta.clone(), Arc::clone(&state.daemon));
@@ -78,7 +95,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         "listening on {}",
         bound
     );
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

@@ -17,6 +17,7 @@ use roy::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+mod auth;
 mod management;
 mod management_client;
 
@@ -92,6 +93,32 @@ enum Cmd {
     },
     /// Set the tag map for a session (HTTP-routed through roy-management).
     SetTags(SetTagsArgs),
+    /// User auth: log in, show current user, or reset a password.
+    Auth(AuthArgs),
+}
+
+#[derive(clap::Args)]
+struct AuthArgs {
+    #[command(subcommand)]
+    cmd: AuthCmd,
+    /// roy-management base URL. Overrides $ROY_MANAGEMENT_URL.
+    #[arg(
+        long,
+        env = "ROY_MANAGEMENT_URL",
+        default_value = "http://127.0.0.1:8079"
+    )]
+    api: String,
+}
+
+#[derive(Subcommand)]
+enum AuthCmd {
+    /// Prompt for username and password, POST to /auth/login, save the cookie.
+    Login,
+    /// Show the currently-authenticated user (calls /auth/me with saved cookie).
+    Whoami,
+    /// Reset a user's password directly in the agents DB. No login required —
+    /// this is the local escape hatch when no one can sign in.
+    Reset { username: String },
 }
 
 #[derive(Subcommand)]
@@ -401,7 +428,17 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Agents { cmd } => cmd_agents(cmd).await,
         Cmd::Projects { cmd } => cmd_projects(cmd).await,
         Cmd::SetTags(args) => cmd_set_tags(args).await,
+        Cmd::Auth(args) => cmd_auth(args).await,
     }
+}
+
+async fn cmd_auth(args: AuthArgs) -> anyhow::Result<ExitCode> {
+    match args.cmd {
+        AuthCmd::Login => crate::auth::login(&args.api).await?,
+        AuthCmd::Whoami => crate::auth::whoami(&args.api).await?,
+        AuthCmd::Reset { username } => crate::auth::reset_password(&username).await?,
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn cmd_projects(cmd: ProjectsCmd) -> anyhow::Result<ExitCode> {
