@@ -41,3 +41,14 @@ fn expired_token_fails() {
         Err(JwtError::Expired)
     ));
 }
+
+#[test]
+fn cookie_parser_extracts_token() {
+    let raw = "other=1; roy-jwt=abc.def.ghi; foo=bar";
+    assert_eq!(roy_auth::cookie::read_jwt_cookie(raw), Some("abc.def.ghi"));
+}
+
+#[test]
+fn cookie_parser_returns_none_when_missing() {
+    assert_eq!(roy_auth::cookie::read_jwt_cookie("foo=bar"), None);
+}
