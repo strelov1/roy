@@ -4,6 +4,8 @@
 //! The test calls the real `roy_management::roy_client::spawn` so any
 //! regression in the wire serialization is caught here.
 
+use std::collections::BTreeMap;
+
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
@@ -38,8 +40,15 @@ async fn run_sends_persona_as_system_prompt() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let daemon = tokio::spawn(fake_daemon(socket.clone(), tx));
 
-    // Build the store, insert an agent.
+    // Build the store, insert an agent. roy-management's `meta_store` adds
+    // tables to the same SQLite DB; apply both sets of migrations so the
+    // post-spawn tag persistence has somewhere to land.
     let pool = roy_agents::open(&db).await.unwrap();
+    roy_management::meta_store::MetaStore::apply_migrations(&pool)
+        .await
+        .unwrap();
+    let workspace = dir.path().join("workspace");
+    let meta = roy_management::meta_store::MetaStore::new(pool.clone(), workspace);
     let store = roy_agents::Store::new(pool);
     let agent = store
         .create(roy_agents::NewAgent {
@@ -55,11 +64,15 @@ async fn run_sends_persona_as_system_prompt() {
         .unwrap();
 
     // The real wire call — same code path `POST /agents/{id}/run` uses.
+    let mut tags = BTreeMap::new();
+    tags.insert("roy-management:agent_id".into(), agent.id.clone());
     let session = roy_management::roy_client::spawn(
         &socket,
+        &meta,
         &agent.preset,
         agent.model.clone(),
         Some(agent.prompt.clone()),
+        tags,
     )
     .await
     .unwrap();
@@ -70,5 +83,10 @@ async fn run_sends_persona_as_system_prompt() {
     assert_eq!(cmd["agent"], "claude");
     assert_eq!(cmd["model"], "claude-opus-4-7");
     assert_eq!(cmd["system_prompt"], "You are terse.");
+
+    // Tags landed in the meta store so the UI can render the row marker.
+    let row = meta.get_session_meta(&session).await.unwrap().unwrap();
+    assert_eq!(row.tags.get("roy-management:agent_id"), Some(&agent.id));
+
     daemon.await.unwrap();
 }

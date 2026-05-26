@@ -97,7 +97,7 @@ pub struct ServeOpts {
 impl Default for ServeOpts {
     fn default() -> Self {
         Self {
-            db_path: default_db_path(),
+            db_path: crate::default_db_path(),
             socket_path: default_socket_path(),
             poll_interval: Duration::from_millis(1500),
             batch_limit: 50,
@@ -105,14 +105,6 @@ impl Default for ServeOpts {
             fire_timeout: Duration::from_secs(600),
         }
     }
-}
-
-fn default_db_path() -> PathBuf {
-    if let Ok(s) = std::env::var("ROY_SCHEDULER_DB") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".local/state/roy-scheduler/state.db")
 }
 
 fn default_socket_path() -> PathBuf {

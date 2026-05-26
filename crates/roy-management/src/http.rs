@@ -5,14 +5,20 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use roy_agents::{Agent, AgentUpdate, NewAgent, StoreError};
+use roy_scheduler::{
+    store as sched_store,
+    types::{Agent as SchedulerAgent, Fire, Trigger},
+};
+use serde::Deserialize;
 use serde_json::json;
+use sqlx::SqlitePool;
 
 use crate::roy_client;
 use crate::state::AppState;
@@ -57,7 +63,66 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).patch(patch_session))
         .route("/sessions/{id}/tags", axum::routing::put(put_tags))
+        .route("/scheduler/agents", get(list_scheduler_agents))
+        .route("/scheduler/triggers", get(list_scheduler_triggers))
+        .route("/scheduler/fires", get(list_scheduler_fires))
         .with_state(state)
+}
+
+fn sched_pool(state: &AppState) -> Result<&SqlitePool, ApiError> {
+    state.scheduler_pool.as_ref().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scheduler DB not attached — start roy-scheduler at least once to initialize it".into(),
+        )
+    })
+}
+
+fn db_to_api(e: anyhow::Error) -> ApiError {
+    tracing::error!(error = %e, "scheduler db error");
+    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+}
+
+async fn list_scheduler_agents(
+    State(s): State<AppState>,
+) -> Result<Json<Vec<SchedulerAgent>>, ApiError> {
+    let pool = sched_pool(&s)?;
+    sched_store::agents::list(pool)
+        .await
+        .map(Json)
+        .map_err(db_to_api)
+}
+
+async fn list_scheduler_triggers(
+    State(s): State<AppState>,
+    Query(q): Query<SchedListQuery>,
+) -> Result<Json<Vec<Trigger>>, ApiError> {
+    let pool = sched_pool(&s)?;
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    let v = match q.agent {
+        Some(id) => sched_store::triggers::list_for_agent(pool, &id).await,
+        None => sched_store::triggers::list_all(pool, limit).await,
+    };
+    v.map(Json).map_err(db_to_api)
+}
+
+async fn list_scheduler_fires(
+    State(s): State<AppState>,
+    Query(q): Query<SchedListQuery>,
+) -> Result<Json<Vec<Fire>>, ApiError> {
+    let pool = sched_pool(&s)?;
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let v = match q.agent {
+        Some(id) => sched_store::fires::list_for_agent(pool, &id, limit).await,
+        None => sched_store::fires::list_recent(pool, limit).await,
+    };
+    v.map(Json).map_err(db_to_api)
+}
+
+#[derive(Deserialize, Default)]
+struct SchedListQuery {
+    agent: Option<String>,
+    limit: Option<i64>,
 }
 
 async fn list_agents(State(s): State<AppState>) -> Result<Json<Vec<Agent>>, ApiError> {
@@ -111,11 +176,15 @@ async fn run_agent(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let agent = s.store.get(&id).await?;
+    let mut tags = BTreeMap::new();
+    tags.insert("roy-management:agent_id".into(), agent.id.clone());
     let session = roy_client::spawn(
         &s.socket_path,
+        &s.meta,
         &agent.preset,
         agent.model,
         Some(agent.prompt),
+        tags,
     )
     .await
     .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
@@ -171,11 +240,16 @@ async fn start_builder(
         id = target.id,
     );
 
+    let mut tags = BTreeMap::new();
+    tags.insert("roy-management:builder.agent_id".into(), target.id.clone());
+
     let session = roy_client::spawn(
         &s.socket_path,
+        &s.meta,
         &builder.preset,
         builder.model.clone(),
         Some(system_prompt),
+        tags,
     )
     .await
     .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
@@ -466,6 +540,7 @@ mod tests {
             meta: MetaStore::new(pool, workspace),
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
+            scheduler_pool: None,
         }
     }
 
@@ -741,6 +816,7 @@ mod tests {
             meta: crate::meta_store::MetaStore::new(pool, workspace),
             daemon: std::sync::Arc::new(crate::roy_client::mock::MockDaemonClient::new()),
             socket_path: socket,
+            scheduler_pool: None,
         }
     }
 
@@ -796,6 +872,20 @@ mod tests {
         let sp = cmd["system_prompt"].as_str().unwrap();
         assert!(sp.contains("Agent Builder"), "got: {sp}");
         assert!(sp.contains(&agent_id), "got: {sp}");
+
+        // The builder session must carry the marker tag so the sidebar can
+        // render a wrench icon next to it.
+        let meta = state
+            .meta
+            .get_session_meta("sess-99")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            meta.tags.get("roy-management:builder.agent_id"),
+            Some(&agent_id)
+        );
+
         daemon.await.unwrap();
     }
 
@@ -864,5 +954,114 @@ mod tests {
         let sp = cmd["system_prompt"].as_str().unwrap();
         assert!(sp.contains(&existing.id), "got: {sp}");
         daemon.await.unwrap();
+    }
+
+    /// State backed by a real (empty) scheduler DB attached. Tests that need
+    /// to write fixture rows take the pool back out via state.scheduler_pool.
+    async fn state_with_scheduler() -> AppState {
+        use crate::meta_store::MetaStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let agents_pool = roy_agents::open(&dir.path().join("agents.db"))
+            .await
+            .unwrap();
+        MetaStore::apply_migrations(&agents_pool).await.unwrap();
+        let workspace = dir.path().join("workspace");
+        let sched_pool = roy_scheduler::db::open(&dir.path().join("scheduler.db"))
+            .await
+            .unwrap();
+        std::mem::forget(dir);
+        AppState {
+            store: roy_agents::Store::new(agents_pool.clone()),
+            meta: MetaStore::new(agents_pool, workspace),
+            daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
+            socket_path: "/nonexistent.sock".into(),
+            scheduler_pool: Some(sched_pool),
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_endpoints_503_when_unattached() {
+        let app = router(test_state().await);
+        for path in [
+            "/scheduler/agents",
+            "/scheduler/triggers",
+            "/scheduler/fires",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} should be 503 when scheduler_pool=None"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_triggers_lists_seeded_rows() {
+        let state = state_with_scheduler().await;
+        let pool = state.scheduler_pool.clone().unwrap();
+        let agent = roy_scheduler::store::agents::insert(
+            &pool,
+            roy_scheduler::store::agents::NewAgent {
+                name: "nightly".into(),
+                preset: "claude".into(),
+                project_id: None,
+                task: "Summarize the day".into(),
+                model: None,
+                persistent: false,
+                notify_session: None,
+            },
+        )
+        .await
+        .unwrap();
+        roy_scheduler::store::triggers::insert_cron(
+            &pool,
+            roy_scheduler::store::triggers::NewCronTrigger {
+                agent_id: agent.id.clone(),
+                cron_expr: "0 9 * * *".into(),
+                timezone: "UTC".into(),
+                next_fire_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/scheduler/triggers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["agent_id"], agent.id);
+        assert_eq!(rows[0]["cron_expr"], "0 9 * * *");
+    }
+
+    #[tokio::test]
+    async fn scheduler_fires_empty_db_returns_empty_list() {
+        let app = router(state_with_scheduler().await);
+        let resp = app
+            .oneshot(
+                Request::get("/scheduler/fires?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert!(rows.is_empty(), "empty DB → empty list");
     }
 }

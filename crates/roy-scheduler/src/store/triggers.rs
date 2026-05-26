@@ -77,6 +77,14 @@ pub async fn list_for_agent(pool: &SqlitePool, agent_id: &str) -> Result<Vec<Tri
     Ok(v)
 }
 
+pub async fn list_all(pool: &SqlitePool, limit: i64) -> Result<Vec<Trigger>> {
+    let v = sqlx::query_as::<_, Trigger>("SELECT * FROM triggers ORDER BY created_at DESC LIMIT ?")
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(v)
+}
+
 /// Claim-transaction read. Returns triggers with `paused = 0` and
 /// `next_fire_at <= now`, ordered oldest-due first, capped at `limit`.
 /// SQLite has no SKIP LOCKED — single-writer scheduler doesn't need it.

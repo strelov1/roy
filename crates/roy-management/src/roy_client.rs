@@ -2,6 +2,7 @@
 //! coordination, plus the production `UnixSocketDaemonClient` impl. Tests
 //! use `MockDaemonClient` (see `meta_store::tests`).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -9,6 +10,8 @@ use async_trait::async_trait;
 use roy::{ClientCommand, ServerEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+use crate::meta_store::{MetaStore, SessionMeta};
 
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
@@ -219,16 +222,22 @@ pub(crate) mod mock {
     }
 }
 
-// Preserve previous free-function for run_agent until the HTTP migration in
-// later tasks; will be removed when POST /agents/{id}/run goes through
-// /sessions.
+// Preserve previous free-function for run_agent / start_builder until the HTTP
+// migration in later tasks; will be removed when POST /agents/{id}/run and
+// POST /agents/_builder go through /sessions. `tags` is persisted to
+// `meta_store` after the daemon spawn so the UI can mark these sessions
+// (e.g. builder sessions get a wrench icon in the sidebar). The daemon's
+// wire protocol does not currently carry tags on `Spawn`; tags live entirely
+// in management-side meta.
 pub async fn spawn(
     socket: &Path,
+    meta: &MetaStore,
     preset: &str,
     model: Option<String>,
     system_prompt: Option<String>,
+    tags: BTreeMap<String, String>,
 ) -> Result<String> {
-    UnixSocketDaemonClient::new(socket.to_path_buf())
+    let session = UnixSocketDaemonClient::new(socket.to_path_buf())
         .spawn(SpawnRequest {
             agent: preset.into(),
             cwd: None,
@@ -236,7 +245,23 @@ pub async fn spawn(
             permission: None,
             system_prompt,
         })
+        .await?;
+    // Persist tags into management-owned meta so `GET /sessions` returns
+    // them. If this fails after the daemon spawned, the session leaks meta —
+    // log and surface the error so the caller can decide how to handle it.
+    let row = SessionMeta {
+        session_id: session.clone(),
+        project_id: None,
+        agent_id: None,
+        agent_name: None,
+        display_label: None,
+        tags,
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    meta.upsert_session_meta(&row)
         .await
+        .with_context(|| format!("persisting tags for session {session}"))?;
+    Ok(session)
 }
 
 pub async fn list_presets(socket: &Path) -> Result<serde_json::Value> {
