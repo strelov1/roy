@@ -483,7 +483,7 @@ async fn put_tags(
         .replace_tags(&id, &body.tags)
         .await
         .map_err(meta_to_api)?;
-    Ok(StatusCode::OK)
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(serde::Deserialize)]
@@ -515,7 +515,7 @@ async fn patch_session(
         .upsert_session_meta(&meta)
         .await
         .map_err(meta_to_api)?;
-    Ok(StatusCode::OK)
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn meta_to_api(e: crate::meta_store::MetaError) -> ApiError {
