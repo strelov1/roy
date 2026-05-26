@@ -27,3 +27,66 @@ async fn migration_creates_users_table() {
             .unwrap();
     assert_eq!(tables.len(), 1);
 }
+
+use roy_auth::{NewUser, UserStore, UserStoreError};
+
+#[tokio::test]
+async fn create_user_then_lookup() {
+    let pool = fresh_pool().await;
+    let store = UserStore::new(pool);
+    let user = store
+        .create(NewUser {
+            username: "alice".into(),
+            display_name: "Alice".into(),
+            password: "correcthorsebattery".into(),
+            timezone: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(user.username, "alice");
+    assert_ne!(user.password_hash, "correcthorsebattery"); // hashed
+
+    let by_id = store.get(&user.id).await.unwrap();
+    assert_eq!(by_id.username, "alice");
+    let by_name = store.get_by_username("ALICE").await.unwrap(); // COLLATE NOCASE
+    assert_eq!(by_name.id, user.id);
+    assert!(store.has_any().await.unwrap());
+}
+
+#[tokio::test]
+async fn duplicate_username_rejected() {
+    let pool = fresh_pool().await;
+    let store = UserStore::new(pool);
+    let mk = || NewUser {
+        username: "alice".into(),
+        display_name: "A".into(),
+        password: "12345678".into(),
+        timezone: None,
+    };
+    store.create(mk()).await.unwrap();
+    let err = store.create(mk()).await.unwrap_err();
+    assert!(matches!(err, UserStoreError::UsernameTaken));
+}
+
+#[tokio::test]
+async fn short_password_rejected() {
+    let pool = fresh_pool().await;
+    let store = UserStore::new(pool);
+    let err = store
+        .create(NewUser {
+            username: "bob".into(),
+            display_name: "B".into(),
+            password: "short".into(),
+            timezone: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, UserStoreError::Invalid(_)));
+}
+
+#[test]
+fn hash_and_verify_round_trip() {
+    let hash = roy_auth::hash_password("hunter22-correct").unwrap();
+    assert!(roy_auth::verify_password("hunter22-correct", &hash).unwrap());
+    assert!(!roy_auth::verify_password("wrong", &hash).unwrap());
+}
