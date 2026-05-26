@@ -5,6 +5,7 @@ pub mod bus;
 pub mod channels;
 pub mod config;
 pub mod daemon_client;
+pub mod dispatcher;
 pub mod reply;
 pub mod router;
 pub mod session;
