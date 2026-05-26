@@ -14,8 +14,13 @@ use std::path::PathBuf;
 
 /// Resolve a password value with graceful fallbacks. When `prompt_confirm` is
 /// true and the password isn't supplied non-interactively, the interactive
-/// prompt asks twice and verifies they match.
-fn resolve_password(flag: Option<&str>, prompt: &str, prompt_confirm: bool) -> anyhow::Result<String> {
+/// prompt asks twice and verifies they match. The returned string is always
+/// trimmed — callers can use the value directly.
+fn resolve_password(
+    flag: Option<&str>,
+    prompt: &str,
+    prompt_confirm: bool,
+) -> anyhow::Result<String> {
     use std::io::IsTerminal;
     if let Some(p) = flag {
         return Ok(p.trim().to_string());
@@ -24,7 +29,6 @@ fn resolve_password(flag: Option<&str>, prompt: &str, prompt_confirm: bool) -> a
         return Ok(p.trim().to_string());
     }
     if !std::io::stdin().is_terminal() {
-        // Piped input — read one line.
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         return Ok(line.trim().to_string());
@@ -37,6 +41,23 @@ fn resolve_password(flag: Option<&str>, prompt: &str, prompt_confirm: bool) -> a
         }
     }
     Ok(pw.trim().to_string())
+}
+
+/// Open the shared agents.db with the same options the daemon uses. Both
+/// `create_user` and `reset_password` need this pool — without the helper
+/// the boilerplate copies drift.
+async fn open_agents_pool() -> anyhow::Result<sqlx::SqlitePool> {
+    let db = roy_agents::default_db_path();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&db)
+                .create_if_missing(false)
+                .foreign_keys(true),
+        )
+        .await?;
+    Ok(pool)
 }
 
 pub fn cookie_path() -> PathBuf {
@@ -126,21 +147,12 @@ pub async fn create_user(
     if new_pw.len() < 8 {
         anyhow::bail!("password too short (min 8)");
     }
-    let db = roy_agents::default_db_path();
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(&db)
-                .create_if_missing(false)
-                .foreign_keys(true),
-        )
-        .await?;
+    let pool = open_agents_pool().await?;
     let user = roy_auth::UserStore::new(pool)
         .create(roy_auth::NewUser {
             username: username.into(),
             display_name: display_name.unwrap_or(username).into(),
-            password: new_pw.trim().into(),
+            password: new_pw,
             timezone: None,
         })
         .await?;
@@ -153,21 +165,12 @@ pub async fn reset_password(username: &str, password: Option<&str>) -> anyhow::R
     if new_pw.len() < 8 {
         anyhow::bail!("password too short (min 8)");
     }
-    let db = roy_agents::default_db_path();
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(&db)
-                .create_if_missing(false)
-                .foreign_keys(true),
-        )
-        .await?;
+    let pool = open_agents_pool().await?;
     let user = roy_auth::UserStore::new(pool.clone())
         .get_by_username(username)
         .await?;
     roy_auth::UserStore::new(pool)
-        .set_password(&user.id, new_pw.trim())
+        .set_password(&user.id, &new_pw)
         .await?;
     println!("Password updated for {username}");
     Ok(())
