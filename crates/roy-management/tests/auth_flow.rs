@@ -1,10 +1,11 @@
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use common::{login_as, test_app};
 use http_body_util::BodyExt;
-use roy_auth::test_support::{temp_pool, TEST_JWT_SECRET};
+use roy_auth::test_support::temp_pool;
 use roy_management::bootstrap::ensure_root;
-use roy_management::http::router_for_tests;
-use roy_management::state::AppState;
 use tower::ServiceExt;
 
 #[serial_test::serial]
@@ -23,43 +24,6 @@ async fn bootstrap_creates_user_when_table_empty() {
         .await
         .unwrap();
     assert_eq!(user.username, "root");
-}
-
-async fn test_app() -> (axum::Router, sqlx::SqlitePool, std::path::PathBuf) {
-    std::env::set_var("ROY_JWT_SECRET", TEST_JWT_SECRET);
-    // Use `roy_agents::open` so the shared `agents.db` gets the full migration
-    // stack (roy-agents v1-v3 + roy-management v4+) before roy-auth's
-    // migrations layer on top. `roy_auth::test_support::temp_pool` skips the
-    // roy-agents step, which leaves the `agents` table absent.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let pool = roy_agents::open(&dir.path().join("agents.db"))
-        .await
-        .unwrap();
-    roy_management::meta_store::MetaStore::apply_migrations(&pool)
-        .await
-        .unwrap();
-    roy_auth::apply_migrations(&pool).await.unwrap();
-    // Keep the tempdir alive for the test's lifetime — dropping it would
-    // invalidate the SQLite file referenced by the pool.
-    std::mem::forget(dir);
-    let workspace_dir = std::env::temp_dir().join(format!("roy-test-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&workspace_dir).unwrap();
-    let meta = roy_management::meta_store::MetaStore::new(pool.clone(), workspace_dir.clone());
-
-    let daemon = std::sync::Arc::new(
-        roy_management::roy_client::mock::MockDaemonClient::new().with_spawn("sess-1"),
-    );
-    let state = AppState {
-        store: roy_agents::Store::new(pool.clone()),
-        meta,
-        daemon,
-        socket_path: std::path::PathBuf::from("/tmp/fake.sock"),
-        scheduler_pool: None,
-        pool: pool.clone(),
-        workspace_dir: workspace_dir.clone(),
-        login_limiter: std::sync::Arc::new(roy_management::rate_limit::LoginLimiter::default()),
-    };
-    (router_for_tests(state), pool, workspace_dir)
 }
 
 #[serial_test::serial]
@@ -136,28 +100,6 @@ async fn login_wrong_password_is_401() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-async fn login_as(app: &axum::Router, username: &str, password: &str) -> String {
-    let body = serde_json::to_vec(&serde_json::json!({"username": username, "password": password}))
-        .unwrap();
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::post("/auth/login")
-                .header("content-type", "application/json")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    resp.headers()
-        .get("set-cookie")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string()
 }
 
 /// End-to-end: a logged-in user POSTs /sessions; the handler runs ACL
