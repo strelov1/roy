@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 roy = { path = "../roy" }
+roy-auth = { path = "../roy-auth" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "sync", "time", "fs", "signal"] }
 tokio-util = "0.7"
 serde = { version = "1", features = ["derive"] }
@@ -21,4 +22,5 @@ futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+roy-auth = { path = "../roy-auth", features = ["test-support"] }
 tempfile = "3"

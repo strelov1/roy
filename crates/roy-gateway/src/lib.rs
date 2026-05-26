@@ -84,11 +84,6 @@ fn default_socket() -> PathBuf {
     PathBuf::from(home).join(".roy/daemon.sock")
 }
 
-fn default_ws_token_path() -> PathBuf {
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".local/state/roy-gateway/ws.token")
-}
-
 async fn build_telegram_task(
     cfg: &GatewayConfig,
     socket_path: &Path,
@@ -140,15 +135,9 @@ fn build_ws_task(
         .bind
         .parse()
         .with_context(|| format!("parsing websocket.bind '{}'", ws_cfg.bind))?;
-    let token_path = ws_cfg
-        .token_path
-        .clone()
-        .map(PathBuf::from)
-        .unwrap_or_else(default_ws_token_path);
-    let token = Arc::new(ws::load_or_create_ws_token(&token_path)?);
-    tracing::info!(path = %token_path.display(), %addr, "ws auth token / bind");
+    tracing::info!(%addr, "ws relay bind (auth: JWT via Sec-WebSocket-Protocol)");
     let socket: Arc<Path> = Arc::from(socket_path.to_path_buf());
     Ok(Some(tokio::spawn(async move {
-        ws::run_ws_relay(addr, token, socket).await
+        ws::run_ws_relay(addr, socket).await
     })))
 }
