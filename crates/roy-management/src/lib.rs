@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod bootstrap;
+pub mod cwd;
 pub mod http;
 pub mod meta_store;
 pub mod orphan_sweep;
