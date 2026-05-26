@@ -160,8 +160,8 @@ async fn connect_and_send(
     Ok(BufReader::new(reader).lines())
 }
 
-#[cfg(test)]
-pub(crate) mod mock {
+#[cfg(any(test, feature = "test-support"))]
+pub mod mock {
     use super::*;
     use std::sync::Mutex;
 
@@ -184,6 +184,18 @@ pub(crate) mod mock {
         pub fn with_spawn(mut self, sid: &str) -> Self {
             self.spawn_response = Mutex::new(Some(Ok(sid.into())));
             self
+        }
+
+        /// Returns the most recent spawn request recorded by this mock.
+        /// Panics if no spawn has been recorded yet — intended for tests that
+        /// have already issued a request and want to assert on its shape.
+        pub fn last_spawn(&self) -> SpawnRequest {
+            self.recorded_spawns
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("no spawn recorded")
         }
     }
 

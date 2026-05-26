@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::SqlitePool;
 
+use crate::auth;
 use crate::roy_client;
 use crate::state::AppState;
 
@@ -49,7 +50,12 @@ impl From<StoreError> for ApiError {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    // All non-public routes go behind `require_user`. `/auth/login` and
+    // `/auth/logout` stay public so unauthenticated clients can sign in.
+    // `/auth/me` lives in `auth::protected_router()` and is mounted alongside
+    // the other authenticated routes so the missing `AuthUser` extension
+    // surfaces as 401, not 500.
+    let protected = Router::new()
         .route("/agents", get(list_agents).post(create_agent))
         .route("/agents/_builder", post(start_builder))
         .route(
@@ -69,7 +75,19 @@ pub fn router(state: AppState) -> Router {
         .route("/scheduler/agents", get(list_scheduler_agents))
         .route("/scheduler/triggers", get(list_scheduler_triggers))
         .route("/scheduler/fires", get(list_scheduler_fires))
-        .with_state(state)
+        .merge(auth::protected_router())
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_user,
+        ));
+
+    auth::router().merge(protected).with_state(state)
+}
+
+/// Test-only wrapper around `router` so integration tests don't have to
+/// reach into private state to construct the full app.
+pub fn router_for_tests(state: AppState) -> Router {
+    router(state)
 }
 
 fn sched_pool(state: &AppState) -> Result<&SqlitePool, ApiError> {
@@ -567,6 +585,15 @@ mod tests {
         .unwrap();
     }
 
+    /// Set the JWT secret env var and mint a `Cookie:` header value for the
+    /// `root` user. All protected-route tests in this module call this once
+    /// up front, then thread the returned string into `.header("cookie", _)`.
+    fn auth_cookie() -> String {
+        std::env::set_var("ROY_JWT_SECRET", roy_auth::test_support::TEST_JWT_SECRET);
+        let token = roy_auth::test_support::issue_jwt("root");
+        format!("roy-jwt={token}")
+    }
+
     /// Returns the state and the id of a freshly-seeded user. `created_by`
     /// columns on projects/session_meta are NOT NULL FKs into `users(id)`,
     /// so every test that writes either table needs a real user fixture.
@@ -603,6 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_then_get_roundtrips() {
+        let cookie = auth_cookie();
         let (st, _uid) = test_state().await;
         let app = router(st);
         let body = serde_json::to_vec(&json!({
@@ -614,6 +642,7 @@ mod tests {
             .oneshot(
                 Request::post("/agents")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -627,6 +656,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get(format!("/agents/{}", created.id))
+                    .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -637,10 +667,16 @@ mod tests {
 
     #[tokio::test]
     async fn get_missing_is_404() {
+        let cookie = auth_cookie();
         let (st, _uid) = test_state().await;
         let app = router(st);
         let resp = app
-            .oneshot(Request::get("/agents/nope").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/agents/nope")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -648,6 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_with_bad_preset_is_400() {
+        let cookie = auth_cookie();
         let (st, _uid) = test_state().await;
         let app = router(st);
         let body =
@@ -656,6 +693,7 @@ mod tests {
             .oneshot(
                 Request::post("/agents")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -666,6 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn projects_create_list_delete() {
+        let cookie = auth_cookie();
         let (st, _uid) = test_state().await;
         let app = router(st);
         // create
@@ -674,6 +713,7 @@ mod tests {
             .oneshot(
                 Request::post("/projects")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(
                         serde_json::to_vec(&json!({"name":"p1"})).unwrap(),
                     ))
@@ -689,7 +729,12 @@ mod tests {
         // list
         let resp = app
             .clone()
-            .oneshot(Request::get("/projects").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/projects")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let listed: Vec<crate::meta_store::Project> =
@@ -702,6 +747,7 @@ mod tests {
             .oneshot(
                 Request::post("/projects")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(
                         serde_json::to_vec(&json!({"name":"p1"})).unwrap(),
                     ))
@@ -715,6 +761,7 @@ mod tests {
         let del = app
             .oneshot(
                 Request::delete(format!("/projects/{}", p.id))
+                    .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -725,6 +772,7 @@ mod tests {
 
     #[tokio::test]
     async fn project_put_renames_and_reflects_in_list() {
+        let cookie = auth_cookie();
         let (st, _uid) = test_state().await;
         let app = router(st);
         // create
@@ -733,6 +781,7 @@ mod tests {
             .oneshot(
                 Request::post("/projects")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(
                         serde_json::to_vec(&json!({"name":"old"})).unwrap(),
                     ))
@@ -752,6 +801,7 @@ mod tests {
                     .method(axum::http::Method::PUT)
                     .uri(format!("/projects/{}", p.id))
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(
                         serde_json::to_vec(&json!({"name":"shiny"})).unwrap(),
                     ))
@@ -768,7 +818,12 @@ mod tests {
 
         // GET list reflects new name
         let resp = app
-            .oneshot(Request::get("/projects").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/projects")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let listed: Vec<crate::meta_store::Project> =
@@ -779,6 +834,7 @@ mod tests {
 
     #[tokio::test]
     async fn project_put_empty_name_is_400() {
+        let cookie = auth_cookie();
         let (st, _uid) = test_state().await;
         let app = router(st);
         let resp = app
@@ -786,6 +842,7 @@ mod tests {
             .oneshot(
                 Request::post("/projects")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(
                         serde_json::to_vec(&json!({"name":"keep-me"})).unwrap(),
                     ))
@@ -803,6 +860,7 @@ mod tests {
                     .method(axum::http::Method::PUT)
                     .uri(format!("/projects/{}", p.id))
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(serde_json::to_vec(&json!({"name":""})).unwrap()))
                     .unwrap(),
             )
@@ -813,6 +871,7 @@ mod tests {
 
     #[tokio::test]
     async fn project_put_unknown_id_is_404() {
+        let cookie = auth_cookie();
         let (st, _uid) = test_state().await;
         let app = router(st);
         let resp = app
@@ -821,6 +880,7 @@ mod tests {
                     .method(axum::http::Method::PUT)
                     .uri("/projects/nope")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(
                         serde_json::to_vec(&json!({"name":"x"})).unwrap(),
                     ))
@@ -835,6 +895,7 @@ mod tests {
     async fn sessions_post_happy_path() {
         use std::sync::Arc;
 
+        let cookie = auth_cookie();
         let (mut st, _uid) = test_state().await;
         let mock = Arc::new(crate::roy_client::mock::MockDaemonClient::new().with_spawn("sid-1"));
         st.daemon = mock.clone();
@@ -850,6 +911,7 @@ mod tests {
             .oneshot(
                 Request::post("/sessions")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -870,6 +932,7 @@ mod tests {
     async fn list_sessions_joins_live_and_meta() {
         use std::sync::{Arc, Mutex};
 
+        let cookie = auth_cookie();
         let (mut st, uid) = test_state().await;
         let mock = Arc::new(crate::roy_client::mock::MockDaemonClient {
             spawn_response: Mutex::new(Some(Ok("sid-A".into()))),
@@ -894,7 +957,12 @@ mod tests {
             .unwrap();
         let app = router(st);
         let resp = app
-            .oneshot(Request::get("/sessions").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/sessions")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -912,6 +980,7 @@ mod tests {
     async fn sessions_post_rollback_on_meta_failure() {
         use std::sync::Arc;
 
+        let cookie = auth_cookie();
         let (mut st, _uid) = test_state().await;
         let mock = Arc::new(crate::roy_client::mock::MockDaemonClient::new().with_spawn("sid-X"));
         st.daemon = mock.clone();
@@ -926,6 +995,7 @@ mod tests {
             .oneshot(
                 Request::post("/sessions")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -939,6 +1009,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_tags_replaces() {
+        let cookie = auth_cookie();
         let (st, uid) = test_state().await;
         st.meta
             .upsert_session_meta(&crate::meta_store::SessionMeta {
@@ -963,6 +1034,7 @@ mod tests {
                     .method(axum::http::Method::PUT)
                     .uri("/sessions/sid/tags")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -1023,12 +1095,14 @@ mod tests {
             w.flush().await.unwrap();
         });
 
+        let cookie = auth_cookie();
         let state = state_for_builder_test(socket).await;
         let app = router(state.clone());
         let resp = app
             .oneshot(
                 Request::post("/agents/_builder")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from("{}"))
                     .unwrap(),
             )
@@ -1107,12 +1181,14 @@ mod tests {
             .await
             .unwrap();
 
+        let cookie = auth_cookie();
         let body = serde_json::json!({ "existing_id": existing.id }).to_string();
         let app = router(state.clone());
         let resp = app
             .oneshot(
                 Request::post("/agents/_builder")
                     .header("content-type", "application/json")
+                    .header("cookie", &cookie)
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -1163,6 +1239,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_endpoints_503_when_unattached() {
+        let cookie = auth_cookie();
         let (st, _uid) = test_state().await;
         let app = router(st);
         for path in [
@@ -1172,7 +1249,12 @@ mod tests {
         ] {
             let resp = app
                 .clone()
-                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .oneshot(
+                    Request::get(path)
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1185,6 +1267,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_triggers_lists_seeded_rows() {
+        let cookie = auth_cookie();
         let state = state_with_scheduler().await;
         let pool = state.scheduler_pool.clone().unwrap();
         let agent = roy_scheduler::store::agents::insert(
@@ -1217,6 +1300,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get("/scheduler/triggers")
+                    .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1232,10 +1316,12 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_fires_empty_db_returns_empty_list() {
+        let cookie = auth_cookie();
         let app = router(state_with_scheduler().await);
         let resp = app
             .oneshot(
                 Request::get("/scheduler/fires?limit=10")
+                    .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),
             )

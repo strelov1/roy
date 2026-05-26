@@ -2,6 +2,7 @@
 //! The bin is a thin clap-driven entrypoint over these modules; integration
 //! tests link this library directly to exercise the real wire code paths.
 
+pub mod auth;
 pub mod bootstrap;
 pub mod http;
 pub mod meta_store;
