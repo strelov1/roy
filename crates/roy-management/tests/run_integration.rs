@@ -49,10 +49,10 @@ async fn run_sends_persona_as_system_prompt() {
         .await
         .unwrap();
     roy_auth::apply_migrations(&pool).await.unwrap();
-    // The free-function `roy_client::spawn` stubs `created_by = "root"` until
-    // B5 wires real auth; seed a user row with id="root" directly so the FK
-    // from `session_meta` is satisfied. UserStore::create would assign a
-    // random UUID, which wouldn't match the literal the handler binds.
+    // The free-function `roy_client::spawn` now takes `created_by` as a
+    // parameter (B5). Seed a user row with id="root" directly so the FK from
+    // `session_meta` is satisfied when this test passes "root" through.
+    // UserStore::create would assign a random UUID, which wouldn't match.
     sqlx::query(
         "INSERT OR IGNORE INTO users \
          (id, username, display_name, password_hash, timezone, created_at) \
@@ -87,6 +87,7 @@ async fn run_sends_persona_as_system_prompt() {
         agent.model.clone(),
         Some(agent.prompt.clone()),
         tags,
+        "root",
     )
     .await
     .unwrap();

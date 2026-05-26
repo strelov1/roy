@@ -193,6 +193,9 @@ async fn list_presets(State(s): State<AppState>) -> Result<Json<serde_json::Valu
 }
 
 async fn run_agent(
+    axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
+        crate::auth::AuthUser,
+    >,
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -206,6 +209,7 @@ async fn run_agent(
         agent.model,
         Some(agent.prompt),
         tags,
+        &user_id,
     )
     .await
     .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
@@ -225,6 +229,9 @@ struct BuilderResp {
 }
 
 async fn start_builder(
+    axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
+        crate::auth::AuthUser,
+    >,
     State(s): State<AppState>,
     body: Option<Json<BuilderReq>>,
 ) -> Result<(StatusCode, Json<BuilderResp>), ApiError> {
@@ -271,6 +278,7 @@ async fn start_builder(
         builder.model.clone(),
         Some(system_prompt),
         tags,
+        &user_id,
     )
     .await
     .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
@@ -304,28 +312,49 @@ fn validate_preset(preset: &str) -> Result<(), ApiError> {
 }
 
 async fn list_projects(
+    axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
+        crate::auth::AuthUser,
+    >,
     State(s): State<AppState>,
 ) -> Result<Json<Vec<crate::meta_store::Project>>, ApiError> {
-    s.meta.list_projects().await.map(Json).map_err(meta_to_api)
+    let memberships = roy_auth::TeamStore::new(s.pool.clone())
+        .list_for_user(&user_id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "team list");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal".into())
+        })?;
+    let team_ids: Vec<String> = memberships.into_iter().map(|t| t.id).collect();
+    s.meta
+        .list_projects_for_user(&user_id, &team_ids)
+        .await
+        .map(Json)
+        .map_err(meta_to_api)
 }
 
 #[derive(serde::Deserialize)]
 struct NewProject {
     name: String,
+    #[serde(default)]
+    team_id: Option<String>,
 }
 
 async fn create_project(
+    axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
+        crate::auth::AuthUser,
+    >,
     State(s): State<AppState>,
     Json(req): Json<NewProject>,
 ) -> Result<(StatusCode, Json<crate::meta_store::Project>), ApiError> {
-    // FIXME: B5 — replace `"root"` stub with `Extension<AuthUser>` extraction
-    // once the auth middleware lands. Until B3's `ensure_root` runs, this
-    // string is not yet a real users(id) row; it becomes one as soon as the
-    // bootstrap step in B3 is wired.
-    let created_by = "root";
+    if let Some(team_id) = &req.team_id {
+        roy_auth::Acl::new(&s.pool, &user_id)
+            .can_admin_team(team_id)
+            .await
+            .map_err(|_| ApiError(StatusCode::FORBIDDEN, "forbidden".into()))?;
+    }
     let p = s
         .meta
-        .create_project(&req.name, created_by, None)
+        .create_project(&req.name, &user_id, req.team_id.as_deref())
         .await
         .map_err(meta_to_api)?;
     Ok((StatusCode::CREATED, Json(p)))
@@ -376,9 +405,27 @@ struct CreateSessionReq {
 }
 
 async fn create_session(
+    axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
+        crate::auth::AuthUser,
+    >,
     State(s): State<AppState>,
     Json(req): Json<CreateSessionReq>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // ACL: if a project is named, the caller must be able to access it. The
+    // full per-scope cwd resolution lands in C2; for B5 we only thread the
+    // authenticated user_id through and gate the project_id path.
+    if let Some(pid) = &req.project_id {
+        roy_auth::Acl::new(&s.pool, &user_id)
+            .can_access_project(pid)
+            .await
+            .map_err(|e| match e {
+                roy_auth::AclError::NotFound => {
+                    ApiError(StatusCode::BAD_REQUEST, format!("invalid project: {pid}"))
+                }
+                _ => ApiError(StatusCode::FORBIDDEN, "forbidden".into()),
+            })?;
+    }
+
     // Resolve project_id -> cwd if provided; else use req.cwd verbatim.
     let cwd: Option<PathBuf> = if let Some(pid) = &req.project_id {
         let projects = s.meta.list_projects().await.map_err(meta_to_api)?;
@@ -403,15 +450,13 @@ async fn create_session(
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("daemon: {e}")))?;
 
-    // FIXME: B5 — replace `"root"` stub with `Extension<AuthUser>` extraction.
-    let created_by = "root".to_string();
     let meta = crate::meta_store::SessionMeta {
         session_id: sid.clone(),
         project_id: req.project_id.clone(),
         agent_id: None,
         agent_name: req.agent_name.clone(),
         display_label: None,
-        created_by,
+        created_by: user_id.clone(),
         team_id: None,
         tags: req.tags.clone(),
         created_at: chrono::Utc::now().timestamp(),

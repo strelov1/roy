@@ -248,6 +248,7 @@ pub async fn spawn(
     model: Option<String>,
     system_prompt: Option<String>,
     tags: BTreeMap<String, String>,
+    created_by: &str,
 ) -> Result<String> {
     let session = UnixSocketDaemonClient::new(socket.to_path_buf())
         .spawn(SpawnRequest {
@@ -261,16 +262,16 @@ pub async fn spawn(
     // Persist tags into management-owned meta so `GET /sessions` returns
     // them. If this fails after the daemon spawned, the session leaks meta —
     // log and surface the error so the caller can decide how to handle it.
-    // FIXME: B5 — `created_by` should be threaded from the authenticated
-    // caller. For now, callers of this free function (run_agent /
-    // _builder) attribute the spawn to the bootstrap user.
+    // `created_by` is the authenticated user_id threaded from the HTTP handler;
+    // the wire-format `SpawnRequest` carries no user identity (the daemon is
+    // trusted), so ownership is recorded only in management-side meta.
     let row = SessionMeta {
         session_id: session.clone(),
         project_id: None,
         agent_id: None,
         agent_name: None,
         display_label: None,
-        created_by: "root".into(),
+        created_by: created_by.into(),
         team_id: None,
         tags,
         created_at: chrono::Utc::now().timestamp(),

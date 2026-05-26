@@ -147,6 +147,40 @@ impl MetaStore {
         Ok(rows.into_iter().map(Project::from_row).collect())
     }
 
+    /// Projects visible to `user_id`: their personal projects (team_id IS NULL
+    /// AND created_by = user_id) plus every project belonging to a team in
+    /// `team_ids`. Callers compute `team_ids` from `TeamStore::list_for_user`.
+    pub async fn list_projects_for_user(
+        &self,
+        user_id: &str,
+        team_ids: &[String],
+    ) -> Result<Vec<Project>, MetaError> {
+        let mut q = String::from(
+            "SELECT id, name, path, created_by, team_id, created_at FROM projects \
+             WHERE (team_id IS NULL AND created_by = ?)",
+        );
+        if !team_ids.is_empty() {
+            q.push_str(" OR team_id IN (");
+            for (i, _) in team_ids.iter().enumerate() {
+                if i > 0 {
+                    q.push(',');
+                }
+                q.push('?');
+            }
+            q.push(')');
+        }
+        q.push_str(" ORDER BY created_at");
+
+        let mut query =
+            sqlx::query_as::<_, (String, String, String, String, Option<String>, i64)>(&q)
+                .bind(user_id);
+        for tid in team_ids {
+            query = query.bind(tid);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(Project::from_row).collect())
+    }
+
     pub async fn delete_project(&self, id: &str) -> Result<(), MetaError> {
         let res = sqlx::query("DELETE FROM projects WHERE id = ?")
             .bind(id)
