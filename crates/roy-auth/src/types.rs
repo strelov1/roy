@@ -29,19 +29,29 @@ pub struct UserProfile {
     pub teams: Vec<TeamMembership>,
 }
 
-// --- Team-side stubs (untouched until Task A7) ---
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Team {
     pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_by: Option<String>,
+    pub created_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct NewTeam {
     pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TeamMember;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TeamMember {
+    pub user_id: String,
+    pub team_id: String,
+    pub role: String, // "owner" | "member"
+    pub joined_at: i64,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TeamMembership {
@@ -50,6 +60,7 @@ pub struct TeamMembership {
     pub role: Role,
 }
 
+// --- Team-invite stub (untouched until Task A8) ---
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TeamInvite {
     pub token: String,

@@ -90,3 +90,50 @@ fn hash_and_verify_round_trip() {
     assert!(roy_auth::verify_password("hunter22-correct", &hash).unwrap());
     assert!(!roy_auth::verify_password("wrong", &hash).unwrap());
 }
+
+use roy_auth::{NewTeam, TeamStore};
+
+#[tokio::test]
+async fn create_team_lists_owner() {
+    let pool = fresh_pool().await;
+    let users = UserStore::new(pool.clone());
+    let alice = users
+        .create(NewUser {
+            username: "alice".into(),
+            display_name: "A".into(),
+            password: "12345678".into(),
+            timezone: None,
+        })
+        .await
+        .unwrap();
+    let teams = TeamStore::new(pool.clone());
+    let team = teams
+        .create(
+            NewTeam {
+                name: "eng".into(),
+                description: None,
+            },
+            &alice.id,
+        )
+        .await
+        .unwrap();
+
+    let memberships = teams.list_for_user(&alice.id).await.unwrap();
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(memberships[0].id, team.id);
+    assert_eq!(memberships[0].name, "eng");
+    assert!(teams.is_owner(&alice.id, &team.id).await.unwrap());
+    assert!(teams.is_member(&alice.id, &team.id).await.unwrap());
+
+    // Bob is not a member.
+    let bob = users
+        .create(NewUser {
+            username: "bob".into(),
+            display_name: "B".into(),
+            password: "12345678".into(),
+            timezone: None,
+        })
+        .await
+        .unwrap();
+    assert!(!teams.is_member(&bob.id, &team.id).await.unwrap());
+}

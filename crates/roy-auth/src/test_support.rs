@@ -4,7 +4,8 @@
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
-use crate::types::{NewUser, User};
+use crate::team_store::TeamStore;
+use crate::types::{NewTeam, NewUser, Team, User};
 use crate::user_store::UserStore;
 
 pub const TEST_JWT_SECRET: &str = "roy-test-jwt-secret-32-chars-min!!";
@@ -42,4 +43,17 @@ pub async fn make_user(pool: &SqlitePool, username: &str) -> User {
 
 pub fn issue_jwt(user_id: &str) -> String {
     crate::jwt::sign_session(user_id, TEST_JWT_SECRET, 3600).expect("sign jwt")
+}
+
+pub async fn make_team(pool: &SqlitePool, owner_id: &str, name: &str) -> Team {
+    TeamStore::new(pool.clone())
+        .create(
+            NewTeam {
+                name: name.into(),
+                description: None,
+            },
+            owner_id,
+        )
+        .await
+        .expect("make_team")
 }
