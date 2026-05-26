@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use roy_agents::Store;
+use sqlx::SqlitePool;
 
 use crate::meta_store::MetaStore;
 use crate::roy_client::DaemonClient;
@@ -16,4 +17,9 @@ pub struct AppState {
     pub daemon: Arc<dyn DaemonClient>,
     /// Path to the roy daemon's Unix socket (for spawning sessions).
     pub socket_path: PathBuf,
+    /// Read-only handle to `roy-scheduler`'s SQLite DB. `None` if the
+    /// scheduler DB doesn't exist yet — scheduler endpoints respond 503
+    /// in that case so the UI can show a "scheduler not initialized" notice
+    /// instead of a generic 500.
+    pub scheduler_pool: Option<SqlitePool>,
 }

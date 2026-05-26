@@ -15,3 +15,15 @@ pub mod roy_client;
 pub mod store;
 pub mod subscribers;
 pub mod types;
+
+use std::path::PathBuf;
+
+/// Conventional on-disk location of the scheduler SQLite DB.
+/// `$ROY_SCHEDULER_DB` overrides; otherwise `~/.local/state/roy-scheduler/state.db`.
+pub fn default_db_path() -> PathBuf {
+    if let Ok(s) = std::env::var("ROY_SCHEDULER_DB") {
+        return PathBuf::from(s);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local/state/roy-scheduler/state.db")
+}

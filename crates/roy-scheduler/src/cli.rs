@@ -244,14 +244,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
 }
 
-fn default_db_path() -> PathBuf {
-    if let Ok(s) = std::env::var("ROY_SCHEDULER_DB") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".local/state/roy-scheduler/state.db")
-}
-
 fn default_socket() -> PathBuf {
     if let Ok(s) = std::env::var("ROY_SOCKET") {
         return PathBuf::from(s);
@@ -267,7 +259,7 @@ fn default_pid_file() -> PathBuf {
 
 /// Open the SQLite pool at the configured path. `db::open` auto-runs migrations.
 async fn open_pool() -> anyhow::Result<SqlitePool> {
-    let path = default_db_path();
+    let path = crate::default_db_path();
     db::open(&path)
         .await
         .with_context(|| format!("opening DB at {}", path.display()))
@@ -293,7 +285,7 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
         .with_context(|| format!("acquiring pid lock at {}", pid_path.display()))?;
 
     let mut opts = ServeOpts {
-        db_path: args.db.unwrap_or_else(default_db_path),
+        db_path: args.db.unwrap_or_else(crate::default_db_path),
         socket_path: args.socket.unwrap_or_else(default_socket),
         ..ServeOpts::default()
     };
@@ -328,7 +320,7 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
 /// alive → `up`, anything else → `down`.
 fn cmd_status(args: StatusArgs) -> ExitCode {
     let pid_path = args.pid_file.unwrap_or_else(default_pid_file);
-    let db_path = default_db_path();
+    let db_path = crate::default_db_path();
     let pid = roy::pid_lock::peek_pid(&pid_path);
     let alive = pid.map(roy::pid_lock::pid_alive).unwrap_or(false);
     let payload = serde_json::json!({
@@ -395,14 +387,7 @@ async fn cmd_triggers(cmd: TriggersCmd) -> anyhow::Result<()> {
         TriggersCmd::List { agent } => {
             let v = match agent {
                 Some(id) => store::triggers::list_for_agent(&pool, &id).await?,
-                None => {
-                    // store::triggers has no `list_all` helper — do a raw query.
-                    sqlx::query_as::<_, crate::types::Trigger>(
-                        "SELECT * FROM triggers ORDER BY created_at DESC",
-                    )
-                    .fetch_all(&pool)
-                    .await?
-                }
+                None => store::triggers::list_all(&pool, 1000).await?,
             };
             print_json(&v)
         }
