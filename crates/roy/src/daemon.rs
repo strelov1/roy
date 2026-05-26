@@ -70,6 +70,7 @@ impl TransportFactory for DefaultTransportFactory {
             AgentPreset::Gemini => AcpConfig::gemini(),
             AgentPreset::Opencode => AcpConfig::opencode(),
             AgentPreset::Codex => AcpConfig::codex(),
+            AgentPreset::Pi => AcpConfig::pi(),
         };
         if let Some(p) = permission {
             config.permission_policy = match p {

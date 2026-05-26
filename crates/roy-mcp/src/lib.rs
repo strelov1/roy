@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
-use roy::{ClientCommand, ServerEvent, TurnEvent};
+use roy::{AgentPreset, ClientCommand, ServerEvent, TurnEvent};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -106,6 +106,7 @@ fn error_response(id: Value, code: i32, message: &str) -> Value {
 }
 
 fn tools_list() -> Value {
+    let agent_enum: Vec<&'static str> = AgentPreset::ALL.iter().map(|p| p.as_str()).collect();
     json!({
         "tools": [
             {
@@ -124,7 +125,7 @@ fn tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
+                        "agent": {"type": "string", "enum": agent_enum},
                         "task": {"type": "string"},
                         "cwd": {"type": "string", "description": "Filesystem path to run the agent in. Omit to create an orphan session in the daemon's workspace."},
                         "model": {"type": "string"},
@@ -142,7 +143,7 @@ fn tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
+                        "agent": {"type": "string", "enum": agent_enum},
                         "task": {"type": "string"},
                         "cwd": {"type": "string", "description": "Filesystem path to run the agent in. Omit to create an orphan session in the daemon's workspace."},
                         "model": {"type": "string"},
@@ -198,7 +199,7 @@ fn tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent": {"type": "string", "enum": ["claude", "gemini", "opencode", "codex"]},
+                        "agent": {"type": "string", "enum": agent_enum},
                         "resume": {"type": "string", "description": "Existing roy session id to resume into."},
                         "prompt": {"type": "string"},
                         "tags": {"type": "object", "additionalProperties": {"type": "string"}},
