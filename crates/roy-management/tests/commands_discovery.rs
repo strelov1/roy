@@ -14,7 +14,9 @@ async fn scans_user_skills_dir() {
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].name, "review");
     assert_eq!(out[0].description, "Review a PR");
-    assert_eq!(out[0].source, "user");
+    // `~/.claude/skills/` is now tagged `claude` (legacy) — `roy` is the
+    // new harness-agnostic source under `~/.roy/skills/`.
+    assert_eq!(out[0].source, "claude");
 }
 
 #[tokio::test]
