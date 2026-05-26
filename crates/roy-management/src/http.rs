@@ -1155,7 +1155,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let back = st.meta.get_session_meta("sid").await.unwrap().unwrap();
         assert_eq!(back.tags, BTreeMap::from([("new".into(), "2".into())]));
     }
