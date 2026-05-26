@@ -9,9 +9,11 @@ path = "src/lib.rs"
 [dependencies]
 roy = { path = "../roy" }
 roy-agents = { path = "../roy-agents" }
+roy-auth = { path = "../roy-auth" }
 roy-scheduler = { path = "../roy-scheduler" }
 
 axum = "0.8"
+axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
 
@@ -28,6 +30,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 thiserror = "2"
 
 [dev-dependencies]
+roy-auth = { path = "../roy-auth", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }

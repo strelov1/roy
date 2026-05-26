@@ -551,16 +551,19 @@ mod tests {
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
+        roy_auth::apply_migrations(&pool).await.unwrap();
         let workspace = dir.path().join("workspace");
         // Keep the temp dir alive for the test process lifetime — dropping it
         // would invalidate the SQLite file referenced by the pool.
         std::mem::forget(dir);
         AppState {
             store: roy_agents::Store::new(pool.clone()),
-            meta: MetaStore::new(pool, workspace),
+            meta: MetaStore::new(pool.clone(), workspace.clone()),
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
             scheduler_pool: None,
+            pool,
+            workspace_dir: workspace,
         }
     }
 
@@ -933,15 +936,18 @@ mod tests {
         crate::meta_store::MetaStore::apply_migrations(&pool)
             .await
             .unwrap();
+        roy_auth::apply_migrations(&pool).await.unwrap();
         let workspace = dir.path().join("workspace");
         // Leak the tempdir: pool keeps reading from this file for the test.
         std::mem::forget(dir);
         AppState {
             store: roy_agents::Store::new(pool.clone()),
-            meta: crate::meta_store::MetaStore::new(pool, workspace),
+            meta: crate::meta_store::MetaStore::new(pool.clone(), workspace.clone()),
             daemon: std::sync::Arc::new(crate::roy_client::mock::MockDaemonClient::new()),
             socket_path: socket,
             scheduler_pool: None,
+            pool,
+            workspace_dir: workspace,
         }
     }
 
@@ -1091,6 +1097,7 @@ mod tests {
             .await
             .unwrap();
         MetaStore::apply_migrations(&agents_pool).await.unwrap();
+        roy_auth::apply_migrations(&agents_pool).await.unwrap();
         let workspace = dir.path().join("workspace");
         let sched_pool = roy_scheduler::db::open(&dir.path().join("scheduler.db"))
             .await
@@ -1098,10 +1105,12 @@ mod tests {
         std::mem::forget(dir);
         AppState {
             store: roy_agents::Store::new(agents_pool.clone()),
-            meta: MetaStore::new(agents_pool, workspace),
+            meta: MetaStore::new(agents_pool.clone(), workspace.clone()),
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
             scheduler_pool: Some(sched_pool),
+            pool: agents_pool,
+            workspace_dir: workspace,
         }
     }
 

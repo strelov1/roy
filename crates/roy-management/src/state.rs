@@ -22,4 +22,8 @@ pub struct AppState {
     /// in that case so the UI can show a "scheduler not initialized" notice
     /// instead of a generic 500.
     pub scheduler_pool: Option<SqlitePool>,
+    /// Shared sqlite pool — needed by roy-auth middleware/handlers and ACL.
+    pub pool: SqlitePool,
+    /// Workspace root for resolve_cwd (Phase C).
+    pub workspace_dir: PathBuf,
 }
