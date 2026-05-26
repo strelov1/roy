@@ -37,6 +37,18 @@ pub struct Project {
     pub created_at: i64,
 }
 
+impl Project {
+    fn from_row(row: (String, String, String, i64)) -> Self {
+        let (id, name, path, created_at) = row;
+        Self {
+            id,
+            name,
+            path,
+            created_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionMeta {
     pub session_id: String,
@@ -95,12 +107,7 @@ impl MetaStore {
                 .execute(&self.pool)
                 .await;
         match result {
-            Ok(_) => Ok(Project {
-                id,
-                name: name.into(),
-                path,
-                created_at,
-            }),
+            Ok(_) => Ok(Project::from_row((id, name.into(), path, created_at))),
             Err(sqlx::Error::Database(db)) if db.is_unique_violation() => Err(MetaError::Conflict(
                 format!("project name already exists: {name}"),
             )),
@@ -113,15 +120,7 @@ impl MetaStore {
             sqlx::query_as("SELECT id, name, path, created_at FROM projects ORDER BY created_at")
                 .fetch_all(&self.pool)
                 .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| Project {
-                id: r.0,
-                name: r.1,
-                path: r.2,
-                created_at: r.3,
-            })
-            .collect())
+        Ok(rows.into_iter().map(Project::from_row).collect())
     }
 
     pub async fn delete_project(&self, id: &str) -> Result<(), MetaError> {
@@ -151,12 +150,7 @@ impl MetaStore {
         .fetch_optional(&self.pool)
         .await;
         match result {
-            Ok(Some((id, name, path, created_at))) => Ok(Project {
-                id,
-                name,
-                path,
-                created_at,
-            }),
+            Ok(Some(row)) => Ok(Project::from_row(row)),
             Ok(None) => Err(MetaError::NotFound(id.into())),
             Err(sqlx::Error::Database(db)) if db.is_unique_violation() => Err(MetaError::Conflict(
                 format!("project name already exists: {name}"),
