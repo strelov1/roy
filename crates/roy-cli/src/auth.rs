@@ -91,7 +91,8 @@ pub async fn reset_password(username: &str) -> anyhow::Result<()> {
         .connect_with(
             sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(&db)
-                .create_if_missing(false),
+                .create_if_missing(false)
+                .foreign_keys(true),
         )
         .await?;
     let user = roy_auth::UserStore::new(pool.clone())

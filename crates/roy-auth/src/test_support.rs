@@ -19,7 +19,8 @@ pub async fn temp_pool() -> SqlitePool {
         .connect_with(
             SqliteConnectOptions::new()
                 .filename(&path)
-                .create_if_missing(true),
+                .create_if_missing(true)
+                .foreign_keys(true),
         )
         .await
         .expect("sqlite connect");

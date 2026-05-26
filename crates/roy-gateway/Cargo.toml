@@ -19,7 +19,6 @@ clap = { version = "4", features = ["derive"] }
 teloxide = { version = "0.13", default-features = false, features = ["macros", "ctrlc_handler", "rustls"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
-uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 roy-auth = { path = "../roy-auth", features = ["test-support"] }

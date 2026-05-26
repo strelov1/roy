@@ -10,7 +10,8 @@ async fn fresh_pool() -> SqlitePool {
         .connect_with(
             sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(&path)
-                .create_if_missing(true),
+                .create_if_missing(true)
+                .foreign_keys(true),
         )
         .await
         .unwrap();

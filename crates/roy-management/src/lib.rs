@@ -36,6 +36,12 @@ pub struct Args {
 pub async fn run(args: Args) -> anyhow::Result<()> {
     use std::sync::Arc;
 
+    // Fail fast on a misconfigured JWT secret before touching any SQLite
+    // files. `secret_from_env` returns the secret string but we throw it
+    // away here — each `/auth/login` call re-reads it from env.
+    roy_auth::jwt::secret_from_env()
+        .map_err(|e| anyhow::anyhow!("ROY_JWT_SECRET missing or shorter than 32 bytes: {e}"))?;
+
     let db_path = args.db.unwrap_or_else(roy_agents::default_db_path);
     let pool = roy_agents::open(&db_path).await?;
 
