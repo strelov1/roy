@@ -19,12 +19,11 @@ pub mod test_support;
 pub use acl::{Acl, AclError};
 pub use cookie::{verify_cookie, verify_ws_protocol, COOKIE_NAME};
 pub use db::apply_migrations;
-pub use invite_store::{InviteStore, InviteError};
+pub use invite_store::{InviteError, InviteStore};
 pub use jwt::{sign_session, verify_session, JwtError};
 pub use password::{hash_password, verify_password};
 pub use team_store::{TeamStore, TeamStoreError};
 pub use types::{
-    NewTeam, NewUser, Role, Scope, Team, TeamInvite, TeamMember, TeamMembership, User,
-    UserProfile,
+    NewTeam, NewUser, Role, Scope, Team, TeamInvite, TeamMember, TeamMembership, User, UserProfile,
 };
 pub use user_store::{UserStore, UserStoreError};
