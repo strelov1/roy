@@ -57,6 +57,8 @@ mod tests {
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
+        roy_auth::apply_migrations(&pool).await.unwrap();
+        let user = roy_auth::test_support::make_user(&pool, "alice").await;
         let workspace = dir.path().join("workspace");
         // Leak the tempdir: pool reads from this file for the rest of the test.
         std::mem::forget(dir);
@@ -67,6 +69,8 @@ mod tests {
             agent_id: None,
             agent_name: None,
             display_label: None,
+            created_by: user.id.clone(),
+            team_id: None,
             tags: BTreeMap::new(),
             created_at: 1,
         })
@@ -78,6 +82,8 @@ mod tests {
             agent_id: None,
             agent_name: None,
             display_label: None,
+            created_by: user.id.clone(),
+            team_id: None,
             tags: BTreeMap::new(),
             created_at: 1,
         })

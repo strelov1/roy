@@ -13,7 +13,7 @@ Non-negotiable expectations for any change in this repo:
 
 ## What this is
 
-A Cargo workspace with eight crates:
+A Cargo workspace with nine crates:
 
 - **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting boot-kit metadata in SQLite (`~/.local/state/roy/sessions.db`) so sessions survive across daemon restarts.
 - **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket). The `roy mcp`, `roy gateway`, `roy scheduler`, and `roy management` subcommands delegate to the matching adapter crates, so a single binary covers every adapter.
@@ -23,10 +23,27 @@ A Cargo workspace with eight crates:
 - **`crates/roy-agents`** — library. Canonical agent store: `Agent` type (identity + persona `prompt` + optional scheduled `task`), SQLite CRUD with slug-collision suffixing. Used by `roy-management` today; `roy-scheduler` is planned to migrate onto it later. Shared DB file lives at `~/.local/state/roy/agents.db` (override with `ROY_AGENTS_DB`).
 - **`crates/roy-management`** — library. axum HTTP service for agent CRUD, session coordination, and project/tag management. Exposes `pub async fn run(args)`; `roy-cli` dispatches `roy management` to it. Owns `MetaStore` (SQLite at `~/.local/state/roy/agents.db`): `projects`, `session_meta`, `session_tags` tables co-located with `roy-agents`'s `agents` table. Talks to the daemon over Unix socket via `DaemonClient` trait (for session operations that need coordination); routes project/tag operations directly to the database. Transitional note: `roy-scheduler` still has its own `agents` table until a future Plan C unifies it onto `roy-agents`.
 - **`crates/roy-inbound`** — library + thin binary. Inbound event bus for external systems (HTTP webhook today, IMAP / WhatsApp / Telegram-customer-support later). Pure publishers normalize external events into `InboundEvent`s onto an in-process `tokio::mpsc` bus; a single dispatcher resolves a per-source session strategy (`ephemeral`/`persistent_one`/`per_sender_sticky`), fires the agent over the daemon Unix socket, and a per-channel `ReplyHook` delivers the result back. Same boundary rule as `roy-scheduler`/`roy-gateway`. Owns SQLite state at `~/.local/state/roy-inbound/state.db` (table `bindings`). Configured via TOML (`~/.config/roy/inbound.toml`).
+- **`crates/roy-auth`** — library. Users, teams, team invites, JWT cookie auth, ACL helpers. Tables live in the shared `~/.local/state/roy/agents.db` (migrations v10–v12). Consumers: `roy-management` (HTTP middleware, all handlers) and `roy-gateway` (WS subprotocol verification). Exposes `UserStore`, `TeamStore`, `InviteStore`, `sign_session`/`verify_session`, `verify_cookie`/`verify_ws_protocol`, `Acl`. Test helpers under `pub mod test_support` (feature `test-support`).
 
-External crates (`roy-mcp`, `roy-scheduler`, `roy-gateway`, `roy-management`, `roy-inbound`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API.
+External crates (`roy-mcp`, `roy-scheduler`, `roy-gateway`, `roy-management`, `roy-inbound`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API. `roy-auth` is a sibling library used by `roy-management` and `roy-gateway` for user/team storage and JWT verification; it does not depend on `roy`.
 
 Roy spawns agent CLIs; it does not install them. The agent's working directory comes from the client: `roy run --cwd …`, MCP `cwd` argument, or `ClientCommand::Spawn.cwd`. When no client supplies one, the daemon falls back to `ROY_CWD` (env), then its own `current_dir`. Set `ROY_CWD` on the systemd/launchd unit to pin a default project root for every default-cwd session.
+
+### Per-scope cwd layout
+
+For multi-user setups, `roy-management` resolves session cwd from `(user_id, scope, optional team_id, optional project_id, session_id)` under `$ROY_WORKSPACE_DIR` (default `~/.roy/workspace`):
+
+```
+$ROY_WORKSPACE_DIR/
+├── users/<user_id>/sessions/<session_id>/
+├── users/<user_id>/projects/<project_id>/sessions/<session_id>/
+├── teams/<team_id>/sessions/<session_id>/
+└── teams/<team_id>/projects/<project_id>/sessions/<session_id>/
+```
+
+`roy-management` only `mkdir`s the cwd — no auto-generated `CLAUDE.md` or `.memory/`. If the user wants per-scope agent context, they place `CLAUDE.md` themselves in `users/<user_id>/` or `teams/<team_id>/`; the ACP agent walks up to find it.
+
+The daemon remains trusted: it accepts `ClientCommand::Spawn { cwd, ... }` from the Unix socket without knowing about users. The HTTP layer is the only auth boundary.
 
 Each preset maps to a specific binary that must be on `PATH` and pre-authenticated:
 
@@ -39,8 +56,8 @@ Each preset maps to a specific binary that must be on `PATH` and pre-authenticat
 | `pi` | `pi-acp` | ACP adapter for `pi` coding agent (spawns `pi --mode rpc` under the hood); install via `npm i -g pi-acp` |
 
 Which presets and models are *surfaced* to clients is controlled by
-`~/.config/roy/agents.toml` (see `docs/agents-config.md`). The four
-preset binaries above must still be installed and authenticated.
+`~/.config/roy/agents.toml` (see `docs/agents-config.md`). The preset
+binaries above must still be installed and authenticated.
 
 ## Commands
 
@@ -103,6 +120,24 @@ cargo run --example demo_opencode
 cargo run --example demo_codex
 cargo run --example engine_two_attach     # SessionEngine + two concurrent attaches against the fake agent
 ```
+
+### Auth (multi-user)
+
+`roy-management` requires `ROY_JWT_SECRET` (≥32 ASCII bytes) at startup; without it, the service fails fast. On first startup with an empty `users` table, a bootstrap user is created with username from `ROY_BOOTSTRAP_USERNAME` (default `root`) and password from `ROY_BOOTSTRAP_PASSWORD` (or a generated 32-char hex value printed to stderr exactly once).
+
+`roy-cli` exposes auth helpers (HTTP-backed, except `reset` which talks to the DB):
+
+```bash
+roy auth login              # interactive prompt → ~/.config/roy/cookie (mode 0600)
+roy auth whoami             # GET /auth/me (reads cookie)
+roy auth reset <username>   # direct DB password override (recovery)
+```
+
+`roy-gateway`'s WebSocket handshake authenticates via `Sec-WebSocket-Protocol: roy-jwt,<JWT>` — same JWT cookie issued by `/auth/login`. The old shared-token file is gone; `[websocket].token_path` is no longer read (silently ignored on parse) and existing token files have no effect.
+
+### Manual smoke checklist
+
+After deploying the multi-user feature, the manual smoke checklist lives in `docs/superpowers/plans/2026-05-25-user-auth-commands.md` (Phase H1).
 
 ## Architecture
 

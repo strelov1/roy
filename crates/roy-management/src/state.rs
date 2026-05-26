@@ -22,4 +22,16 @@ pub struct AppState {
     /// in that case so the UI can show a "scheduler not initialized" notice
     /// instead of a generic 500.
     pub scheduler_pool: Option<SqlitePool>,
+    /// Shared sqlite pool — needed by roy-auth middleware/handlers and ACL.
+    pub pool: SqlitePool,
+    /// Workspace root for resolve_cwd (Phase C).
+    pub workspace_dir: PathBuf,
+    /// In-memory token-bucket rate limiter for `POST /auth/login`. Process-
+    /// global state; resets on restart. Shared per-`AppState` via `Arc` so the
+    /// `Clone` derive on `AppState` keeps all clones pointing at the same
+    /// buckets.
+    pub login_limiter: Arc<crate::rate_limit::LoginLimiter>,
+    /// 30s TTL cache for filesystem-discovered slash commands. Shared via
+    /// `Arc` so all `AppState` clones see the same cache state.
+    pub commands_cache: Arc<crate::commands::CommandsCache>,
 }
