@@ -75,7 +75,8 @@ pub fn router(state: AppState) -> Router {
         .route("/scheduler/agents", get(list_scheduler_agents))
         .route("/scheduler/triggers", get(list_scheduler_triggers))
         .route("/scheduler/fires", get(list_scheduler_fires))
-        .route("/commands", get(list_commands))
+        .route("/commands", get(list_commands).post(create_command))
+        .route("/commands/{name}", get(get_command).delete(delete_command))
         .route("/teams", get(auth::list_teams).post(auth::create_team))
         .route("/teams/{id}", axum::routing::delete(auth::delete_team))
         .route("/auth/invites", post(auth::create_invite))
@@ -113,6 +114,83 @@ async fn list_commands(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<crate::commands::CommandInfo>>, ApiError> {
     Ok(Json(state.commands_cache.get().await))
+}
+
+async fn get_command(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "no home dir".into()))?;
+    match crate::commands::read_command_body(&home, &name).await {
+        Some(body) => Ok(Json(serde_json::json!({ "name": name, "body": body }))),
+        None => Err(ApiError(StatusCode::NOT_FOUND, "command not found".into())),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreateCommandReq {
+    name: String,
+    #[serde(default)]
+    description: String,
+    body: String,
+}
+
+async fn create_command(
+    State(state): State<AppState>,
+    Json(req): Json<CreateCommandReq>,
+) -> Result<Json<crate::commands::CommandInfo>, ApiError> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "no home dir".into()))?;
+    match crate::commands::create_command(&home, &req.name, &req.description, &req.body).await {
+        Ok(()) => {
+            state.commands_cache.invalidate();
+            Ok(Json(crate::commands::CommandInfo {
+                name: req.name,
+                description: req.description,
+                source: "roy".into(),
+            }))
+        }
+        Err(crate::commands::CommandWriteError::InvalidName) => {
+            Err(ApiError(StatusCode::BAD_REQUEST, "invalid name".into()))
+        }
+        Err(crate::commands::CommandWriteError::AlreadyExists) => Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("command exists: {}", req.name),
+        )),
+        Err(crate::commands::CommandWriteError::Io(e)) => {
+            tracing::warn!(error = %e, "create_command io");
+            Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal".into(),
+            ))
+        }
+    }
+}
+
+async fn delete_command(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "no home dir".into()))?;
+    match crate::commands::delete_command(&home, &name).await {
+        Ok(true) => {
+            state.commands_cache.invalidate();
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Ok(false) => Err(ApiError(StatusCode::NOT_FOUND, "command not found".into())),
+        Err(crate::commands::CommandWriteError::InvalidName) => {
+            Err(ApiError(StatusCode::BAD_REQUEST, "invalid name".into()))
+        }
+        Err(crate::commands::CommandWriteError::Io(e)) => {
+            tracing::warn!(error = %e, "delete_command io");
+            Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal".into(),
+            ))
+        }
+        Err(crate::commands::CommandWriteError::AlreadyExists) => unreachable!(),
+    }
 }
 
 async fn list_scheduler_agents(
