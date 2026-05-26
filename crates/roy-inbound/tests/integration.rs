@@ -8,9 +8,9 @@ use std::time::Duration;
 use roy::{ServerEvent, StopReason, TurnEvent};
 use roy_inbound::{
     bus::{self, EventRef},
+    channels::webhook::config::WebhookConfig,
     channels::webhook::{WebhookPublisher, WebhookSourceSpec},
     channels::Publisher,
-    channels::webhook::config::WebhookConfig,
     dispatcher::InboundDispatcher,
     reply::{ReplyHook, ReplyHookRegistry},
     router::{ConfigRouter, Router},

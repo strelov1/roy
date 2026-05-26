@@ -29,7 +29,9 @@ pub struct BusConfig {
 }
 impl Default for BusConfig {
     fn default() -> Self {
-        Self { capacity: default_capacity() }
+        Self {
+            capacity: default_capacity(),
+        }
     }
 }
 fn default_capacity() -> usize {
@@ -44,7 +46,9 @@ pub struct ServerConfig {
 }
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { bind: default_bind() }
+        Self {
+            bind: default_bind(),
+        }
     }
 }
 fn default_bind() -> String {
@@ -69,8 +73,8 @@ fn default_fire_timeout() -> u64 {
 
 impl InboundConfig {
     pub fn load(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let cfg: Self =
             toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         cfg.validate()?;
@@ -86,9 +90,10 @@ impl InboundConfig {
             }
             match src.kind.as_str() {
                 "webhook" => {
-                    let wh = src.webhook.as_ref().ok_or_else(|| {
-                        anyhow!("source {}: missing [sources.webhook]", src.id)
-                    })?;
+                    let wh = src
+                        .webhook
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("source {}: missing [sources.webhook]", src.id))?;
                     if !paths.insert(wh.path.clone()) {
                         return Err(anyhow!("duplicate webhook path: {}", wh.path));
                     }

@@ -89,8 +89,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_source_returns_none() {
-        let c = cfg(
-            r#"
+        let c = cfg(r#"
             [[sources]]
             id = "orders"
             kind = "webhook"
@@ -100,16 +99,14 @@ mod tests {
             [sources.webhook]
             path = "/o"
             reply_mode = "sync"
-        "#,
-        );
+        "#);
         let r = ConfigRouter::from_config(&c);
         assert!(r.route(&event("not-orders", json!({}))).await.is_none());
     }
 
     #[tokio::test]
     async fn known_source_renders_template_and_tags() {
-        let c = cfg(
-            r#"
+        let c = cfg(r#"
             [[sources]]
             id = "orders"
             kind = "webhook"
@@ -119,8 +116,7 @@ mod tests {
             [sources.webhook]
             path = "/o"
             reply_mode = "sync"
-        "#,
-        );
+        "#);
         let r = ConfigRouter::from_config(&c);
         let ev = event("orders", json!({"id": 42}));
         let spec = r.route(&ev).await.unwrap();

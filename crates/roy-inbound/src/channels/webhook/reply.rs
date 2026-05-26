@@ -16,16 +16,24 @@ pub struct WebhookReplyHook {
 }
 
 impl WebhookReplyHook {
-    pub fn new(event_id: String) -> Self { Self { event_id } }
+    pub fn new(event_id: String) -> Self {
+        Self { event_id }
+    }
 }
 
 #[async_trait]
 impl ReplyHook for WebhookReplyHook {
-    async fn on_turn_event(&mut self, _ev: &TurnEvent) -> Result<()> { Ok(()) }
+    async fn on_turn_event(&mut self, _ev: &TurnEvent) -> Result<()> {
+        Ok(())
+    }
 
     async fn on_finish(self: Box<Self>, outcome: FireOutcome, reply: ReplyHandle) -> Result<()> {
         let (status, body) = match outcome {
-            FireOutcome::Ok { assistant_text, cost_usd, stop_reason } => (
+            FireOutcome::Ok {
+                assistant_text,
+                cost_usd,
+                stop_reason,
+            } => (
                 StatusCode::OK,
                 json!({
                     "ok": true,
@@ -100,7 +108,9 @@ mod tests {
     async fn route_rejected_sends_404() {
         let (tx, rx) = oneshot::channel();
         let hook = Box::new(WebhookReplyHook::new("evt-1".into()));
-        hook.on_finish(FireOutcome::RouteRejected, ReplyHandle::HttpSync(tx)).await.unwrap();
+        hook.on_finish(FireOutcome::RouteRejected, ReplyHandle::HttpSync(tx))
+            .await
+            .unwrap();
         let r = rx.await.unwrap();
         assert_eq!(r.status, StatusCode::NOT_FOUND);
     }

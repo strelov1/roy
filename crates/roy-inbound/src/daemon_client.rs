@@ -47,7 +47,8 @@ pub async fn fire_with_hook(
         .with_context(|| format!("connecting to daemon at {}", socket_path.display()))?;
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
-    wr.write_all(serde_json::to_string(&cmd)?.as_bytes()).await?;
+    wr.write_all(serde_json::to_string(&cmd)?.as_bytes())
+        .await?;
     wr.write_all(b"\n").await?;
     wr.flush().await?;
 
@@ -61,8 +62,17 @@ pub async fn fire_with_hook(
             ServerEvent::Frame { entry, .. } => {
                 hook.on_turn_event(&entry.event).await?;
             }
-            ServerEvent::FireDone { session, result, assistant_text, .. } => {
-                let TurnEvent::Result { cost_usd, stop_reason } = result else {
+            ServerEvent::FireDone {
+                session,
+                result,
+                assistant_text,
+                ..
+            } => {
+                let TurnEvent::Result {
+                    cost_usd,
+                    stop_reason,
+                } = result
+                else {
                     return Err(anyhow!("non-Result in FireDone"));
                 };
                 hook.on_finish(
@@ -80,15 +90,23 @@ pub async fn fire_with_hook(
                 });
             }
             ServerEvent::FireTimeout { session, .. } => {
-                hook.on_finish(FireOutcome::Timeout { partial_text: None }, reply).await?;
+                hook.on_finish(FireOutcome::Timeout { partial_text: None }, reply)
+                    .await?;
                 return Ok(FireResult {
                     outcome_kind: OutcomeKind::Timeout,
                     session_id: Some(session),
                 });
             }
-            ServerEvent::FireError { session, code, message } => {
+            ServerEvent::FireError {
+                session,
+                code,
+                message,
+            } => {
                 hook.on_finish(
-                    FireOutcome::DaemonError { code: code.clone(), message: message.clone() },
+                    FireOutcome::DaemonError {
+                        code: code.clone(),
+                        message: message.clone(),
+                    },
                     reply,
                 )
                 .await?;
@@ -162,11 +180,16 @@ mod tests {
         )
         .await;
         let captured: Arc<Mutex<Option<FireOutcome>>> = Arc::new(Mutex::new(None));
-        let hook = Box::new(CapturingHook { captured: captured.clone() });
+        let hook = Box::new(CapturingHook {
+            captured: captured.clone(),
+        });
         let (tx, _rx) = oneshot::channel::<crate::bus::HttpReply>();
         let result = fire_with_hook(
             &p,
-            FireTarget::Spawn { preset: "claude".into(), system_prompt: None },
+            FireTarget::Spawn {
+                preset: "claude".into(),
+                system_prompt: None,
+            },
             "hello".into(),
             Default::default(),
             std::time::Duration::from_secs(5),
@@ -198,11 +221,16 @@ mod tests {
         )
         .await;
         let captured = Arc::new(Mutex::new(None));
-        let hook = Box::new(CapturingHook { captured: captured.clone() });
+        let hook = Box::new(CapturingHook {
+            captured: captured.clone(),
+        });
         let (tx, _rx) = oneshot::channel::<crate::bus::HttpReply>();
         let result = fire_with_hook(
             &p,
-            FireTarget::Spawn { preset: "claude".into(), system_prompt: None },
+            FireTarget::Spawn {
+                preset: "claude".into(),
+                system_prompt: None,
+            },
             "x".into(),
             Default::default(),
             std::time::Duration::from_secs(5),
@@ -211,6 +239,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.outcome_kind, OutcomeKind::DaemonError("no_session".into()));
+        assert_eq!(
+            result.outcome_kind,
+            OutcomeKind::DaemonError("no_session".into())
+        );
     }
 }

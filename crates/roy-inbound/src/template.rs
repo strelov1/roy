@@ -42,7 +42,11 @@ fn resolve_path(expr: &str, payload: &Value) -> String {
                 }
             },
             _ => {
-                tracing::warn!(expr, segment, "template path tried to descend into non-object");
+                tracing::warn!(
+                    expr,
+                    segment,
+                    "template path tried to descend into non-object"
+                );
                 return String::new();
             }
         }

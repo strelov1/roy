@@ -47,20 +47,31 @@ impl InboundDispatcher {
         let spec = match self.router.route(&event).await {
             Some(s) => s,
             None => {
-                let hook = self.hooks.make(&kind, &ev_ref)
+                let hook = self
+                    .hooks
+                    .make(&kind, &ev_ref)
                     .ok_or_else(|| anyhow::anyhow!("no reply hook for kind '{kind}'"))?;
-                hook.on_finish(FireOutcome::RouteRejected, event.reply).await?;
+                hook.on_finish(FireOutcome::RouteRejected, event.reply)
+                    .await?;
                 return Ok(());
             }
         };
 
         // Resolve session.
-        let (target, pending) = self.resolver.resolve(
-            &event.source_id, &event.sender_id, &spec.agent_id, spec.session_strategy
-        ).await?;
+        let (target, pending) = self
+            .resolver
+            .resolve(
+                &event.source_id,
+                &event.sender_id,
+                &spec.agent_id,
+                spec.session_strategy,
+            )
+            .await?;
 
         // Build the hook for this fire.
-        let hook = self.hooks.make(&kind, &ev_ref)
+        let hook = self
+            .hooks
+            .make(&kind, &ev_ref)
             .ok_or_else(|| anyhow::anyhow!("no reply hook for kind '{kind}'"))?;
 
         // Fire.
@@ -73,20 +84,30 @@ impl InboundDispatcher {
             Duration::from_secs(spec.fire_timeout_secs),
             hook,
             event.reply,
-        ).await?;
+        )
+        .await?;
 
         // Binding writes: only on success when we deliberately Spawned a
         // sticky/persistent session.
         if matches!(result.outcome_kind, OutcomeKind::Ok) {
             if let (Some(pb), Some(sid)) = (pending, result.session_id.as_ref()) {
-                self.bindings.upsert(
-                    &pb.source_id, &pb.sender_id, &pb.agent_id,
-                    pb.strategy_db_label, sid,
-                ).await?;
+                self.bindings
+                    .upsert(
+                        &pb.source_id,
+                        &pb.sender_id,
+                        &pb.agent_id,
+                        pb.strategy_db_label,
+                        sid,
+                    )
+                    .await?;
             } else if was_resume {
                 // Touch the existing binding row so last_active_at moves forward.
                 // Touch the per-sender row first; if absent, try the persistent_one wildcard row.
-                if let Some(b) = self.bindings.lookup(&event.source_id, &event.sender_id).await? {
+                if let Some(b) = self
+                    .bindings
+                    .lookup(&event.source_id, &event.sender_id)
+                    .await?
+                {
                     self.bindings.touch(&b.id).await?;
                 } else if let Some(b) = self.bindings.lookup(&event.source_id, "*").await? {
                     self.bindings.touch(&b.id).await?;
