@@ -61,6 +61,11 @@ enum Cmd {
     /// Inject a message into a live session as a background note (no input
     /// lease needed). A background agent calls this to notify a session.
     Inject(InjectArgs),
+    /// Synchronously ask another session or agent persona for a text
+    /// answer. Resolves `<target>` to a live session id (→ Fire Resume)
+    /// or, failing that, to an agent slug from roy-management
+    /// (→ Fire Spawn with that persona).
+    Ask(AskArgs),
     /// Run an MCP server (stdio JSON-RPC) that exposes roy daemon operations
     /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
     /// IDE plugin) which talks to it over stdio.
@@ -244,6 +249,23 @@ struct InjectArgs {
     /// background session that produced this message).
     #[arg(long)]
     source: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct AskArgs {
+    /// Target: a live roy session id, or an agent slug/id from
+    /// roy-management (`roy agents list`).
+    target: String,
+    /// The question or task text.
+    prompt: String,
+    /// Optional extra context, concatenated under a "Context:" label.
+    #[arg(long)]
+    context: Option<String>,
+    #[command(flatten)]
+    mgmt: MgmtBaseArgs,
+    /// Hard cap on the round-trip. Default 600_000 (10 min), same as Fire.
+    #[arg(long)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(clap::Args)]
@@ -431,6 +453,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Wait(args) => cmd_wait(args).await,
         Cmd::Fire(args) => cmd_fire(args).await,
         Cmd::Inject(args) => cmd_inject(args).await,
+        Cmd::Ask(args) => cmd_ask(args).await,
         Cmd::Mcp(args) => {
             let socket = args.socket.unwrap_or_else(default_socket);
             roy_mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
@@ -916,6 +939,10 @@ async fn cmd_inject(args: InjectArgs) -> anyhow::Result<ExitCode> {
         }
         other => anyhow::bail!("unexpected response to Inject: {other:?}"),
     }
+}
+
+async fn cmd_ask(_args: AskArgs) -> anyhow::Result<ExitCode> {
+    anyhow::bail!("not yet implemented")
 }
 
 async fn cmd_wait(args: WaitArgs) -> anyhow::Result<ExitCode> {
