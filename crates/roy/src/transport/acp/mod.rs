@@ -79,6 +79,10 @@ pub struct AcpConfig {
     pub env_remove: Vec<String>,
     /// Which channel carries the persona prompt for this preset.
     pub system_prompt_channel: SystemPromptChannel,
+    /// MCP connections to inject into the agent's project-level config before
+    /// spawning. Currently only `AcpConfig::claude()` opts into using this —
+    /// other presets ignore it. Wired in D2.
+    pub connections: Vec<crate::control::ConnectionSpec>,
 }
 
 impl AcpConfig {
@@ -92,6 +96,7 @@ impl AcpConfig {
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
+            connections: Vec::new(),
         }
     }
 
@@ -106,6 +111,7 @@ impl AcpConfig {
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::Meta,
+            connections: Vec::new(),
         }
     }
 
@@ -119,6 +125,7 @@ impl AcpConfig {
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
+            connections: Vec::new(),
         }
     }
 
@@ -135,6 +142,7 @@ impl AcpConfig {
             open_timeout: Duration::from_secs(30),
             env_remove: vec!["CLAUDECODE".to_string()],
             system_prompt_channel: SystemPromptChannel::Meta,
+            connections: Vec::new(),
         }
     }
 
@@ -152,6 +160,7 @@ impl AcpConfig {
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
+            connections: Vec::new(),
         }
     }
 }

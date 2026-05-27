@@ -39,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
                 resume_cursor: None,
                 fixed_session_id: None,
                 system_prompt: None,
+                connections: Vec::new(),
             },
             256,
             1024,

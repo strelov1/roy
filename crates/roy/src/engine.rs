@@ -67,6 +67,8 @@ pub struct SessionSpawnConfig {
     /// Inline persona prompt. Forwarded to `Transport::open`; later snapshotted
     /// into the session store and (for FirstTurn presets) injected as a first turn.
     pub system_prompt: Option<String>,
+    /// MCP connections injected for this session. Empty = no MCP.
+    pub connections: Vec<crate::control::ConnectionSpec>,
 }
 
 /// Owned by `SessionManager` (or directly by callers in single-session use).

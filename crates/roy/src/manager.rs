@@ -87,9 +87,12 @@ impl SessionManager {
         broadcast_capacity: usize,
         mem_capacity: usize,
     ) -> Result<Arc<SessionEngine>> {
-        let transport =
-            self.factory
-                .build(cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
+        let transport = self.factory.build(
+            cfg.agent,
+            cfg.model.as_deref(),
+            cfg.permission.as_deref(),
+            &cfg.connections,
+        )?;
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
@@ -130,10 +133,18 @@ impl SessionManager {
             resume_cursor: row.resume_cursor,
             fixed_session_id: Some(session_id.to_string()),
             system_prompt: row.system_prompt,
+            // MVP: connections are not re-attached on resume. The session was
+            // originally spawned with whatever connections the client passed,
+            // but resume gets a clean MCP slate. Users who want connections
+            // on a resumed session must close + create a new one.
+            connections: Vec::new(),
         };
-        let transport =
-            self.factory
-                .build(cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
+        let transport = self.factory.build(
+            cfg.agent,
+            cfg.model.as_deref(),
+            cfg.permission.as_deref(),
+            &cfg.connections,
+        )?;
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
@@ -327,6 +338,7 @@ mod tests {
             _agent: AgentPreset,
             _model: Option<&str>,
             _permission: Option<&str>,
+            _connections: &[crate::control::ConnectionSpec],
         ) -> Result<Arc<dyn Transport>> {
             Ok(Arc::new(AcpTransport::new(AcpConfig {
                 command: "python3".to_string(),
@@ -336,6 +348,7 @@ mod tests {
                 open_timeout: Duration::from_secs(5),
                 env_remove: Vec::new(),
                 system_prompt_channel: crate::transport::SystemPromptChannel::Meta,
+                connections: Vec::new(),
             })))
         }
     }
@@ -374,6 +387,7 @@ mod tests {
             resume_cursor: None,
             fixed_session_id: None,
             system_prompt: None,
+            connections: Vec::new(),
         }
     }
 

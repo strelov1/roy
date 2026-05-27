@@ -52,6 +52,7 @@ pub trait TransportFactory: Send + Sync {
         agent: AgentPreset,
         model: Option<&str>,
         permission: Option<&str>,
+        connections: &[crate::control::ConnectionSpec],
     ) -> Result<Arc<dyn Transport>>;
 }
 
@@ -64,6 +65,7 @@ impl TransportFactory for DefaultTransportFactory {
         agent: AgentPreset,
         _model: Option<&str>,
         permission: Option<&str>,
+        connections: &[crate::control::ConnectionSpec],
     ) -> Result<Arc<dyn Transport>> {
         let mut config = match agent {
             AgentPreset::Claude => AcpConfig::claude(),
@@ -83,6 +85,15 @@ impl TransportFactory for DefaultTransportFactory {
                 }
             };
         }
+        // MVP: only the claude preset supports MCP injection. Reject any
+        // non-claude preset that arrives with non-empty connections so the
+        // user sees an actionable error instead of silently-missing tools.
+        if !connections.is_empty() && !matches!(agent, AgentPreset::Claude) {
+            return Err(RoyError::Protocol(format!(
+                "preset '{agent}' does not yet support MCP connections (MVP supports only 'claude')"
+            )));
+        }
+        config.connections = connections.to_vec();
         Ok(Arc::new(AcpTransport::new(config)))
     }
 }
@@ -288,7 +299,7 @@ impl Daemon {
                 permission,
                 resume,
                 system_prompt,
-                connections: _connections,
+                connections,
             } => {
                 let preset: AgentPreset = match agent.parse() {
                     Ok(p) => p,
@@ -305,6 +316,7 @@ impl Daemon {
                     permission,
                     resume,
                     system_prompt,
+                    connections,
                     event_tx,
                 )
                 .await
@@ -403,6 +415,7 @@ impl Daemon {
         permission: Option<String>,
         resume: Option<String>,
         system_prompt: Option<String>,
+        connections: Vec<crate::control::ConnectionSpec>,
         event_tx: &EventTx,
     ) {
         let _ = event_tx.send(ServerEvent::Spawning { agent: agent_label });
@@ -414,6 +427,7 @@ impl Daemon {
             resume_cursor: resume,
             fixed_session_id: None,
             system_prompt,
+            connections,
         };
         match self.manager.spawn(cfg, 256, 1024).await {
             Ok(engine) => {
@@ -563,6 +577,10 @@ impl Daemon {
                     resume_cursor: None,
                     fixed_session_id: None,
                     system_prompt,
+                    // Fire doesn't carry MCP connections; the scheduler/fire path
+                    // is for unattended one-shots that don't have a user-provided
+                    // connection list.
+                    connections: Vec::new(),
                 };
                 match self.manager.spawn(cfg, 256, 1024).await {
                     Ok(e) => e,
@@ -1080,6 +1098,7 @@ mod tests {
             _agent: AgentPreset,
             _model: Option<&str>,
             _permission: Option<&str>,
+            _connections: &[crate::control::ConnectionSpec],
         ) -> Result<Arc<dyn Transport>> {
             Ok(Arc::new(AcpTransport::new(AcpConfig {
                 command: "python3".to_string(),
@@ -1089,6 +1108,7 @@ mod tests {
                 open_timeout: Duration::from_secs(5),
                 env_remove: Vec::new(),
                 system_prompt_channel: crate::transport::SystemPromptChannel::Meta,
+                connections: Vec::new(),
             })))
         }
     }

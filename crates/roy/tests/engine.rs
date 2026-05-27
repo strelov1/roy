@@ -34,6 +34,7 @@ fn fake_acp_transport_with_channel(
         open_timeout: Duration::from_secs(5),
         env_remove: Vec::new(),
         system_prompt_channel: channel,
+        connections: Vec::new(),
     }))
 }
 
@@ -46,6 +47,7 @@ fn test_cfg() -> SessionSpawnConfig {
         resume_cursor: None,
         fixed_session_id: None,
         system_prompt: None,
+        connections: Vec::new(),
     }
 }
 
