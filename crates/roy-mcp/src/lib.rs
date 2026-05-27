@@ -551,6 +551,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
             resume,
             system_prompt,
             extra_env: Default::default(),
+            connections: vec![],
         },
     )
     .await?;
@@ -665,6 +666,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
             resume,
             system_prompt,
             extra_env: Default::default(),
+            connections: vec![],
         },
     )
     .await?;

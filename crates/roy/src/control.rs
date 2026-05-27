@@ -118,6 +118,20 @@ impl<'de> Deserialize<'de> for ErrorCode {
     }
 }
 
+/// One MCP connection passed inline by the trigger client into `Spawn`.
+/// `kind` is one of: `mcp_stdio` (MVP). The shape is intentionally generic so
+/// new transports can be added without changing the daemon-side wire enum —
+/// `roy mcp serve-connections` is the only consumer that interprets these.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConnectionSpec {
+    pub id: String,
+    pub slug: String,
+    pub kind: String,
+    pub config: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<serde_json::Value>,
+}
+
 /// Commands sent from a trigger client to the daemon.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -151,6 +165,11 @@ pub enum ClientCommand {
         /// `ROY_TEAMS`). Empty/absent map is equivalent.
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
         extra_env: std::collections::HashMap<String, String>,
+        /// Inline user-owned MCP connections to make available to the
+        /// session. The daemon-side `serve-connections` proxy consumes
+        /// these; the daemon itself only passes them through.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        connections: Vec<ConnectionSpec>,
     },
     /// Subscribe to a session's `JournalEntry` stream. Optional `from_seq` for
     /// replay-from-N (default: from the start).
@@ -416,6 +435,7 @@ mod tests {
             resume: None,
             system_prompt: None,
             extra_env: Default::default(),
+            connections: vec![],
         });
         // Orphan spawn (no cwd)
         roundtrip(&ClientCommand::Spawn {
@@ -426,6 +446,7 @@ mod tests {
             resume: None,
             system_prompt: None,
             extra_env: Default::default(),
+            connections: vec![],
         });
     }
 
@@ -442,6 +463,7 @@ mod tests {
                 "ROY_AGENTS_DIR_USER".to_string(),
                 "/home/roy/.roy/workspace/users/abc/.roy/agents".to_string(),
             )]),
+            connections: vec![],
         });
     }
 
@@ -655,6 +677,7 @@ mod tests {
             resume: None,
             system_prompt: Some("You are terse.".into()),
             extra_env: Default::default(),
+            connections: vec![],
         });
     }
 
@@ -668,6 +691,7 @@ mod tests {
             resume: None,
             system_prompt: None,
             extra_env: Default::default(),
+            connections: vec![],
         })
         .unwrap();
         assert!(!s.contains("system_prompt"), "None must be skipped: {s}");

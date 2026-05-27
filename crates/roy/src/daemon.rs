@@ -290,6 +290,7 @@ impl Daemon {
                 resume,
                 system_prompt,
                 extra_env,
+                connections: _connections,
             } => {
                 let parsed: Harness = match harness.parse() {
                     Ok(p) => p,
@@ -1213,6 +1214,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1339,6 +1341,7 @@ mod tests {
                 resume: None,
                 system_prompt: Some("PERSONA".into()),
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1406,6 +1409,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1553,6 +1557,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1742,6 +1747,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1912,6 +1918,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1934,6 +1941,7 @@ mod tests {
                 resume: Some("prior-session-sid".into()),
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1999,6 +2007,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -2353,6 +2362,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;

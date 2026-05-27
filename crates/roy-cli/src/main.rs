@@ -601,6 +601,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
                 resume: args.resume.clone(),
                 system_prompt,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await?;
