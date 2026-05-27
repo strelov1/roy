@@ -53,7 +53,7 @@ mod tests {
     #[tokio::test]
     async fn deletes_unknown_session_meta() {
         let dir = tempfile::tempdir().unwrap();
-        let pool = roy_agents::open(&dir.path().join("agents.db"))
+        let pool = crate::db::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();

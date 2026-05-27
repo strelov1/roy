@@ -45,8 +45,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     roy_auth::jwt::secret_from_env()
         .map_err(|e| anyhow::anyhow!("ROY_JWT_SECRET missing or shorter than 32 bytes: {e}"))?;
 
-    let db_path = args.db.unwrap_or_else(roy_agents::default_db_path);
-    let pool = roy_agents::open(&db_path).await?;
+    let db_path = args.db.unwrap_or_else(crate::db::default_db_path);
+    let pool = crate::db::open(&db_path).await?;
 
     meta_store::MetaStore::apply_migrations(&pool).await?;
     roy_auth::apply_migrations(&pool).await?;
@@ -76,7 +76,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     };
 
     let state = AppState {
-        store: roy_agents::Store::new(pool.clone()),
         meta,
         daemon,
         socket_path: socket,

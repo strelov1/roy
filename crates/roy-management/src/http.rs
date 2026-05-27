@@ -1,4 +1,4 @@
-//! axum router + handlers for agent CRUD and session launch.
+//! axum router + handlers for session launch and file-based agents.
 //! axum 0.8 path syntax uses `{id}` (not `:id`).
 
 use std::collections::BTreeMap;
@@ -10,7 +10,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use roy_agents::{Agent, AgentUpdate, NewAgent, StoreError};
 use roy_auth::types::Scope;
 use roy_scheduler::{
     store as sched_store,
@@ -33,22 +32,6 @@ impl IntoResponse for ApiError {
     }
 }
 
-impl From<StoreError> for ApiError {
-    fn from(e: StoreError) -> Self {
-        match e {
-            StoreError::NotFound(id) => {
-                ApiError(StatusCode::NOT_FOUND, format!("agent not found: {id}"))
-            }
-            StoreError::Db(e) => {
-                // Don't surface sqlx text (column names, file paths) to API
-                // callers. Log the cause and return a generic 500.
-                tracing::error!(error = %e, "agent store db error");
-                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
-            }
-        }
-    }
-}
-
 pub fn router(state: AppState) -> Router {
     // All non-public routes go behind `require_user`. `/auth/login` and
     // `/auth/logout` stay public so unauthenticated clients can sign in.
@@ -56,14 +39,7 @@ pub fn router(state: AppState) -> Router {
     // the other authenticated routes so the missing `AuthUser` extension
     // surfaces as 401, not 500.
     let protected = Router::new()
-        .route("/agents-files", get(list_agent_files))
-        .route("/agents", get(list_agents).post(create_agent))
-        .route("/agents/_builder", post(start_builder))
-        .route(
-            "/agents/{id}",
-            get(get_agent).put(update_agent).delete(delete_agent),
-        )
-        .route("/agents/{id}/run", post(run_agent))
+        .route("/agents", get(list_agent_files))
         .route("/presets", get(list_presets))
         .route("/projects", get(list_projects).post(create_project))
         .route(
@@ -243,169 +219,11 @@ struct SchedListQuery {
     limit: Option<i64>,
 }
 
-async fn list_agents(State(s): State<AppState>) -> Result<Json<Vec<Agent>>, ApiError> {
-    Ok(Json(s.store.list().await?))
-}
-
-async fn create_agent(
-    State(s): State<AppState>,
-    Json(new): Json<NewAgent>,
-) -> Result<(StatusCode, Json<Agent>), ApiError> {
-    validate_preset(&new.preset)?;
-    let agent = s.store.create(new).await?;
-    Ok((StatusCode::CREATED, Json(agent)))
-}
-
-async fn get_agent(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<Agent>, ApiError> {
-    Ok(Json(s.store.get(&id).await?))
-}
-
-async fn update_agent(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-    Json(up): Json<AgentUpdate>,
-) -> Result<Json<Agent>, ApiError> {
-    if let Some(preset) = &up.preset {
-        validate_preset(preset)?;
-    }
-    Ok(Json(s.store.update(&id, up).await?))
-}
-
-async fn delete_agent(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    s.store.delete(&id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 async fn list_presets(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     roy_client::list_presets(&s.socket_path)
         .await
         .map(Json)
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))
-}
-
-async fn run_agent(
-    axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
-        crate::auth::AuthUser,
-    >,
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let agent = s.store.get(&id).await?;
-    let mut tags = BTreeMap::new();
-    tags.insert("roy-management:agent_id".into(), agent.id.clone());
-    let session = roy_client::spawn(
-        &s.socket_path,
-        &s.meta,
-        &agent.preset,
-        agent.model,
-        Some(agent.prompt),
-        tags,
-        &user_id,
-    )
-    .await
-    .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    Ok(Json(json!({ "session": session, "agent_id": agent.id })))
-}
-
-#[derive(serde::Deserialize, Default)]
-struct BuilderReq {
-    #[serde(default)]
-    existing_id: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct BuilderResp {
-    agent_id: String,
-    session: String,
-}
-
-async fn start_builder(
-    axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
-        crate::auth::AuthUser,
-    >,
-    State(s): State<AppState>,
-    body: Option<Json<BuilderReq>>,
-) -> Result<(StatusCode, Json<BuilderResp>), ApiError> {
-    let req = body.map(|Json(b)| b).unwrap_or_default();
-
-    let target = if let Some(id) = req.existing_id {
-        s.store.get(&id).await?
-    } else {
-        s.store
-            .create(NewAgent {
-                name: "Untitled".into(),
-                description: None,
-                preset: "claude".into(),
-                model: None,
-                prompt: String::new(),
-                task: None,
-                persistent: false,
-            })
-            .await?
-    };
-
-    let builder = s.store.get_by_slug("builder").await.map_err(|e| match e {
-        StoreError::NotFound(_) => ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "builder seed missing — migration did not run".into(),
-        ),
-        other => other.into(),
-    })?;
-
-    let system_prompt = format!(
-        "{base}\n\n## Current task\nYou are editing agent id={id}. \
-         Use only `roy agents update {id} ...` to apply changes. Never call create or delete.",
-        base = builder.prompt,
-        id = target.id,
-    );
-
-    let mut tags = BTreeMap::new();
-    tags.insert("roy-management:builder.agent_id".into(), target.id.clone());
-
-    let session = roy_client::spawn(
-        &s.socket_path,
-        &s.meta,
-        &builder.preset,
-        builder.model.clone(),
-        Some(system_prompt),
-        tags,
-        &user_id,
-    )
-    .await
-    .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(BuilderResp {
-            agent_id: target.id,
-            session,
-        }),
-    ))
-}
-
-/// Preset must be one the daemon spawns. Kept as a const list rather than
-/// importing `roy::AgentPreset` so this crate's only `roy` dependency stays
-/// limited to the wire-protocol types listed in CLAUDE.md.
-const VALID_PRESETS: &[&str] = &["claude", "gemini", "opencode", "codex"];
-
-fn validate_preset(preset: &str) -> Result<(), ApiError> {
-    if VALID_PRESETS.contains(&preset) {
-        Ok(())
-    } else {
-        Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "unknown preset '{preset}'; expected one of: {}",
-                VALID_PRESETS.join(", ")
-            ),
-        ))
-    }
 }
 
 async fn list_projects(
@@ -465,13 +283,24 @@ async fn delete_project(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Tri-state `team_id` on update mirrors the `AgentPatch` pattern in
-/// `roy_agents::types` (absent / null / value).
+/// Forces serde to call the inner `Option::deserialize` even when the JSON
+/// value is `null`, so we can distinguish "field absent" (handled by
+/// `#[serde(default)]` returning the outer `None`) from "field set to null"
+/// (this function returning `Some(None)`).
+fn deserialize_optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
+}
+
+/// Tri-state `team_id` on update: absent / null / value.
 #[derive(serde::Deserialize)]
 struct ProjectUpdate {
     #[serde(default)]
     name: Option<String>,
-    #[serde(default, deserialize_with = "roy_agents::types::deserialize_optional_field")]
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
     team_id: Option<Option<String>>,
 }
 
@@ -805,7 +634,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use std::path::PathBuf;
     use tower::ServiceExt;
 
     /// Direct INSERT into `users` with id="root" to mirror B3's
@@ -839,7 +667,7 @@ mod tests {
         use crate::meta_store::MetaStore;
 
         let dir = tempfile::tempdir().unwrap();
-        let pool = roy_agents::open(&dir.path().join("agents.db"))
+        let pool = crate::db::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
@@ -858,7 +686,6 @@ mod tests {
         // would invalidate the SQLite file referenced by the pool.
         std::mem::forget(dir);
         let state = AppState {
-            store: roy_agents::Store::new(pool.clone()),
             meta: MetaStore::new(pool.clone(), workspace.clone()),
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
@@ -870,80 +697,6 @@ mod tests {
             agents_cache: std::sync::Arc::new(crate::agents::AgentsCache::default()),
         };
         (state, alice.id)
-    }
-
-    #[tokio::test]
-    async fn create_then_get_roundtrips() {
-        let cookie = auth_cookie();
-        let (st, _uid) = test_state().await;
-        let app = router(st);
-        let body = serde_json::to_vec(&json!({
-            "name": "Reviewer", "preset": "claude", "prompt": "Be terse."
-        }))
-        .unwrap();
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::post("/agents")
-                    .header("content-type", "application/json")
-                    .header("cookie", &cookie)
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let created: Agent = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(created.slug, "reviewer");
-
-        let resp = app
-            .oneshot(
-                Request::get(format!("/agents/{}", created.id))
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn get_missing_is_404() {
-        let cookie = auth_cookie();
-        let (st, _uid) = test_state().await;
-        let app = router(st);
-        let resp = app
-            .oneshot(
-                Request::get("/agents/nope")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn create_with_bad_preset_is_400() {
-        let cookie = auth_cookie();
-        let (st, _uid) = test_state().await;
-        let app = router(st);
-        let body =
-            serde_json::to_vec(&json!({ "name": "X", "preset": "klaude", "prompt": "" })).unwrap();
-        let resp = app
-            .oneshot(
-                Request::post("/agents")
-                    .header("content-type", "application/json")
-                    .header("cookie", &cookie)
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1289,181 +1042,13 @@ mod tests {
         assert_eq!(back.tags, BTreeMap::from([("new".into(), "2".into())]));
     }
 
-    async fn state_for_builder_test(socket: PathBuf) -> AppState {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = roy_agents::open(&dir.path().join("agents.db"))
-            .await
-            .unwrap();
-        crate::meta_store::MetaStore::apply_migrations(&pool)
-            .await
-            .unwrap();
-        roy_auth::apply_migrations(&pool).await.unwrap();
-        seed_root_user(&pool).await;
-        let workspace = dir.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        // Leak the tempdir: pool keeps reading from this file for the test.
-        std::mem::forget(dir);
-        AppState {
-            store: roy_agents::Store::new(pool.clone()),
-            meta: crate::meta_store::MetaStore::new(pool.clone(), workspace.clone()),
-            daemon: std::sync::Arc::new(crate::roy_client::mock::MockDaemonClient::new()),
-            socket_path: socket,
-            scheduler_pool: None,
-            pool,
-            workspace_dir: workspace,
-            login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
-            commands_cache: std::sync::Arc::new(crate::commands::CommandsCache::default()),
-            agents_cache: std::sync::Arc::new(crate::agents::AgentsCache::default()),
-        }
-    }
-
-    #[tokio::test]
-    async fn _builder_endpoint_creates_stub_and_returns_session() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        use tokio::net::UnixListener;
-
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("roy.sock");
-
-        let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
-        let socket_for_task = socket.clone();
-        let daemon = tokio::spawn(async move {
-            let l = UnixListener::bind(&socket_for_task).unwrap();
-            let (s, _) = l.accept().await.unwrap();
-            let (r, mut w) = s.into_split();
-            let mut lines = BufReader::new(r).lines();
-            let raw = lines.next_line().await.unwrap().unwrap();
-            let _ = tx.send(serde_json::from_str(&raw).unwrap());
-            w.write_all(b"{\"kind\":\"spawning\",\"agent\":\"claude\"}\n")
-                .await
-                .unwrap();
-            w.write_all(b"{\"kind\":\"spawned\",\"session\":\"sess-99\"}\n")
-                .await
-                .unwrap();
-            w.flush().await.unwrap();
-        });
-
-        let cookie = auth_cookie();
-        let state = state_for_builder_test(socket).await;
-        let app = router(state.clone());
-        let resp = app
-            .oneshot(
-                Request::post("/agents/_builder")
-                    .header("content-type", "application/json")
-                    .header("cookie", &cookie)
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let agent_id = json["agent_id"].as_str().unwrap().to_string();
-        assert!(!agent_id.is_empty());
-        assert_eq!(json["session"], "sess-99");
-
-        let stub = state.store.get(&agent_id).await.unwrap();
-        assert_eq!(stub.name, "Untitled");
-
-        let cmd = rx.await.unwrap();
-        assert_eq!(cmd["op"], "spawn");
-        let sp = cmd["system_prompt"].as_str().unwrap();
-        assert!(sp.contains("Agent Builder"), "got: {sp}");
-        assert!(sp.contains(&agent_id), "got: {sp}");
-
-        // The builder session must carry the marker tag so the sidebar can
-        // render a wrench icon next to it.
-        let meta = state
-            .meta
-            .get_session_meta("sess-99")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            meta.tags.get("roy-management:builder.agent_id"),
-            Some(&agent_id)
-        );
-
-        daemon.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn _builder_endpoint_with_existing_id_reuses_agent() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        use tokio::net::UnixListener;
-
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("roy.sock");
-
-        let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
-        let socket_for_task = socket.clone();
-        let daemon = tokio::spawn(async move {
-            let l = UnixListener::bind(&socket_for_task).unwrap();
-            let (s, _) = l.accept().await.unwrap();
-            let (r, mut w) = s.into_split();
-            let mut lines = BufReader::new(r).lines();
-            let raw = lines.next_line().await.unwrap().unwrap();
-            let _ = tx.send(serde_json::from_str(&raw).unwrap());
-            w.write_all(b"{\"kind\":\"spawning\",\"agent\":\"claude\"}\n")
-                .await
-                .unwrap();
-            w.write_all(b"{\"kind\":\"spawned\",\"session\":\"sess-edit\"}\n")
-                .await
-                .unwrap();
-            w.flush().await.unwrap();
-        });
-
-        let state = state_for_builder_test(socket).await;
-        let existing = state
-            .store
-            .create(roy_agents::NewAgent {
-                name: "Pre-existing".into(),
-                description: None,
-                preset: "claude".into(),
-                model: None,
-                prompt: "already here".into(),
-                task: None,
-                persistent: false,
-            })
-            .await
-            .unwrap();
-
-        let cookie = auth_cookie();
-        let body = serde_json::json!({ "existing_id": existing.id }).to_string();
-        let app = router(state.clone());
-        let resp = app
-            .oneshot(
-                Request::post("/agents/_builder")
-                    .header("content-type", "application/json")
-                    .header("cookie", &cookie)
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["agent_id"], existing.id);
-        assert_eq!(json["session"], "sess-edit");
-
-        let all = state.store.list().await.unwrap();
-        assert_eq!(all.len(), 2);
-
-        let cmd = rx.await.unwrap();
-        let sp = cmd["system_prompt"].as_str().unwrap();
-        assert!(sp.contains(&existing.id), "got: {sp}");
-        daemon.await.unwrap();
-    }
-
     /// State backed by a real (empty) scheduler DB attached. Tests that need
     /// to write fixture rows take the pool back out via state.scheduler_pool.
     async fn state_with_scheduler() -> AppState {
         use crate::meta_store::MetaStore;
 
         let dir = tempfile::tempdir().unwrap();
-        let agents_pool = roy_agents::open(&dir.path().join("agents.db"))
+        let agents_pool = crate::db::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
         MetaStore::apply_migrations(&agents_pool).await.unwrap();
@@ -1476,7 +1061,6 @@ mod tests {
             .unwrap();
         std::mem::forget(dir);
         AppState {
-            store: roy_agents::Store::new(agents_pool.clone()),
             meta: MetaStore::new(agents_pool.clone(), workspace.clone()),
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
@@ -1585,7 +1169,7 @@ mod tests {
         assert!(rows.is_empty(), "empty DB → empty list");
     }
 
-    /// Smoke test for GET /agents-files.
+    /// Smoke test for GET /agents.
     ///
     /// HOME isolation approach: set the `HOME` env var to a fresh tempdir
     /// before the request, then call `cache.invalidate()` so the cache misses
@@ -1618,7 +1202,7 @@ mod tests {
         let app = router(st);
         let resp = app
             .oneshot(
-                Request::get("/agents-files")
+                Request::get("/agents")
                     .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),

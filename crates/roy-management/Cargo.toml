@@ -16,7 +16,6 @@ test-support = []
 
 [dependencies]
 roy = { path = "../roy" }
-roy-agents = { path = "../roy-agents" }
 roy-auth = { path = "../roy-auth" }
 roy-scheduler = { path = "../roy-scheduler" }
 
