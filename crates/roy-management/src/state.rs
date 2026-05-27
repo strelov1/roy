@@ -34,4 +34,7 @@ pub struct AppState {
     /// 30s TTL cache for filesystem-discovered slash commands. Shared via
     /// `Arc` so all `AppState` clones see the same cache state.
     pub commands_cache: Arc<crate::commands::CommandsCache>,
+    /// 30s TTL cache for filesystem-discovered agent files. Shared via
+    /// `Arc` so all `AppState` clones see the same cache state.
+    pub agents_cache: Arc<crate::agents::AgentsCache>,
 }
