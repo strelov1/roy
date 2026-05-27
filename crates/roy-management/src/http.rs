@@ -494,6 +494,7 @@ async fn create_session(
         team_id: req.team_id.clone(),
         tags: req.tags.clone(),
         created_at: chrono::Utc::now().timestamp(),
+        connection_ids: Vec::new(),
     };
     if let Err(meta_err) = s.meta.upsert_session_meta(&meta).await {
         // Compensating action: the daemon already spawned the session, but
@@ -1001,6 +1002,7 @@ mod tests {
                 team_id: None,
                 tags: BTreeMap::from([("k".into(), "v".into())]),
                 created_at: 1,
+                connection_ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -1071,6 +1073,7 @@ mod tests {
                 team_id: None,
                 tags: BTreeMap::from([("old".into(), "1".into())]),
                 created_at: 1,
+                connection_ids: Vec::new(),
             })
             .await
             .unwrap();
