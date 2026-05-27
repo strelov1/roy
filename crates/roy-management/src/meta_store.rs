@@ -217,6 +217,26 @@ impl MetaStore {
         }
     }
 
+    /// Move a project between ownership scopes. Only the `team_id` column
+    /// changes — existing session cwds stay put because `resolve_cwd` keys
+    /// each session's path on its own captured `(scope, user, team, project,
+    /// session)` tuple. New sessions land at the new scope.
+    pub async fn set_project_team(
+        &self,
+        id: &str,
+        team_id: Option<&str>,
+    ) -> Result<Project, MetaError> {
+        let row = sqlx::query_as::<_, (String, String, String, String, Option<String>, i64)>(
+            "UPDATE projects SET team_id = ? WHERE id = ? \
+             RETURNING id, name, path, created_by, team_id, created_at",
+        )
+        .bind(team_id)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(Project::from_row).ok_or(MetaError::NotFound(id.into()))
+    }
+
     pub async fn upsert_session_meta(&self, meta: &SessionMeta) -> Result<(), MetaError> {
         let mut tx = self.pool.begin().await?;
 
