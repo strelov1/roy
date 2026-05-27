@@ -4,14 +4,11 @@
 //! parent — the ACP agent), and spawns each upstream MCP as a child process.
 //! `tools/list` aggregates all upstream tools with a `<slug>__<tool>` prefix;
 //! `tools/call` strips the prefix and routes to the owning upstream.
-//!
-//! This file is the skeleton — the JSON-RPC dispatcher works, but the
-//! upstream-spawning Registry is a stub returning an empty tool list. C3 and
-//! C4 fill in the real upstream wrapper and aggregation.
 
 use anyhow::{Context, Result};
 use clap::Args;
 use std::path::PathBuf;
+use tokio::io::{BufReader, Stdin};
 
 pub mod dispatch;
 pub mod registry;
@@ -33,17 +30,27 @@ pub struct ServeConnectionsArgs {
 }
 
 pub async fn run(args: ServeConnectionsArgs) -> Result<()> {
-    let bundle = load_bundle(&args).await.context("loading spec bundle")?;
+    // We must own a single BufReader over stdin from start to finish — if we
+    // created one to read the bundle and another for dispatch, the first one
+    // would silently eat any JSON-RPC lines that arrived in the same read
+    // and they'd be dropped on the floor when its buffer was discarded.
+    let mut stdin = BufReader::new(tokio::io::stdin());
+    let bundle = load_bundle(&args, &mut stdin)
+        .await
+        .context("loading spec bundle")?;
     tracing::info!(
         session = %bundle.session_id,
         connections = bundle.connections.len(),
         "serve-connections starting"
     );
     let registry = registry::Registry::start(bundle).await?;
-    dispatch::run(registry).await
+    dispatch::run(registry, stdin).await
 }
 
-async fn load_bundle(args: &ServeConnectionsArgs) -> Result<spec::Bundle> {
+async fn load_bundle(
+    args: &ServeConnectionsArgs,
+    stdin: &mut BufReader<Stdin>,
+) -> Result<spec::Bundle> {
     if let Some(path) = &args.specs {
         let text = tokio::fs::read_to_string(path)
             .await
@@ -51,12 +58,12 @@ async fn load_bundle(args: &ServeConnectionsArgs) -> Result<spec::Bundle> {
         Ok(serde_json::from_str(&text)?)
     } else if args.specs_stdin {
         use tokio::io::AsyncBufReadExt;
-        let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
-        let first = lines
-            .next_line()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("EOF before spec bundle"))?;
-        Ok(serde_json::from_str(&first)?)
+        let mut first = String::new();
+        let n = stdin.read_line(&mut first).await?;
+        if n == 0 {
+            anyhow::bail!("EOF before spec bundle");
+        }
+        Ok(serde_json::from_str(first.trim())?)
     } else {
         anyhow::bail!("either --specs <path> or --specs-stdin is required")
     }
