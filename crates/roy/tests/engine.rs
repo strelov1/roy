@@ -35,6 +35,7 @@ fn fake_acp_transport_with_channel(
         env_remove: Vec::new(),
         system_prompt_channel: channel,
         connections: Vec::new(),
+        inject_mcp: false,
     }))
 }
 
