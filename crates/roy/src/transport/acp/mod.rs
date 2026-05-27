@@ -182,7 +182,7 @@ enum SessionCommand {
 impl Transport for AcpTransport {
     async fn open(
         &self,
-        _session_id: &str,
+        session_id: &str,
         resume_cursor: Option<&str>,
         cwd: PathBuf,
         system_prompt: Option<&str>,
@@ -208,6 +208,7 @@ impl Transport for AcpTransport {
         for key in &self.config.env_remove {
             cmd.env_remove(key);
         }
+        cmd.env("ROY_SESSION_ID", session_id);
         let mut child = cmd.spawn().map_err(RoyError::Io)?;
         let stdin = child
             .stdin
