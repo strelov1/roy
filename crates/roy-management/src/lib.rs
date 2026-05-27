@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod bootstrap;
+pub mod db;
 pub mod commands;
 pub mod cwd;
 pub mod http;
