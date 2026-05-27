@@ -70,6 +70,8 @@ pub struct SessionSpawnConfig {
     /// Extra environment variables forwarded to the agent process via
     /// `Transport::open`. Callers that don't need custom env pass an empty map.
     pub extra_env: std::collections::HashMap<String, String>,
+    /// MCP connections injected for this session. Empty = no MCP.
+    pub connections: Vec<crate::control::ConnectionSpec>,
 }
 
 /// Owned by `SessionManager` (or directly by callers in single-session use).
