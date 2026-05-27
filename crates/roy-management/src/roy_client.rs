@@ -21,6 +21,7 @@ pub struct SpawnRequest {
     pub permission: Option<String>,
     pub system_prompt: Option<String>,
     pub extra_env: std::collections::HashMap<String, String>,
+    pub connections: Vec<roy::ConnectionSpec>,
 }
 
 #[async_trait]
@@ -60,7 +61,7 @@ impl DaemonClient for UnixSocketDaemonClient {
             resume: None,
             system_prompt: req.system_prompt,
             extra_env: req.extra_env,
-            connections: Vec::new(),
+            connections: req.connections,
         };
         let mut lines = self.connect_and_send(&cmd).await?;
         loop {
@@ -259,6 +260,7 @@ pub async fn spawn(
             permission: None,
             system_prompt,
             extra_env: Default::default(),
+            connections: Vec::new(),
         })
         .await?;
     // Persist tags into management-owned meta so `GET /sessions` returns

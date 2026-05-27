@@ -40,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
                 fixed_session_id: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: Vec::new(),
             },
             256,
             1024,

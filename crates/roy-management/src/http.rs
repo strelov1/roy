@@ -464,6 +464,10 @@ async fn create_session(
             permission: req.permission.clone(),
             system_prompt: req.system_prompt.clone(),
             extra_env,
+            // MVP: connections are not yet resolved here; E2 will look up
+            // `req.connection_ids` against the connections store and pass them
+            // through. For B2, the field is just plumbed empty.
+            connections: Vec::new(),
         })
         .await
     {
