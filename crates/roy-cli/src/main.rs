@@ -875,6 +875,19 @@ async fn cmd_close(args: CloseArgs) -> anyhow::Result<()> {
     }
 }
 
+/// Builds the prompt sent to the target agent in `roy ask`. With no
+/// context, the prompt is forwarded verbatim. With context, both are
+/// concatenated under explicit labels — the LLM-side equivalent of
+/// CrewAI's `(task, context)` tool schema.
+fn build_ask_prompt(prompt: &str, context: Option<&str>) -> String {
+    match context {
+        Some(ctx) if !ctx.is_empty() => {
+            format!("Context:\n{ctx}\n\nQuestion/Task:\n{prompt}")
+        }
+        _ => prompt.to_string(),
+    }
+}
+
 async fn cmd_inject(args: InjectArgs) -> anyhow::Result<ExitCode> {
     let (mut writer, mut events) = open_daemon().await?;
 
@@ -1484,5 +1497,29 @@ mod fire_args_tests {
             cli.is_err(),
             "expected error: --project conflicts with --resume"
         );
+    }
+}
+
+#[cfg(test)]
+mod build_ask_prompt_tests {
+    use super::build_ask_prompt;
+
+    #[test]
+    fn build_ask_prompt_without_context_is_plain_prompt() {
+        assert_eq!(build_ask_prompt("do the thing", None), "do the thing");
+    }
+
+    #[test]
+    fn build_ask_prompt_with_context_concatenates_with_labels() {
+        let p = build_ask_prompt("Is this OK?", Some("Found a possible match in row 7."));
+        assert_eq!(
+            p,
+            "Context:\nFound a possible match in row 7.\n\nQuestion/Task:\nIs this OK?"
+        );
+    }
+
+    #[test]
+    fn build_ask_prompt_empty_context_is_treated_as_no_context() {
+        assert_eq!(build_ask_prompt("hi", Some("")), "hi");
     }
 }
