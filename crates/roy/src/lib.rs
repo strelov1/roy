@@ -11,7 +11,7 @@ pub mod session_store;
 pub mod transport;
 
 pub use agents_config::{AgentInfo, AgentPreset, AgentsConfigStatus, ModelInfo};
-pub use control::{ClientCommand, ErrorCode, FireTarget, ServerEvent};
+pub use control::{ClientCommand, ConnectionSpec, ErrorCode, FireTarget, ServerEvent};
 pub use daemon::{Daemon, DefaultTransportFactory, ServeOpts, TransportFactory};
 pub use engine::{Attach, EngineOpts, InputLease, SessionEngine, SessionSpawnConfig};
 pub use error::{Result, RoyError};

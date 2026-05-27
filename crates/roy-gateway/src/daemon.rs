@@ -112,6 +112,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Conn for TurnConn<S> {
             permission: None,
             resume: None,
             system_prompt: None,
+            connections: Vec::new(),
         })
         .await?;
         loop {

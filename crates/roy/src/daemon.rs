@@ -288,6 +288,7 @@ impl Daemon {
                 permission,
                 resume,
                 system_prompt,
+                connections: _connections,
             } => {
                 let preset: AgentPreset = match agent.parse() {
                     Ok(p) => p,
@@ -1203,6 +1204,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                connections: vec![],
             },
         )
         .await;
@@ -1328,6 +1330,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: Some("PERSONA".into()),
+                connections: vec![],
             },
         )
         .await;
@@ -1394,6 +1397,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                connections: vec![],
             },
         )
         .await;
@@ -1540,6 +1544,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                connections: vec![],
             },
         )
         .await;
@@ -1728,6 +1733,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                connections: vec![],
             },
         )
         .await;
@@ -1897,6 +1903,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                connections: vec![],
             },
         )
         .await;
@@ -1918,6 +1925,7 @@ mod tests {
                 permission: None,
                 resume: Some("prior-session-sid".into()),
                 system_prompt: None,
+                connections: vec![],
             },
         )
         .await;
@@ -1982,6 +1990,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                connections: vec![],
             },
         )
         .await;
@@ -2326,6 +2335,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                connections: vec![],
             },
         )
         .await;
