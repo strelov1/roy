@@ -122,6 +122,21 @@ pub fn slugify(name: &str) -> String {
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// Row tuple for `connections` SELECTs — kept in one place so the three
+/// callsites (`list_by_owner`, `get`, `row_to_connection`) stay aligned.
+type ConnectionRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    i64,
+);
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("connection not found: {0}")]
@@ -154,17 +169,14 @@ impl Store {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp();
         let base = slugify(&new.name);
+        let cfg_text = serialize_json("config", &new.config)?;
+        let secrets_text = new
+            .secrets
+            .as_ref()
+            .map(|v| serialize_json("secrets", v))
+            .transpose()?;
         loop {
             let slug = self.unique_slug(owner_id, &base).await?;
-            let cfg_text = serde_json::to_string(&new.config)
-                .map_err(|e| StoreError::Invalid(format!("config not serializable: {e}")))?;
-            let secrets_text =
-                match &new.secrets {
-                    Some(v) => Some(serde_json::to_string(v).map_err(|e| {
-                        StoreError::Invalid(format!("secrets not serializable: {e}"))
-                    })?),
-                    None => None,
-                };
             let res = sqlx::query(
                 "INSERT INTO connections
                  (id, owner_id, name, slug, kind, config_json, secrets_json, description, created_at, updated_at)
@@ -204,18 +216,7 @@ impl Store {
     }
 
     pub async fn list_by_owner(&self, owner_id: &str) -> Result<Vec<Connection>, StoreError> {
-        let rows: Vec<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-        )> = sqlx::query_as(
+        let rows: Vec<ConnectionRow> = sqlx::query_as(
             "SELECT id, owner_id, name, slug, kind, config_json, secrets_json, description, created_at, updated_at
              FROM connections WHERE owner_id = ? ORDER BY created_at DESC",
         )
@@ -226,18 +227,7 @@ impl Store {
     }
 
     pub async fn get(&self, owner_id: &str, id: &str) -> Result<Connection, StoreError> {
-        let row: Option<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-        )> = sqlx::query_as(
+        let row: Option<ConnectionRow> = sqlx::query_as(
             "SELECT id, owner_id, name, slug, kind, config_json, secrets_json, description, created_at, updated_at
              FROM connections WHERE owner_id = ? AND id = ?",
         )
@@ -273,29 +263,25 @@ impl Store {
         upd: ConnectionUpdate,
     ) -> Result<Connection, StoreError> {
         let current = self.get(owner_id, id).await?;
-        let name = upd.name.clone().unwrap_or(current.name.clone());
-        let config = upd.config.clone().unwrap_or(current.config.clone());
+        let name = upd.name.unwrap_or(current.name);
+        let config = upd.config.unwrap_or(current.config);
         validate_config(&current.kind, &config).map_err(StoreError::Invalid)?;
         let secrets = match upd.secrets {
             Some(Some(v)) => Some(v),
             Some(None) => None,
-            None => current.secrets.clone(),
+            None => current.secrets,
         };
         let description = match upd.description {
             Some(Some(s)) => Some(s),
             Some(None) => None,
-            None => current.description.clone(),
+            None => current.description,
         };
         let now = Utc::now().timestamp();
-        let cfg_text = serde_json::to_string(&config)
-            .map_err(|e| StoreError::Invalid(format!("config not serializable: {e}")))?;
-        let secrets_text = match &secrets {
-            Some(v) => Some(
-                serde_json::to_string(v)
-                    .map_err(|e| StoreError::Invalid(format!("secrets not serializable: {e}")))?,
-            ),
-            None => None,
-        };
+        let cfg_text = serialize_json("config", &config)?;
+        let secrets_text = secrets
+            .as_ref()
+            .map(|v| serialize_json("secrets", v))
+            .transpose()?;
         sqlx::query(
             "UPDATE connections SET name = ?, config_json = ?, secrets_json = ?, description = ?, updated_at = ?
              WHERE owner_id = ? AND id = ?",
@@ -350,20 +336,12 @@ impl Store {
     }
 }
 
-fn row_to_connection(
-    r: (
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        i64,
-        i64,
-    ),
-) -> Result<Connection, StoreError> {
+fn serialize_json(field: &str, v: &Value) -> Result<String, StoreError> {
+    serde_json::to_string(v)
+        .map_err(|e| StoreError::Invalid(format!("{field} not serializable: {e}")))
+}
+
+fn row_to_connection(r: ConnectionRow) -> Result<Connection, StoreError> {
     let (
         id,
         owner_id,
