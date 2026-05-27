@@ -17,11 +17,12 @@ Flags:
                          final "ack" chunk and terminal Result. Used by tests
                          that stress the broadcast/journal pipeline.
 """
-import sys, json
+import sys, json, os
 
 flags = set()
 flood_n = 0
 meta_out = None
+env_out = None
 _argv = sys.argv[1:]
 _i = 0
 while _i < len(_argv):
@@ -32,6 +33,9 @@ while _i < len(_argv):
     elif a == "--meta-out":
         meta_out = _argv[_i + 1]
         _i += 2
+    elif a == "--env-out":
+        env_out = _argv[_i + 1]
+        _i += 2
     else:
         flags.add(a)
         _i += 1
@@ -41,6 +45,15 @@ def record_meta(m):
     if meta_out is not None:
         with open(meta_out, "w") as f:
             json.dump(m.get("params", {}).get("_meta"), f)
+
+
+def record_env():
+    if env_out is not None:
+        with open(env_out, "w") as f:
+            json.dump({"ROY_SESSION_ID": os.environ.get("ROY_SESSION_ID")}, f)
+
+
+record_env()
 
 ALLOW_ID = "opt-allow-1"
 
