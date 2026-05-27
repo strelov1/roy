@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdin};
 
 use super::registry::Registry;
 
@@ -14,8 +14,8 @@ const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "roy-connections";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub async fn run(registry: Registry) -> Result<()> {
-    let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
+pub async fn run(registry: Registry, stdin: BufReader<Stdin>) -> Result<()> {
+    let mut stdin_lines = stdin.lines();
     let mut stdout = tokio::io::stdout();
     while let Some(line) = stdin_lines.next_line().await.context("reading stdin")? {
         let line = line.trim();
