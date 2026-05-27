@@ -65,6 +65,7 @@ pub fn router(state: AppState) -> Router {
         .route("/teams/{id}", axum::routing::delete(auth::delete_team))
         .route("/auth/invites", post(auth::create_invite))
         .route("/auth/accept-invite", post(auth::accept_invite))
+        .merge(crate::connections::router())
         .merge(auth::protected_router())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -736,6 +737,7 @@ mod tests {
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
             scheduler_pool: None,
+            connections: crate::connections::Store::new(pool.clone()),
             pool,
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
@@ -1111,6 +1113,7 @@ mod tests {
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
             scheduler_pool: Some(sched_pool),
+            connections: crate::connections::Store::new(agents_pool.clone()),
             pool: agents_pool,
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),

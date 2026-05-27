@@ -51,6 +51,7 @@ pub async fn test_app() -> (axum::Router, SqlitePool, PathBuf) {
         login_limiter: std::sync::Arc::new(roy_management::rate_limit::LoginLimiter::default()),
         commands_cache: std::sync::Arc::new(roy_management::commands::CommandsCache::default()),
         agents_cache: std::sync::Arc::new(roy_management::agents::AgentsCache::default()),
+        connections: roy_management::connections::Store::new(pool.clone()),
     };
     (router_for_tests(state), pool, workspace_dir)
 }
