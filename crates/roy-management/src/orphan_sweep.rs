@@ -73,6 +73,7 @@ mod tests {
             team_id: None,
             tags: BTreeMap::new(),
             created_at: 1,
+            connection_ids: Vec::new(),
         })
         .await
         .unwrap();
@@ -86,6 +87,7 @@ mod tests {
             team_id: None,
             tags: BTreeMap::new(),
             created_at: 1,
+            connection_ids: Vec::new(),
         })
         .await
         .unwrap();

@@ -278,6 +278,7 @@ pub async fn spawn(
         team_id: None,
         tags,
         created_at: chrono::Utc::now().timestamp(),
+        connection_ids: Vec::new(),
     };
     meta.upsert_session_meta(&row)
         .await
