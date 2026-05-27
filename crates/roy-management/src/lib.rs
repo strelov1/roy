@@ -6,6 +6,7 @@ pub mod agents;
 pub mod auth;
 pub mod bootstrap;
 pub mod commands;
+pub mod connections;
 pub mod cwd;
 pub mod db;
 pub mod http;
