@@ -63,6 +63,8 @@ pub enum SystemPromptChannel {
     FirstTurn,
 }
 
+pub mod mcp_injection;
+
 /// Launch + behaviour config for an ACP agent.
 pub struct AcpConfig {
     pub command: String,
