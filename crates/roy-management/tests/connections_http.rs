@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 mod common;
-use common::{login_as, test_app};
+use common::{login_as, test_app, test_app_with_mock_daemon};
 
 #[tokio::test]
 async fn create_list_get_update_delete() {
@@ -244,6 +244,76 @@ async fn session_create_rejects_cross_user_connection() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn session_create_forwards_specs_to_daemon() {
+    let (app, pool, _ws, mock) = test_app_with_mock_daemon().await;
+    let _alice = make_user(&pool, "alice").await;
+    let cookie = login_as(&app, "alice", "test-password-1234").await;
+
+    // Create a connection with a config + secrets.
+    let body = json!({
+        "name": "Linear",
+        "kind": "mcp_stdio",
+        "config": {"command": "npx", "args": ["-y", "@linear/mcp"]},
+        "secrets": {"LINEAR_API_KEY": "lin_xxx"}
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connections")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let created: Value = serde_json::from_slice(&bytes).unwrap();
+    let conn_id = created["id"].as_str().unwrap().to_string();
+
+    // Create a session referencing that connection.
+    let body = json!({
+        "agent": "claude",
+        "scope": "personal",
+        "connection_ids": [conn_id.clone()],
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sessions")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Inspect the captured SpawnRequest.
+    let captured = mock.last_spawn();
+    assert_eq!(
+        captured.connections.len(),
+        1,
+        "expected one connection in SpawnRequest, got: {:?}",
+        captured.connections
+    );
+    let spec = &captured.connections[0];
+    assert_eq!(spec.id, conn_id);
+    assert_eq!(spec.slug, "linear");
+    assert_eq!(spec.kind, "mcp_stdio");
+    assert_eq!(spec.config["command"], "npx");
+    assert_eq!(spec.config["args"][0], "-y");
+    assert_eq!(spec.config["args"][1], "@linear/mcp");
+    assert_eq!(spec.secrets.as_ref().unwrap()["LINEAR_API_KEY"], "lin_xxx");
 }
 
 #[tokio::test]
