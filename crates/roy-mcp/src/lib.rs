@@ -7,6 +7,8 @@
 //!
 //! Spec reference: <https://modelcontextprotocol.io/specification/2024-11-05>.
 
+pub mod serve_connections;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
