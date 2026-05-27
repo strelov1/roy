@@ -652,7 +652,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![(1,), (2,), (3,), (4,), (5,)]);
+        assert_eq!(versions, vec![(1,), (2,), (3,), (4,), (5,), (6,)]);
     }
 
     fn meta_with(session_id: &str, created_by: &str, tags: &[(&str, &str)]) -> SessionMeta {
