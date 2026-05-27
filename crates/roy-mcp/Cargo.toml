@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 roy = { path = "../roy" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "process", "sync"] }
 serde_json = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
