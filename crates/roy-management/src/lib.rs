@@ -80,6 +80,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         daemon,
         socket_path: socket,
         scheduler_pool,
+        connections: crate::connections::Store::new(pool.clone()),
         pool,
         workspace_dir,
         login_limiter: Arc::new(crate::rate_limit::LoginLimiter::default()),

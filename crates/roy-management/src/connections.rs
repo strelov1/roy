@@ -377,6 +377,94 @@ fn row_to_connection(r: ConnectionRow) -> Result<Connection, StoreError> {
     })
 }
 
+// ---------------- HTTP ----------------
+
+use axum::{
+    extract::{Extension, Path as AxPath, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+    Json, Router,
+};
+
+use crate::auth::AuthUser;
+use crate::state::AppState;
+use serde_json::json;
+
+pub struct ApiError(StatusCode, String);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({"error": self.1}))).into_response()
+    }
+}
+
+impl From<StoreError> for ApiError {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::NotFound(id) => {
+                ApiError(StatusCode::NOT_FOUND, format!("connection not found: {id}"))
+            }
+            StoreError::Invalid(msg) => ApiError(StatusCode::BAD_REQUEST, msg),
+            StoreError::Db(e) => {
+                tracing::error!(error = %e, "connection store db error");
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+            }
+        }
+    }
+}
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/connections", get(list_handler).post(create_handler))
+        .route(
+            "/connections/{id}",
+            get(get_handler).put(update_handler).delete(delete_handler),
+        )
+}
+
+async fn list_handler(
+    Extension(AuthUser(uid)): Extension<AuthUser>,
+    State(s): State<AppState>,
+) -> Result<Json<Vec<Connection>>, ApiError> {
+    Ok(Json(s.connections.list_by_owner(&uid).await?))
+}
+
+async fn create_handler(
+    Extension(AuthUser(uid)): Extension<AuthUser>,
+    State(s): State<AppState>,
+    Json(new): Json<NewConnection>,
+) -> Result<(StatusCode, Json<Connection>), ApiError> {
+    let c = s.connections.create(&uid, new).await?;
+    Ok((StatusCode::CREATED, Json(c)))
+}
+
+async fn get_handler(
+    Extension(AuthUser(uid)): Extension<AuthUser>,
+    State(s): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Result<Json<Connection>, ApiError> {
+    Ok(Json(s.connections.get(&uid, &id).await?))
+}
+
+async fn update_handler(
+    Extension(AuthUser(uid)): Extension<AuthUser>,
+    State(s): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Json(upd): Json<ConnectionUpdate>,
+) -> Result<Json<Connection>, ApiError> {
+    Ok(Json(s.connections.update(&uid, &id, upd).await?))
+}
+
+async fn delete_handler(
+    Extension(AuthUser(uid)): Extension<AuthUser>,
+    State(s): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Result<StatusCode, ApiError> {
+    s.connections.delete(&uid, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

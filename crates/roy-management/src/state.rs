@@ -34,4 +34,7 @@ pub struct AppState {
     /// 30s TTL cache for filesystem-discovered slash commands. Shared via
     /// `Arc` so all `AppState` clones see the same cache state.
     pub commands_cache: Arc<crate::commands::CommandsCache>,
+    /// User-owned MCP connections store. Wraps an `Arc`'d pool so cloning
+    /// `AppState` is cheap.
+    pub connections: crate::connections::Store,
 }
