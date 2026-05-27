@@ -56,6 +56,49 @@ pub async fn test_app() -> (axum::Router, SqlitePool, PathBuf) {
     (router_for_tests(state), pool, workspace_dir)
 }
 
+/// Variant of `test_app` that also returns a typed handle to the mock daemon
+/// so tests can inspect captured `SpawnRequest`s. Existing tests that don't
+/// care about daemon-side capture should keep using `test_app`.
+pub async fn test_app_with_mock_daemon() -> (
+    axum::Router,
+    SqlitePool,
+    PathBuf,
+    std::sync::Arc<roy_management::roy_client::mock::MockDaemonClient>,
+) {
+    std::env::set_var("ROY_JWT_SECRET", TEST_JWT_SECRET);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = roy_agents::open(&dir.path().join("agents.db"))
+        .await
+        .unwrap();
+    roy_management::meta_store::MetaStore::apply_migrations(&pool)
+        .await
+        .unwrap();
+    roy_auth::apply_migrations(&pool).await.unwrap();
+    std::mem::forget(dir);
+    let workspace_dir = std::env::temp_dir().join(format!("roy-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace_dir).unwrap();
+    let meta = roy_management::meta_store::MetaStore::new(pool.clone(), workspace_dir.clone());
+
+    let mock = std::sync::Arc::new(
+        roy_management::roy_client::mock::MockDaemonClient::new().with_spawn("sess-1"),
+    );
+    let daemon: std::sync::Arc<dyn roy_management::roy_client::DaemonClient> =
+        std::sync::Arc::clone(&mock) as _;
+    let state = AppState {
+        store: roy_agents::Store::new(pool.clone()),
+        meta,
+        daemon,
+        socket_path: std::path::PathBuf::from("/tmp/fake.sock"),
+        scheduler_pool: None,
+        pool: pool.clone(),
+        workspace_dir: workspace_dir.clone(),
+        login_limiter: std::sync::Arc::new(roy_management::rate_limit::LoginLimiter::default()),
+        commands_cache: std::sync::Arc::new(roy_management::commands::CommandsCache::default()),
+        connections: roy_management::connections::Store::new(pool.clone()),
+    };
+    (router_for_tests(state), pool, workspace_dir, mock)
+}
+
 /// POST /auth/login and return the `set-cookie` header value. Panics on
 /// non-200 responses — call sites assume a successful login.
 pub async fn login_as(app: &axum::Router, username: &str, password: &str) -> String {
