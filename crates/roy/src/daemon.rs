@@ -1118,6 +1118,7 @@ mod tests {
                 env_remove: Vec::new(),
                 system_prompt_channel: crate::transport::SystemPromptChannel::Meta,
                 connections: Vec::new(),
+                inject_mcp: false,
             })))
         }
     }
