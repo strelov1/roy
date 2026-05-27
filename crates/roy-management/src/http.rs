@@ -860,6 +860,7 @@ mod tests {
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
             commands_cache: std::sync::Arc::new(crate::commands::CommandsCache::default()),
+            agents_cache: std::sync::Arc::new(crate::agents::AgentsCache::default()),
         };
         (state, alice.id)
     }
@@ -1305,6 +1306,7 @@ mod tests {
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
             commands_cache: std::sync::Arc::new(crate::commands::CommandsCache::default()),
+            agents_cache: std::sync::Arc::new(crate::agents::AgentsCache::default()),
         }
     }
 
@@ -1476,6 +1478,7 @@ mod tests {
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
             commands_cache: std::sync::Arc::new(crate::commands::CommandsCache::default()),
+            agents_cache: std::sync::Arc::new(crate::agents::AgentsCache::default()),
         }
     }
 

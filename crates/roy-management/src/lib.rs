@@ -2,6 +2,7 @@
 //! The bin is a thin clap-driven entrypoint over these modules; integration
 //! tests link this library directly to exercise the real wire code paths.
 
+pub mod agents;
 pub mod auth;
 pub mod bootstrap;
 pub mod db;
@@ -84,6 +85,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         workspace_dir,
         login_limiter: Arc::new(crate::rate_limit::LoginLimiter::default()),
         commands_cache: Arc::new(crate::commands::CommandsCache::default()),
+        agents_cache: Arc::new(crate::agents::AgentsCache::default()),
     };
 
     orphan_sweep::spawn(state.meta.clone(), Arc::clone(&state.daemon));
