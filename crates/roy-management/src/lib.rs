@@ -12,6 +12,7 @@ pub mod orphan_sweep;
 pub mod rate_limit;
 pub mod roy_client;
 pub mod state;
+pub mod uploads;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

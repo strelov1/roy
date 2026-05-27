@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -25,7 +25,7 @@ use crate::roy_client;
 use crate::state::AppState;
 
 /// Maps store/daemon errors to HTTP status codes.
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -77,6 +77,13 @@ pub fn router(state: AppState) -> Router {
         .route("/scheduler/fires", get(list_scheduler_fires))
         .route("/commands", get(list_commands).post(create_command))
         .route("/commands/{name}", get(get_command).delete(delete_command))
+        .route(
+            "/uploads",
+            // 25 MB cap. Set per-route so other endpoints keep their default
+            // (small JSON bodies) — multipart is the only path that needs
+            // headroom.
+            post(crate::uploads::upload).layer(DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
         .route("/teams", get(auth::list_teams).post(auth::create_team))
         .route("/teams/{id}", axum::routing::delete(auth::delete_team))
         .route("/auth/invites", post(auth::create_invite))
