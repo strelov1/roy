@@ -550,6 +550,8 @@ struct CreateSessionReq {
     agent_name: Option<String>,
     #[serde(default)]
     tags: BTreeMap<String, String>,
+    #[serde(default)]
+    connection_ids: Vec<String>,
 }
 
 fn default_scope_str() -> String {
@@ -619,6 +621,41 @@ async fn create_session(
     std::fs::create_dir_all(&cwd)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir cwd: {e}")))?;
 
+    // Resolve connection_ids → ConnectionSpec list. The store filters by
+    // owner_id, so unknown ids OR ids owned by another user both return
+    // StoreError::NotFound — mapped to 400 to avoid leaking existence.
+    let connection_specs: Vec<roy::ConnectionSpec> = if req.connection_ids.is_empty() {
+        Vec::new()
+    } else {
+        let conns = s
+            .connections
+            .get_many(&user_id, &req.connection_ids)
+            .await
+            .map_err(|e| match e {
+                crate::connections::StoreError::NotFound(id) => {
+                    ApiError(StatusCode::BAD_REQUEST, format!("unknown connection: {id}"))
+                }
+                crate::connections::StoreError::Invalid(msg) => {
+                    ApiError(StatusCode::BAD_REQUEST, msg)
+                }
+                crate::connections::StoreError::Db(db_err) => {
+                    tracing::error!(error = %db_err, "connection store db error");
+                    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+                }
+            })?;
+        conns
+            .into_iter()
+            .map(|c| roy::ConnectionSpec {
+                id: c.id,
+                slug: c.slug,
+                kind: c.kind,
+                config: c.config,
+                secrets: c.secrets,
+            })
+            .collect()
+    };
+
+    // Connection IDs resolved above into specs; daemon receives inline configs.
     let sid = match s
         .daemon
         .spawn(crate::roy_client::SpawnRequest {
@@ -627,10 +664,7 @@ async fn create_session(
             model: req.model.clone(),
             permission: req.permission.clone(),
             system_prompt: req.system_prompt.clone(),
-            // MVP: connections are not yet resolved here; E2 will look up
-            // `req.connection_ids` against the connections store and pass them
-            // through. For B2, the field is just plumbed empty.
-            connections: Vec::new(),
+            connections: connection_specs.clone(),
         })
         .await
     {
@@ -657,7 +691,7 @@ async fn create_session(
         team_id: req.team_id.clone(),
         tags: req.tags.clone(),
         created_at: chrono::Utc::now().timestamp(),
-        connection_ids: Vec::new(),
+        connection_ids: req.connection_ids.clone(),
     };
     if let Err(meta_err) = s.meta.upsert_session_meta(&meta).await {
         // Compensating action: the daemon already spawned the session, but
