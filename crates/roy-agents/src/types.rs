@@ -69,7 +69,7 @@ pub struct AgentUpdate {
 /// value is `null`, so we can distinguish "field absent" (handled by
 /// `#[serde(default)]` returning the outer `None`) from "field set to null"
 /// (this function returning `Some(None)`).
-fn deserialize_optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub fn deserialize_optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: serde::Deserialize<'de>,
     D: serde::Deserializer<'de>,

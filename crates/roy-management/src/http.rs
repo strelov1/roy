@@ -457,21 +457,57 @@ async fn delete_project(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Tri-state `team_id` on update mirrors the `AgentPatch` pattern in
+/// `roy_agents::types` (absent / null / value).
 #[derive(serde::Deserialize)]
 struct ProjectUpdate {
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "roy_agents::types::deserialize_optional_field")]
+    team_id: Option<Option<String>>,
 }
 
 async fn update_project(
+    axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
+        crate::auth::AuthUser,
+    >,
     State(s): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<ProjectUpdate>,
 ) -> Result<Json<crate::meta_store::Project>, ApiError> {
-    s.meta
-        .update_project(&id, &req.name)
-        .await
-        .map(Json)
-        .map_err(meta_to_api)
+    let acl = roy_auth::Acl::new(&s.pool, &user_id);
+    acl.can_access_project(&id).await.map_err(|e| match e {
+        roy_auth::AclError::NotFound => {
+            ApiError(StatusCode::NOT_FOUND, format!("no such project: {id}"))
+        }
+        _ => ApiError(StatusCode::FORBIDDEN, "forbidden".into()),
+    })?;
+
+    if req.name.is_none() && req.team_id.is_none() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "no fields to update".into()));
+    }
+
+    let mut updated = None;
+    if let Some(name) = req.name.as_deref() {
+        updated = Some(s.meta.update_project(&id, name).await.map_err(meta_to_api)?);
+    }
+    if let Some(team_opt) = req.team_id {
+        if let Some(ref new_team) = team_opt {
+            acl.can_admin_team(new_team).await.map_err(|e| match e {
+                roy_auth::AclError::NotFound => {
+                    ApiError(StatusCode::BAD_REQUEST, format!("no such team: {new_team}"))
+                }
+                _ => ApiError(StatusCode::FORBIDDEN, "forbidden".into()),
+            })?;
+        }
+        updated = Some(
+            s.meta
+                .set_project_team(&id, team_opt.as_deref())
+                .await
+                .map_err(meta_to_api)?,
+        );
+    }
+    Ok(Json(updated.expect("at least one field was present")))
 }
 
 #[derive(serde::Deserialize, Default)]
