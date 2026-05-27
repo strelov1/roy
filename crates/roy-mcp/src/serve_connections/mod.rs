@@ -34,6 +34,11 @@ pub struct ServeConnectionsArgs {
 
 pub async fn run(args: ServeConnectionsArgs) -> Result<()> {
     let bundle = load_bundle(&args).await.context("loading spec bundle")?;
+    tracing::info!(
+        session = %bundle.session_id,
+        connections = bundle.connections.len(),
+        "serve-connections starting"
+    );
     let registry = registry::Registry::start(bundle).await?;
     dispatch::run(registry).await
 }
