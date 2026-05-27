@@ -91,6 +91,7 @@ impl Upstream {
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_for_reader = Arc::clone(&pending);
+        let reader_slug = spec.slug.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -106,6 +107,7 @@ impl Upstream {
                 // Notifications from upstream are dropped in MVP. C5+ may
                 // re-emit `tools/list_changed` to the agent via the proxy.
             }
+            tracing::info!(slug = %reader_slug, "upstream reader exited");
         });
 
         let mut up = Upstream {
@@ -162,7 +164,12 @@ impl Upstream {
         let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
-        self.write_line(&req).await?;
+        if let Err(e) = self.write_line(&req).await {
+            // Write failed — the reader will never deliver a response for
+            // this id, so reclaim the slot now.
+            self.pending.lock().await.remove(&id);
+            return Err(e);
+        }
         let resp = rx.await.context("upstream closed before responding")?;
         if let Some(err) = resp.get("error") {
             return Err(anyhow!("upstream error: {}", err));
