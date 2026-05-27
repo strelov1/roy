@@ -10,18 +10,19 @@ use serde_json::Value;
 /// One stored connection. `config_json` and `secrets_json` are kind-specific;
 /// the store layer keeps them as opaque JSON and only the
 /// `roy-mcp serve-connections` consumer parses them.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+///
+/// Wire shape. Row decoding happens manually in `Store` because workspace
+/// sqlx does not enable the `json` feature, so `serde_json::Value` has no
+/// `Decode<Sqlite>` impl. `Store::list/get/...` deserialize the `*_json`
+/// TEXT columns into `Value` explicitly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Connection {
     pub id: String,
     pub owner_id: String,
     pub name: String,
     pub slug: String,
     pub kind: String,
-    #[sqlx(rename = "config_json")]
-    #[serde(rename = "config")]
     pub config: Value,
-    #[sqlx(rename = "secrets_json")]
-    #[serde(rename = "secrets")]
     pub secrets: Option<Value>,
     pub description: Option<String>,
     pub created_at: i64,
@@ -118,7 +119,6 @@ pub fn slugify(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use serde_json::json;
 
     #[test]
@@ -144,11 +144,5 @@ mod tests {
         let err =
             validate_config(KIND_MCP_STDIO, &json!({"command": "x", "env": {"K": 1}})).unwrap_err();
         assert!(err.contains("env"), "{err}");
-    }
-
-    #[test]
-    fn now() {
-        let now = Utc::now().timestamp();
-        assert!(now > 0);
     }
 }
