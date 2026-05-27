@@ -292,9 +292,25 @@ struct FireArgs {
 
 #[derive(clap::Args)]
 struct McpArgs {
-    /// Override the daemon socket the MCP tools connect to.
+    /// Override the daemon socket the MCP tools connect to. Only honored when
+    /// no subcommand is given (i.e. for the default `serve` behavior).
     #[arg(long)]
     socket: Option<PathBuf>,
+    #[command(subcommand)]
+    cmd: Option<McpCmd>,
+}
+
+#[derive(clap::Subcommand)]
+enum McpCmd {
+    /// Daemon-control MCP server. This is also the default when `roy mcp` is
+    /// invoked with no subcommand — preserved for backwards compatibility.
+    Serve {
+        /// Override the daemon socket.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Proxying MCP server that aggregates user-owned upstream MCPs.
+    ServeConnections(roy_mcp::serve_connections::ServeConnectionsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -362,10 +378,19 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Fire(args) => cmd_fire(args).await,
         Cmd::Inject(args) => cmd_inject(args).await,
         Cmd::Ask(args) => cmd_ask(args).await,
-        Cmd::Mcp(args) => {
-            let socket = args.socket.unwrap_or_else(default_socket);
-            roy_mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
-        }
+        Cmd::Mcp(args) => match args.cmd {
+            None | Some(McpCmd::Serve { .. }) => {
+                let socket = match args.cmd {
+                    Some(McpCmd::Serve { socket }) => socket,
+                    _ => args.socket,
+                }
+                .unwrap_or_else(default_socket);
+                roy_mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
+            }
+            Some(McpCmd::ServeConnections(sc_args)) => roy_mcp::serve_connections::run(sc_args)
+                .await
+                .map(|()| ExitCode::SUCCESS),
+        },
         Cmd::Gateway(args) => roy_gateway::run(args).await.map(|()| ExitCode::SUCCESS),
         Cmd::Scheduler(args) => roy_scheduler::cli::run(args).await,
         Cmd::Management(args) => roy_management::run(args).await.map(|()| ExitCode::SUCCESS),
