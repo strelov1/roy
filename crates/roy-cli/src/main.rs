@@ -944,10 +944,13 @@ async fn cmd_inject(args: InjectArgs) -> anyhow::Result<ExitCode> {
 async fn cmd_ask(args: AskArgs) -> anyhow::Result<ExitCode> {
     let final_prompt = build_ask_prompt(&args.prompt, args.context.as_deref());
 
-    // 1. Resolve <target> — first as a live session id, then as an
-    //    agent slug. If neither, the daemon-level error from Fire would
-    //    be opaque, so fail fast here with a clear stderr message.
-    let target = resolve_ask_target(&args.target, &args.mgmt.mgmt_url).await?;
+    let Some(target) = resolve_ask_target(&args.target, &args.mgmt.mgmt_url).await? else {
+        eprintln!(
+            "roy ask: unknown target '{}' (not a live session id, not an agent slug or id)",
+            args.target
+        );
+        return Ok(ExitCode::from(2));
+    };
 
     let (mut writer, mut events) = open_daemon().await?;
     send_cmd(
@@ -955,7 +958,7 @@ async fn cmd_ask(args: AskArgs) -> anyhow::Result<ExitCode> {
         &ClientCommand::Fire {
             target,
             prompt: final_prompt,
-            tags: std::collections::BTreeMap::new(),
+            tags: BTreeMap::new(),
             timeout_ms: args.timeout_ms,
         },
     )
@@ -996,8 +999,10 @@ async fn cmd_ask(args: AskArgs) -> anyhow::Result<ExitCode> {
             code,
             message,
         } => {
-            let where_ = session.unwrap_or_else(|| "<no session>".into());
-            eprintln!("roy ask: {code}: {message} (session={where_})");
+            eprintln!(
+                "roy ask: {code}: {message} (session={})",
+                session.as_deref().unwrap_or("<no session>")
+            );
             Ok(ExitCode::from(2))
         }
         other => anyhow::bail!("unexpected response to Fire: {other:?}"),
@@ -1006,13 +1011,14 @@ async fn cmd_ask(args: AskArgs) -> anyhow::Result<ExitCode> {
 
 /// Resolve `<target>`: try as a live roy session id first (one
 /// `ClientCommand::List` round-trip); on miss, try as an agent slug or
-/// id via roy-management. Returns `Err` only on transport / HTTP
-/// failure; for "unknown target" we exit 2 cleanly with a stderr message
-/// rather than bubble an anyhow error.
-async fn resolve_ask_target(target: &str, mgmt_url: &str) -> anyhow::Result<roy::FireTarget> {
+/// id via roy-management. `Ok(None)` signals "unknown target" — the
+/// caller renders the stderr message and exits 2.
+async fn resolve_ask_target(
+    target: &str,
+    mgmt_url: &str,
+) -> anyhow::Result<Option<roy::FireTarget>> {
     use roy::FireTarget;
 
-    // Live-session pass.
     let (mut writer, mut events) = open_daemon().await?;
     send_cmd(&mut writer, &ClientCommand::List).await?;
     let live_match = match read_event(&mut events).await? {
@@ -1020,28 +1026,24 @@ async fn resolve_ask_target(target: &str, mgmt_url: &str) -> anyhow::Result<roy:
         other => anyhow::bail!("unexpected response to List: {other:?}"),
     };
     if live_match {
-        return Ok(FireTarget::Resume {
+        return Ok(Some(FireTarget::Resume {
             session_id: target.to_string(),
-        });
+        }));
     }
 
-    // Agent-slug fallback.
     let client = crate::management_client::ManagementClient::new(mgmt_url);
     let agents = client.list().await?;
     if let Some(agent) = agents
         .into_iter()
         .find(|a| a.slug == target || a.id == target)
     {
-        return Ok(FireTarget::Spawn {
+        return Ok(Some(FireTarget::Spawn {
             preset: agent.preset,
             system_prompt: Some(agent.prompt),
-        });
+        }));
     }
 
-    eprintln!(
-        "roy ask: unknown target '{target}' (not a live session id, not an agent slug or id)"
-    );
-    std::process::exit(2);
+    Ok(None)
 }
 
 async fn cmd_wait(args: WaitArgs) -> anyhow::Result<ExitCode> {
