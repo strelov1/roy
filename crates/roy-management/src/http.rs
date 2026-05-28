@@ -470,7 +470,10 @@ async fn delete_project(
 struct ProjectUpdate {
     #[serde(default)]
     name: Option<String>,
-    #[serde(default, deserialize_with = "roy_agents::types::deserialize_optional_field")]
+    #[serde(
+        default,
+        deserialize_with = "roy_agents::types::deserialize_optional_field"
+    )]
     team_id: Option<Option<String>>,
 }
 
@@ -491,12 +494,20 @@ async fn update_project(
     })?;
 
     if req.name.is_none() && req.team_id.is_none() {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "no fields to update".into()));
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "no fields to update".into(),
+        ));
     }
 
     let mut updated = None;
     if let Some(name) = req.name.as_deref() {
-        updated = Some(s.meta.update_project(&id, name).await.map_err(meta_to_api)?);
+        updated = Some(
+            s.meta
+                .update_project(&id, name)
+                .await
+                .map_err(meta_to_api)?,
+        );
     }
     if let Some(team_opt) = req.team_id {
         if let Some(ref new_team) = team_opt {
