@@ -157,7 +157,7 @@ mod tests {
         let out = fire(
             &path,
             FireTarget::Spawn {
-                preset: "claude".into(),
+                harness: "claude".into(),
 
                 system_prompt: None,
             },
@@ -193,7 +193,7 @@ mod tests {
         let out = fire(
             &path,
             FireTarget::Spawn {
-                preset: "claude".into(),
+                harness: "claude".into(),
 
                 system_prompt: None,
             },
@@ -223,7 +223,7 @@ mod tests {
         let out = fire(
             &path,
             FireTarget::Spawn {
-                preset: "claude".into(),
+                harness: "claude".into(),
 
                 system_prompt: None,
             },
@@ -243,7 +243,7 @@ mod tests {
         let r = fire(
             &path,
             FireTarget::Spawn {
-                preset: "claude".into(),
+                harness: "claude".into(),
 
                 system_prompt: None,
             },

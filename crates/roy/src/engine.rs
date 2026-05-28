@@ -52,7 +52,7 @@ impl EngineOpts {
 /// where the dir is pre-created as `<workspace>/<session_id>/`.
 #[derive(Debug, Clone)]
 pub struct SessionSpawnConfig {
-    pub agent: crate::agents_config::AgentPreset,
+    pub harness: crate::harnesses_config::Harness,
     pub cwd: Option<PathBuf>,
     pub model: Option<String>,
     pub permission: Option<String>,
@@ -65,7 +65,7 @@ pub struct SessionSpawnConfig {
     /// workspace dir after the session id before the engine is constructed.
     pub fixed_session_id: Option<String>,
     /// Inline persona prompt. Forwarded to `Transport::open`; later snapshotted
-    /// into the session store and (for FirstTurn presets) injected as a first turn.
+    /// into the session store and (for FirstTurn harnesses) injected as a first turn.
     pub system_prompt: Option<String>,
     /// Extra environment variables forwarded to the agent process via
     /// `Transport::open`. Callers that don't need custom env pass an empty map.
@@ -75,7 +75,7 @@ pub struct SessionSpawnConfig {
 /// Owned by `SessionManager` (or directly by callers in single-session use).
 pub struct SessionEngine {
     session_id: String,
-    agent: String,
+    harness: String,
     cwd: PathBuf,
     /// Display label only; the daemon doesn't feed it back into the
     /// transport. `set_model` mutates it and rewrites the row in the
@@ -98,7 +98,7 @@ pub struct SessionEngine {
 
 enum Cmd {
     Prompt(String),
-    /// Persona/system prompt injected as the first turn (FirstTurn presets).
+    /// Persona/system prompt injected as the first turn (FirstTurn harnesses).
     /// Journaled as `System { subtype: "persona" }` rather than `UserPrompt`.
     Persona(String),
     /// Abort the in-flight turn. No-op if no turn is running. The actor reacts
@@ -196,7 +196,7 @@ impl SessionEngine {
 
         let engine = Arc::new(Self {
             session_id: session_id.clone(),
-            agent: cfg.agent.to_string(),
+            harness: cfg.harness.to_string(),
             cwd: cwd.clone(),
             model: StdMutex::new(cfg.model.clone()),
             resume_cursor: StdMutex::new(initial_cursor.clone()),
@@ -217,7 +217,7 @@ impl SessionEngine {
         if !is_resume {
             let row = SessionRow {
                 session_id: session_id.clone(),
-                agent: cfg.agent.to_string(),
+                harness: cfg.harness.to_string(),
                 cwd: cwd.clone(),
                 model: cfg.model.clone(),
                 permission: cfg.permission.clone(),
@@ -229,7 +229,7 @@ impl SessionEngine {
             engine.session_store.insert(&row).await?;
         }
 
-        // FirstTurn presets: the transport deferred the persona. Drain it now
+        // FirstTurn harnesses: the transport deferred the persona. Drain it now
         // (while we still own the handle) and enqueue it as the first command,
         // so it is injected as the first turn before any user prompt.
         let mut handle = handle;
@@ -242,7 +242,7 @@ impl SessionEngine {
 
         tracing::info!(
             session = %engine.session_id,
-            agent = %engine.agent,
+            harness = %engine.harness,
             cwd = %engine.cwd.display(),
             "session engine started"
         );
@@ -253,8 +253,8 @@ impl SessionEngine {
         &self.session_id
     }
 
-    pub fn agent(&self) -> &str {
-        &self.agent
+    pub fn harness(&self) -> &str {
+        &self.harness
     }
 
     pub fn cwd(&self) -> &PathBuf {
@@ -485,7 +485,7 @@ async fn run_actor(
     while let Some(cmd) = input_rx.recv().await {
         let (text, as_system) = match cmd {
             Cmd::Prompt(text) => (text, false),
-            // Persona is the FirstTurn-preset system prompt, enqueued once
+            // Persona is the FirstTurn-harness system prompt, enqueued once
             // before any user prompt; journaled as System.
             Cmd::Persona(text) => (text, true),
             // Cancel outside an active turn is a no-op.

@@ -52,13 +52,13 @@ pub enum PermissionPolicy {
     AllowAll,
 }
 
-/// How a preset accepts a system/persona prompt.
+/// How a harness accepts a system/persona prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemPromptChannel {
     /// Sent via ACP `_meta.systemPrompt = { append }` on `session/new` and
     /// `session/load`. A real system prompt, outside history, survives resume.
     Meta,
-    /// The preset ignores `_meta`; the engine injects the persona as the first
+    /// The harness ignores `_meta`; the engine injects the persona as the first
     /// journaled turn instead.
     FirstTurn,
 }
@@ -74,10 +74,10 @@ pub struct AcpConfig {
     /// against an agent that accepts the connection but never replies.
     pub open_timeout: Duration,
     /// Env vars to strip from the child's environment at spawn (the daemon's
-    /// own env is inherited otherwise). Per-preset because the problematic
+    /// own env is inherited otherwise). Per-harness because the problematic
     /// variables are agent-specific — e.g. `CLAUDECODE` for `claude-code-acp`.
     pub env_remove: Vec<String>,
-    /// Which channel carries the persona prompt for this preset.
+    /// Which channel carries the persona prompt for this harness.
     pub system_prompt_channel: SystemPromptChannel,
 }
 
@@ -190,8 +190,8 @@ impl Transport for AcpTransport {
     ) -> Result<Box<dyn Handle>> {
         let cwd = std::path::absolute(&cwd).map_err(RoyError::Io)?;
 
-        // Route the persona to exactly one channel: Meta presets carry it in
-        // the session request's `_meta`; FirstTurn presets defer it to the
+        // Route the persona to exactly one channel: Meta harnesses carry it
+        // in the session request's `_meta`; FirstTurn harnesses defer it to the
         // engine (but never on resume — the agent reloads it from history).
         let system_prompt = system_prompt.map(str::to_string);
         let (meta_prompt, pending_persona) = match self.config.system_prompt_channel {
@@ -386,7 +386,7 @@ async fn run_session(
 
 /// Set `_meta.systemPrompt = { "append": <prompt> }` on a request's meta map.
 /// No-op when `prompt` is `None`. claude-code-acp appends this to its
-/// `claude_code` preset; honored on both `session/new` and `session/load`.
+/// `claude_code` harness; honored on both `session/new` and `session/load`.
 fn apply_system_prompt_meta(meta: &mut Option<Meta>, prompt: Option<&str>) {
     let Some(prompt) = prompt else { return };
     let map = meta.get_or_insert_with(serde_json::Map::new);
@@ -725,8 +725,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_preset_strips_claudecode_env() {
-        // claude-code-acp refuses to launch if CLAUDECODE is set. The preset
+    fn claude_harness_strips_claudecode_env() {
+        // claude-code-acp refuses to launch if CLAUDECODE is set. The harness
         // must include it in env_remove so roy daemons launched from inside a
         // Claude Code session can still spawn claude children.
         let cfg = AcpConfig::claude();
@@ -738,9 +738,9 @@ mod tests {
     }
 
     #[test]
-    fn other_presets_do_not_touch_env_by_default() {
-        // Sanity: only the claude preset has env-stripping behaviour. If we
-        // ever add to other presets, that decision deserves a deliberate test.
+    fn other_harnesses_do_not_touch_env_by_default() {
+        // Sanity: only the claude harness has env-stripping behaviour. If we
+        // ever add to other harnesses, that decision deserves a deliberate test.
         assert!(AcpConfig::gemini().env_remove.is_empty());
         assert!(AcpConfig::opencode().env_remove.is_empty());
         assert!(AcpConfig::codex().env_remove.is_empty());
@@ -748,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn presets_declare_system_prompt_channel() {
+    fn harnesses_declare_system_prompt_channel() {
         use super::SystemPromptChannel::*;
         assert_eq!(AcpConfig::claude().system_prompt_channel, Meta);
         assert_eq!(AcpConfig::opencode().system_prompt_channel, Meta);

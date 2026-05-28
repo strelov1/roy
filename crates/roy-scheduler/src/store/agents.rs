@@ -9,7 +9,7 @@ use crate::types::Agent;
 
 pub struct NewAgent {
     pub name: String,
-    pub preset: String,
+    pub harness: String,
     /// `Some(id)` fires inside that roy-side project; `None` fires orphan.
     pub project_id: Option<String>,
     pub task: String,
@@ -33,12 +33,12 @@ pub async fn insert(pool: &SqlitePool, new: NewAgent) -> Result<Agent> {
     let persistent_int: i64 = if new.persistent { 1 } else { 0 };
 
     sqlx::query(
-        "INSERT INTO agents (id, name, preset, project_id, task, model, persistent, notify_session, created_at, updated_at)
+        "INSERT INTO agents (id, name, harness, project_id, task, model, persistent, notify_session, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&new.name)
-    .bind(&new.preset)
+    .bind(&new.harness)
     .bind(&new.project_id)
     .bind(&new.task)
     .bind(&new.model)
@@ -107,7 +107,7 @@ mod tests {
     fn sample() -> NewAgent {
         NewAgent {
             name: "daily-digest".into(),
-            preset: "claude".into(),
+            harness: "claude".into(),
             project_id: None,
             task: "summarize today".into(),
             model: None,
@@ -123,7 +123,7 @@ mod tests {
         let fetched = get_by_id(&pool, &inserted.id).await.unwrap().unwrap();
         assert_eq!(inserted.id, fetched.id);
         assert_eq!(fetched.name, "daily-digest");
-        assert_eq!(fetched.preset, "claude");
+        assert_eq!(fetched.harness, "claude");
         assert!(!fetched.is_persistent());
         assert!(fetched.project_id.is_none());
     }

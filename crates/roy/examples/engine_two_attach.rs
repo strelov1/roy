@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let engine = manager
         .spawn(
             SessionSpawnConfig {
-                agent: roy::AgentPreset::Opencode,
+                harness: roy::Harness::Opencode,
                 cwd: Some(cwd),
                 model: None,
                 permission: None,

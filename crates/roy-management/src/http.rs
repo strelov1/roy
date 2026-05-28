@@ -40,7 +40,7 @@ pub fn router(state: AppState) -> Router {
     // surfaces as 401, not 500.
     let protected = Router::new()
         .route("/agents", get(list_agent_files))
-        .route("/presets", get(list_presets))
+        .route("/harnesses", get(list_harnesses))
         .route("/projects", get(list_projects).post(create_project))
         .route(
             "/projects/{id}",
@@ -219,8 +219,8 @@ struct SchedListQuery {
     limit: Option<i64>,
 }
 
-async fn list_presets(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    roy_client::list_presets(&s.socket_path)
+async fn list_harnesses(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    roy_client::list_harnesses(&s.socket_path)
         .await
         .map(Json)
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))
@@ -357,7 +357,7 @@ async fn update_project(
 
 #[derive(serde::Deserialize, Default)]
 struct CreateSessionReq {
-    agent: String,
+    harness: String,
     /// "personal" (default) or "team". Determines whether the session's cwd
     /// lives under `users/<uid>/` or `teams/<tid>/`.
     #[serde(default = "default_scope_str")]
@@ -457,7 +457,7 @@ async fn create_session(
     let sid = match s
         .daemon
         .spawn(crate::roy_client::SpawnRequest {
-            agent: req.agent.clone(),
+            harness: req.harness.clone(),
             cwd: Some(cwd.clone()),
             model: req.model.clone(),
             permission: req.permission.clone(),
@@ -945,7 +945,7 @@ mod tests {
         let app = router(st);
 
         let body = serde_json::to_vec(&json!({
-            "agent": "claude",
+            "harness": "claude",
             "tags": {"env": "prod"},
             "agent_name": "Reviewer"
         }))
@@ -1033,7 +1033,7 @@ mod tests {
         st.meta.pool().close().await;
         let app = router(st);
 
-        let body = serde_json::to_vec(&json!({"agent": "claude"})).unwrap();
+        let body = serde_json::to_vec(&json!({"harness": "claude"})).unwrap();
         let resp = app
             .oneshot(
                 Request::post("/sessions")
@@ -1156,7 +1156,7 @@ mod tests {
             &pool,
             roy_scheduler::store::agents::NewAgent {
                 name: "nightly".into(),
-                preset: "claude".into(),
+                harness: "claude".into(),
                 project_id: None,
                 task: "Summarize the day".into(),
                 model: None,
@@ -1230,7 +1230,7 @@ mod tests {
         std::fs::create_dir_all(&builtin).unwrap();
         std::fs::write(
             builtin.join("roy-coder.md"),
-            "---\nname: roy-coder\ndescription: helper\nengine: claude\n---\n\nbody",
+            "---\nname: roy-coder\ndescription: helper\nharness: claude\n---\n\nbody",
         )
         .unwrap();
         std::env::set_var("ROY_BUILTIN_AGENTS_DIR", &builtin);
@@ -1244,7 +1244,7 @@ mod tests {
         std::fs::create_dir_all(&user_agents_dir).unwrap();
         std::fs::write(
             user_agents_dir.join("pirate.md"),
-            "---\nname: pirate\ndescription: arr\nengine: codex\n---\n\nbody",
+            "---\nname: pirate\ndescription: arr\nharness: codex\n---\n\nbody",
         )
         .unwrap();
 

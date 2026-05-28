@@ -10,7 +10,7 @@ use sqlx::FromRow;
 pub struct Agent {
     pub id: String,
     pub name: String,
-    pub preset: String,
+    pub harness: String,
     /// `Some(id)` fires inside that roy-side project; `None` fires orphan
     /// (daemon allocates a per-session workspace dir).
     pub project_id: Option<String>,

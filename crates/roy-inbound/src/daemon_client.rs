@@ -187,7 +187,7 @@ mod tests {
         let result = fire_with_hook(
             &p,
             FireTarget::Spawn {
-                preset: "claude".into(),
+                harness: "claude".into(),
                 system_prompt: None,
             },
             "hello".into(),
@@ -228,7 +228,7 @@ mod tests {
         let result = fire_with_hook(
             &p,
             FireTarget::Spawn {
-                preset: "claude".into(),
+                harness: "claude".into(),
                 system_prompt: None,
             },
             "x".into(),

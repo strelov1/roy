@@ -12,10 +12,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::agents_config::AgentPreset;
 use crate::daemon::TransportFactory;
 use crate::engine::{EngineOpts, SessionEngine, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
+use crate::harnesses_config::Harness;
 use crate::journal::{JournalEntry, Seq};
 use crate::session_store::SessionStore;
 
@@ -89,7 +89,7 @@ impl SessionManager {
     ) -> Result<Arc<SessionEngine>> {
         let transport =
             self.factory
-                .build(cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
+                .build(cfg.harness, cfg.model.as_deref(), cfg.permission.as_deref())?;
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
@@ -121,9 +121,9 @@ impl SessionManager {
             .get(session_id)
             .await?
             .ok_or_else(|| RoyError::Protocol(format!("no session: {session_id}")))?;
-        let preset: AgentPreset = row.agent.parse().map_err(RoyError::Protocol)?;
+        let parsed: Harness = row.harness.parse().map_err(RoyError::Protocol)?;
         let cfg = SessionSpawnConfig {
-            agent: preset,
+            harness: parsed,
             cwd: Some(row.cwd),
             model: row.model,
             permission: row.permission,
@@ -134,7 +134,7 @@ impl SessionManager {
         };
         let transport =
             self.factory
-                .build(cfg.agent, cfg.model.as_deref(), cfg.permission.as_deref())?;
+                .build(cfg.harness, cfg.model.as_deref(), cfg.permission.as_deref())?;
         let opts = EngineOpts {
             journal_dir: self.journal_dir.clone(),
             broadcast_capacity,
@@ -320,12 +320,12 @@ mod tests {
     use std::time::Duration;
 
     /// Test factory that always builds the fake ACP agent regardless of the
-    /// requested agent preset.
+    /// requested harness.
     struct FakeFactory;
     impl TransportFactory for FakeFactory {
         fn build(
             &self,
-            _agent: AgentPreset,
+            _harness: Harness,
             _model: Option<&str>,
             _permission: Option<&str>,
         ) -> Result<Arc<dyn Transport>> {
@@ -366,9 +366,9 @@ mod tests {
     }
 
     /// Minimal orphan spawn config for tests.
-    fn orphan_cfg(agent: AgentPreset) -> SessionSpawnConfig {
+    fn orphan_cfg(harness: Harness) -> SessionSpawnConfig {
         SessionSpawnConfig {
-            agent,
+            harness,
             cwd: None,
             model: None,
             permission: None,
@@ -386,11 +386,11 @@ mod tests {
 
         // Spawn → close two sessions to populate journals + session-store rows.
         let e1 = mgr
-            .spawn(orphan_cfg(AgentPreset::Opencode), 256, 1024)
+            .spawn(orphan_cfg(Harness::Opencode), 256, 1024)
             .await
             .unwrap();
         let e2 = mgr
-            .spawn(orphan_cfg(AgentPreset::Claude), 256, 1024)
+            .spawn(orphan_cfg(Harness::Claude), 256, 1024)
             .await
             .unwrap();
         let id1 = e1.id().to_string();
@@ -428,7 +428,7 @@ mod tests {
         let mgr = new_mgr(&dir).await;
 
         let engine = mgr
-            .spawn(orphan_cfg(AgentPreset::Opencode), 256, 1024)
+            .spawn(orphan_cfg(Harness::Opencode), 256, 1024)
             .await
             .unwrap();
         let id = engine.id().to_string();
@@ -455,7 +455,7 @@ mod tests {
         assert!(mgr.list().await.is_empty());
 
         let engine = mgr
-            .spawn(orphan_cfg(AgentPreset::Opencode), 256, 1024)
+            .spawn(orphan_cfg(Harness::Opencode), 256, 1024)
             .await
             .unwrap();
         let id = engine.id().to_string();

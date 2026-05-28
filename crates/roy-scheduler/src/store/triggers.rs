@@ -181,7 +181,7 @@ mod tests {
             &pool,
             agents::NewAgent {
                 name: "x".into(),
-                preset: "claude".into(),
+                harness: "claude".into(),
                 project_id: None,
                 task: "do".into(),
                 model: None,

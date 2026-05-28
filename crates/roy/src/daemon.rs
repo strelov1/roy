@@ -17,10 +17,10 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 
-use crate::agents_config::AgentPreset;
 use crate::control::{ClientCommand, ErrorCode, FireTarget, ServerEvent};
 use crate::engine::{InputLease, SessionSpawnConfig};
 use crate::error::{Result, RoyError};
+use crate::harnesses_config::Harness;
 use crate::journal::Seq;
 use crate::manager::SessionManager;
 use crate::session_store::{self, SessionStore};
@@ -44,33 +44,34 @@ fn send_error(tx: &EventTx, session: Option<String>, code: ErrorCode, message: i
     });
 }
 
-/// How the daemon builds a `Transport` from an agent preset. Pluggable so the
-/// daemon can be tested against fake agents without touching global state.
+/// How the daemon builds a `Transport` from a harness identifier. Pluggable
+/// so the daemon can be tested against fake harnesses without touching global
+/// state.
 pub trait TransportFactory: Send + Sync {
     fn build(
         &self,
-        agent: AgentPreset,
+        harness: Harness,
         model: Option<&str>,
         permission: Option<&str>,
     ) -> Result<Arc<dyn Transport>>;
 }
 
-/// Default mapping `agent name → AcpConfig` for the four ACP presets.
+/// Default mapping `harness → AcpConfig` for the five ACP harnesses.
 pub struct DefaultTransportFactory;
 
 impl TransportFactory for DefaultTransportFactory {
     fn build(
         &self,
-        agent: AgentPreset,
+        harness: Harness,
         _model: Option<&str>,
         permission: Option<&str>,
     ) -> Result<Arc<dyn Transport>> {
-        let mut config = match agent {
-            AgentPreset::Claude => AcpConfig::claude(),
-            AgentPreset::Gemini => AcpConfig::gemini(),
-            AgentPreset::Opencode => AcpConfig::opencode(),
-            AgentPreset::Codex => AcpConfig::codex(),
-            AgentPreset::Pi => AcpConfig::pi(),
+        let mut config = match harness {
+            Harness::Claude => AcpConfig::claude(),
+            Harness::Gemini => AcpConfig::gemini(),
+            Harness::Opencode => AcpConfig::opencode(),
+            Harness::Codex => AcpConfig::codex(),
+            Harness::Pi => AcpConfig::pi(),
         };
         if let Some(p) = permission {
             config.permission_policy = match p {
@@ -282,7 +283,7 @@ impl Daemon {
     ) {
         match cmd {
             ClientCommand::Spawn {
-                agent,
+                harness,
                 cwd,
                 model,
                 permission,
@@ -290,7 +291,7 @@ impl Daemon {
                 system_prompt,
                 extra_env,
             } => {
-                let preset: AgentPreset = match agent.parse() {
+                let parsed: Harness = match harness.parse() {
                     Ok(p) => p,
                     Err(e) => {
                         send_error(event_tx, None, ErrorCode::SpawnFailed, e);
@@ -298,8 +299,8 @@ impl Daemon {
                     }
                 };
                 self.handle_spawn(
-                    agent,
-                    preset,
+                    harness,
+                    parsed,
                     cwd,
                     model,
                     permission,
@@ -377,7 +378,7 @@ impl Daemon {
                 self.handle_inject(session, text, source_session, event_tx)
                     .await
             }
-            ClientCommand::ListAgents => self.handle_list_agents(event_tx).await,
+            ClientCommand::ListHarnesses => self.handle_list_harnesses(event_tx).await,
         }
     }
 
@@ -397,8 +398,8 @@ impl Daemon {
 
     async fn handle_spawn(
         self: &Arc<Self>,
-        agent_label: String,
-        agent: AgentPreset,
+        harness_label: String,
+        harness: Harness,
         cwd: Option<PathBuf>,
         model: Option<String>,
         permission: Option<String>,
@@ -407,9 +408,11 @@ impl Daemon {
         extra_env: std::collections::HashMap<String, String>,
         event_tx: &EventTx,
     ) {
-        let _ = event_tx.send(ServerEvent::Spawning { agent: agent_label });
+        let _ = event_tx.send(ServerEvent::Spawning {
+            harness: harness_label,
+        });
         let cfg = SessionSpawnConfig {
-            agent,
+            harness,
             cwd,
             model,
             permission,
@@ -455,7 +458,7 @@ impl Daemon {
             if let Some(engine) = self.manager.get(&id).await {
                 sessions.push(crate::control::SessionInfo {
                     session: id,
-                    agent: engine.agent().to_string(),
+                    harness: engine.harness().to_string(),
                     cwd: engine.cwd().to_string_lossy().to_string(),
                     model: engine.model(),
                     tags: BTreeMap::new(),
@@ -472,7 +475,7 @@ impl Daemon {
                     .into_iter()
                     .map(|row| crate::control::SessionInfo {
                         session: row.session_id,
-                        agent: row.agent,
+                        harness: row.harness,
                         cwd: row.cwd.to_string_lossy().to_string(),
                         model: row.model,
                         tags: BTreeMap::new(),
@@ -544,10 +547,10 @@ impl Daemon {
         // 1. Spawn or Resume
         let engine = match target {
             FireTarget::Spawn {
-                preset,
+                harness,
                 system_prompt,
             } => {
-                let parsed: AgentPreset = match preset.parse() {
+                let parsed: Harness = match harness.parse() {
                     Ok(p) => p,
                     Err(e) => {
                         let _ = event_tx.send(ServerEvent::FireError {
@@ -559,7 +562,7 @@ impl Daemon {
                     }
                 };
                 let cfg = SessionSpawnConfig {
-                    agent: parsed,
+                    harness: parsed,
                     cwd: None,
                     model: None,
                     permission: None,
@@ -680,9 +683,10 @@ impl Daemon {
         }
     }
 
-    async fn handle_list_agents(self: &Arc<Self>, event_tx: &EventTx) {
-        use crate::agents_config::{
-            config_path, load_or_bootstrap, AgentsConfigError, AgentsConfigStatus, LoadOutcome,
+    async fn handle_list_harnesses(self: &Arc<Self>, event_tx: &EventTx) {
+        use crate::harnesses_config::{
+            config_path, load_or_bootstrap, HarnessesConfigError, HarnessesConfigStatus,
+            LoadOutcome,
         };
 
         let path = match config_path() {
@@ -698,19 +702,19 @@ impl Daemon {
             }
         };
 
-        let (agents, status) = match load_or_bootstrap(&path).await {
-            Ok(LoadOutcome::Ok(cfg)) => (cfg.into_wire(), AgentsConfigStatus::Ok),
-            Ok(LoadOutcome::Created) => (vec![], AgentsConfigStatus::Created),
-            Err(AgentsConfigError::Parse(e)) => (
+        let (harnesses, status) = match load_or_bootstrap(&path).await {
+            Ok(LoadOutcome::Ok(cfg)) => (cfg.into_wire(), HarnessesConfigStatus::Ok),
+            Ok(LoadOutcome::Created) => (vec![], HarnessesConfigStatus::Created),
+            Err(HarnessesConfigError::Parse(e)) => (
                 vec![],
-                AgentsConfigStatus::Invalid {
+                HarnessesConfigStatus::Invalid {
                     reason: format!("toml parse error: {e}"),
                 },
             ),
-            Err(AgentsConfigError::Validate(s)) => {
-                (vec![], AgentsConfigStatus::Invalid { reason: s })
+            Err(HarnessesConfigError::Validate(s)) => {
+                (vec![], HarnessesConfigStatus::Invalid { reason: s })
             }
-            Err(AgentsConfigError::Io(e)) => {
+            Err(HarnessesConfigError::Io(e)) => {
                 send_error(
                     event_tx,
                     None,
@@ -721,8 +725,8 @@ impl Daemon {
             }
         };
 
-        let _ = event_tx.send(ServerEvent::AgentsList {
-            agents,
+        let _ = event_tx.send(ServerEvent::HarnessesList {
+            harnesses,
             config_path: path,
             status,
         });
@@ -780,19 +784,19 @@ impl Daemon {
             .last()
             .map(|e| e.seq + 1)
             .unwrap_or_else(|| from_seq.unwrap_or(0));
-        let (agent, model) = self
+        let (harness, model) = self
             .manager
             .session_store()
             .get(&session)
             .await
             .ok()
             .flatten()
-            .map(|row| (row.agent, row.model))
+            .map(|row| (row.harness, row.model))
             .unwrap_or_default();
         let _ = event_tx.send(ServerEvent::Attached {
             session: session.clone(),
             seq_at_attach,
-            agent,
+            harness,
             model,
         });
         if let Some(prev) = subs.remove(&session) {
@@ -1008,12 +1012,12 @@ async fn attach_live(
             return;
         }
     };
-    let agent = engine.agent().to_string();
+    let harness = engine.harness().to_string();
     let model = engine.model();
     let _ = event_tx.send(ServerEvent::Attached {
         session: session.clone(),
         seq_at_attach: attach.seq_at_attach,
-        agent,
+        harness,
         model,
     });
     if let Some(prev) = subs.remove(&session) {
@@ -1075,13 +1079,13 @@ mod tests {
     use crate::event::{StopReason, TurnEvent};
     use std::time::Duration;
 
-    /// Test factory: ignores agent/model/permission and always builds the fake
-    /// ACP agent.
+    /// Test factory: ignores harness/model/permission and always builds the
+    /// fake ACP agent.
     struct FakeAcpFactory;
     impl TransportFactory for FakeAcpFactory {
         fn build(
             &self,
-            _agent: AgentPreset,
+            _harness: Harness,
             _model: Option<&str>,
             _permission: Option<&str>,
         ) -> Result<Arc<dyn Transport>> {
@@ -1202,7 +1206,7 @@ mod tests {
         send_cmd_line(
             &mut client_wr,
             &ClientCommand::Spawn {
-                agent: "opencode".into(),
+                harness: "opencode".into(),
                 cwd: None,
                 model: None,
                 permission: None,
@@ -1213,8 +1217,8 @@ mod tests {
         )
         .await;
         match next_event_line(&mut events).await {
-            ServerEvent::Spawning { agent } => {
-                assert_eq!(agent, "opencode");
+            ServerEvent::Spawning { harness } => {
+                assert_eq!(harness, "opencode");
             }
             other => panic!("expected Spawning ack, got {other:?}"),
         }
@@ -1328,7 +1332,7 @@ mod tests {
         send_cmd_line(
             &mut client_wr,
             &ClientCommand::Spawn {
-                agent: "opencode".into(),
+                harness: "opencode".into(),
                 cwd: None,
                 model: None,
                 permission: None,
@@ -1395,7 +1399,7 @@ mod tests {
         send_cmd_line(
             &mut client_wr,
             &ClientCommand::Spawn {
-                agent: "opencode".into(),
+                harness: "opencode".into(),
                 cwd: None,
                 model: None,
                 permission: None,
@@ -1542,7 +1546,7 @@ mod tests {
         send_cmd_line(
             &mut client_wr,
             &ClientCommand::Spawn {
-                agent: "opencode".into(),
+                harness: "opencode".into(),
                 cwd: None,
                 model: None,
                 permission: None,
@@ -1731,7 +1735,7 @@ mod tests {
         send_cmd_line(
             &mut client_wr,
             &ClientCommand::Spawn {
-                agent: "opencode".into(),
+                harness: "opencode".into(),
                 cwd: None,
                 model: None,
                 permission: None,
@@ -1901,7 +1905,7 @@ mod tests {
         send_cmd_line(
             &mut client_wr,
             &ClientCommand::Spawn {
-                agent: "opencode".into(),
+                harness: "opencode".into(),
                 cwd: None,
                 model: None,
                 permission: None,
@@ -1923,7 +1927,7 @@ mod tests {
         send_cmd_line(
             &mut client_wr,
             &ClientCommand::Spawn {
-                agent: "opencode".into(),
+                harness: "opencode".into(),
                 cwd: None,
                 model: None,
                 permission: None,
@@ -1988,7 +1992,7 @@ mod tests {
         send_cmd_line(
             &mut client1_wr,
             &ClientCommand::Spawn {
-                agent: "opencode".into(),
+                harness: "opencode".into(),
                 cwd: None,
                 model: None,
                 permission: None,
@@ -2085,7 +2089,7 @@ mod tests {
             &mut client_wr,
             &ClientCommand::Fire {
                 target: FireTarget::Spawn {
-                    preset: "opencode".into(),
+                    harness: "opencode".into(),
                     system_prompt: None,
                 },
                 prompt: "fire now".into(),
@@ -2150,20 +2154,20 @@ mod tests {
         ev
     }
 
-    // ── ListAgents integration tests ────────────────────────────────────────
+    // ── ListHarnesses integration tests ─────────────────────────────────────
 
-    use crate::agents_config::AgentsConfigStatus;
+    use crate::harnesses_config::HarnessesConfigStatus;
 
     #[tokio::test]
-    async fn list_agents_returns_ok_for_valid_file() {
+    async fn list_harnesses_returns_ok_for_valid_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let cfg_path = tmp.path().join("agents.toml");
+        let cfg_path = tmp.path().join("harnesses.toml");
         tokio::fs::write(
             &cfg_path,
             r#"
-            [[agent]]
-            preset = "claude"
-            [[agent.models]]
+            [[harness]]
+            name = "claude"
+            [[harness.models]]
             id = "claude-sonnet-4-6"
             default = true
         "#,
@@ -2172,33 +2176,39 @@ mod tests {
         .unwrap();
 
         temp_env::async_with_vars(
-            [("ROY_AGENTS_CONFIG", Some(cfg_path.to_str().unwrap()))],
+            [("ROY_HARNESSES_CONFIG", Some(cfg_path.to_str().unwrap()))],
             async {
-                let ev = run_command_against_daemon(ClientCommand::ListAgents).await;
-                let ServerEvent::AgentsList { agents, status, .. } = ev else {
+                let ev = run_command_against_daemon(ClientCommand::ListHarnesses).await;
+                let ServerEvent::HarnessesList {
+                    harnesses, status, ..
+                } = ev
+                else {
                     panic!("got {ev:?}");
                 };
-                assert!(matches!(status, AgentsConfigStatus::Ok));
-                assert_eq!(agents.len(), 1);
-                assert_eq!(agents[0].preset, crate::agents_config::AgentPreset::Claude);
+                assert!(matches!(status, HarnessesConfigStatus::Ok));
+                assert_eq!(harnesses.len(), 1);
+                assert_eq!(harnesses[0].name, crate::harnesses_config::Harness::Claude);
             },
         )
         .await;
     }
 
     #[tokio::test]
-    async fn list_agents_bootstraps_missing_file() {
+    async fn list_harnesses_bootstraps_missing_file() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg_path = tmp.path().join("missing.toml");
         temp_env::async_with_vars(
-            [("ROY_AGENTS_CONFIG", Some(cfg_path.to_str().unwrap()))],
+            [("ROY_HARNESSES_CONFIG", Some(cfg_path.to_str().unwrap()))],
             async {
-                let ev = run_command_against_daemon(ClientCommand::ListAgents).await;
-                let ServerEvent::AgentsList { agents, status, .. } = ev else {
+                let ev = run_command_against_daemon(ClientCommand::ListHarnesses).await;
+                let ServerEvent::HarnessesList {
+                    harnesses, status, ..
+                } = ev
+                else {
                     panic!()
                 };
-                assert!(matches!(status, AgentsConfigStatus::Created));
-                assert!(agents.is_empty());
+                assert!(matches!(status, HarnessesConfigStatus::Created));
+                assert!(harnesses.is_empty());
                 assert!(cfg_path.exists());
             },
         )
@@ -2206,49 +2216,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_agents_reports_invalid_toml() {
+    async fn list_harnesses_reports_invalid_toml() {
         let tmp = tempfile::tempdir().unwrap();
-        let cfg_path = tmp.path().join("agents.toml");
+        let cfg_path = tmp.path().join("harnesses.toml");
         tokio::fs::write(&cfg_path, "this is not toml [[[")
             .await
             .unwrap();
         temp_env::async_with_vars(
-            [("ROY_AGENTS_CONFIG", Some(cfg_path.to_str().unwrap()))],
+            [("ROY_HARNESSES_CONFIG", Some(cfg_path.to_str().unwrap()))],
             async {
-                let ev = run_command_against_daemon(ClientCommand::ListAgents).await;
-                let ServerEvent::AgentsList { status, agents, .. } = ev else {
+                let ev = run_command_against_daemon(ClientCommand::ListHarnesses).await;
+                let ServerEvent::HarnessesList {
+                    status, harnesses, ..
+                } = ev
+                else {
                     panic!()
                 };
-                assert!(agents.is_empty());
-                assert!(matches!(status, AgentsConfigStatus::Invalid { .. }));
+                assert!(harnesses.is_empty());
+                assert!(matches!(status, HarnessesConfigStatus::Invalid { .. }));
             },
         )
         .await;
     }
 
     #[tokio::test]
-    async fn list_agents_reports_validation_error() {
+    async fn list_harnesses_reports_validation_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let cfg_path = tmp.path().join("agents.toml");
+        let cfg_path = tmp.path().join("harnesses.toml");
         tokio::fs::write(
             &cfg_path,
             r#"
-            [[agent]]
-            preset = "claude"
-            [[agent]]
-            preset = "claude"
+            [[harness]]
+            name = "claude"
+            [[harness]]
+            name = "claude"
         "#,
         )
         .await
         .unwrap();
         temp_env::async_with_vars(
-            [("ROY_AGENTS_CONFIG", Some(cfg_path.to_str().unwrap()))],
+            [("ROY_HARNESSES_CONFIG", Some(cfg_path.to_str().unwrap()))],
             async {
-                let ev = run_command_against_daemon(ClientCommand::ListAgents).await;
-                let ServerEvent::AgentsList { status, .. } = ev else {
+                let ev = run_command_against_daemon(ClientCommand::ListHarnesses).await;
+                let ServerEvent::HarnessesList { status, .. } = ev else {
                     panic!()
                 };
-                let AgentsConfigStatus::Invalid { reason } = status else {
+                let HarnessesConfigStatus::Invalid { reason } = status else {
                     panic!()
                 };
                 assert!(reason.contains("duplicate"), "got: {reason}");
@@ -2258,7 +2271,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_agents_concurrent_bootstrap_is_safe() {
+    async fn list_harnesses_concurrent_bootstrap_is_safe() {
         // Two tasks race on a clean config path. Atomic rename means the
         // "loser" silently overwrites with identical sample content. Both
         // must return Created, neither may panic, the file must end up
@@ -2266,23 +2279,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg_path = tmp.path().join("missing.toml");
         temp_env::async_with_vars(
-            [("ROY_AGENTS_CONFIG", Some(cfg_path.to_str().unwrap()))],
+            [("ROY_HARNESSES_CONFIG", Some(cfg_path.to_str().unwrap()))],
             async {
                 let (a, b) = tokio::join!(
-                    run_command_against_daemon(ClientCommand::ListAgents),
-                    run_command_against_daemon(ClientCommand::ListAgents),
+                    run_command_against_daemon(ClientCommand::ListHarnesses),
+                    run_command_against_daemon(ClientCommand::ListHarnesses),
                 );
                 for ev in [a, b] {
-                    let ServerEvent::AgentsList { status, .. } = ev else {
-                        panic!("expected AgentsList, got {ev:?}")
+                    let ServerEvent::HarnessesList { status, .. } = ev else {
+                        panic!("expected HarnessesList, got {ev:?}")
                     };
                     assert!(
-                        matches!(status, AgentsConfigStatus::Created),
+                        matches!(status, HarnessesConfigStatus::Created),
                         "expected Created, got {status:?}"
                     );
                 }
                 let written = tokio::fs::read_to_string(&cfg_path).await.unwrap();
-                assert_eq!(written, crate::agents_config::SAMPLE_TOML);
+                assert_eq!(written, crate::harnesses_config::SAMPLE_TOML);
             },
         )
         .await;
@@ -2333,7 +2346,7 @@ mod tests {
         send_cmd_line(
             &mut clienta_wr,
             &ClientCommand::Spawn {
-                agent: "opencode".into(),
+                harness: "opencode".into(),
                 cwd: None,
                 model: None,
                 permission: None,

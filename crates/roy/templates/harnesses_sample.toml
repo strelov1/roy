@@ -1,94 +1,96 @@
-# ~/.config/roy/agents.toml
+# ~/.config/roy/harnesses.toml
 #
-# Configured agents for roy. Roy spawns these ACP-adapter binaries — they
-# must be installed and authenticated on this machine. Uncomment the
-# block(s) for the agents you actually have.
+# Configured harnesses for roy. A harness is one of the ACP-adapter
+# binaries (claude-code-acp, gemini, opencode, codex-acp, pi-acp) that
+# roy spawns to drive a session. The binaries must be installed and
+# authenticated on this machine. Uncomment the block(s) for the
+# harnesses you actually have.
 #
 # Models are display-only labels — roy doesn't route by model. Pick the
-# string that matches what the underlying agent expects internally (e.g.
-# `claude-sonnet-4-6` for claude-code-acp's slash-command).
+# string that matches what the underlying harness expects internally
+# (e.g. `claude-sonnet-4-6` for claude-code-acp's slash-command).
 
 # ---------- claude-code-acp ----------
-# [[agent]]
-# preset = "claude"
+# [[harness]]
+# name = "claude"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "claude-sonnet-4-6"
 # label = "Claude Sonnet 4.6"
 # default = true
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "claude-opus-4-7"
 # label = "Claude Opus 4.7"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "claude-opus-4-6"
 # label = "Claude Opus 4.6"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "claude-opus-4-5"
 # label = "Claude Opus 4.5"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "claude-haiku-4-5"
 # label = "Claude Haiku 4.5"
 
 # ---------- gemini --acp --skip-trust ----------
-# [[agent]]
-# preset = "gemini"
+# [[harness]]
+# name = "gemini"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "gemini-2.5-pro"
 # label = "Gemini 2.5 Pro"
 # default = true
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "gemini-2.5-flash"
 # label = "Gemini 2.5 Flash"
 
 # ---------- codex-acp ----------
-# [[agent]]
-# preset = "codex"
+# [[harness]]
+# name = "codex"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "gpt-5.4"
 # label = "GPT-5.4"
 # default = true
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "gpt-5.4-mini"
 # label = "GPT-5.4 mini"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "gpt-5.3-codex"
 # label = "GPT-5.3 Codex"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "gpt-5.3-codex-spark"
 # label = "GPT-5.3 Codex Spark"
 
 # ---------- opencode acp (Kimi/Moonshot) ----------
-# [[agent]]
-# preset = "opencode"
+# [[harness]]
+# name = "opencode"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "kimi-for-coding/kimi-k2-thinking"
 # label = "Kimi K2 Thinking"
 # default = true
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "kimi-for-coding/k2p6"
 # label = "Kimi K2 p6"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "kimi-for-coding/k2p5"
 # label = "Kimi K2 p5"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "kimi/kimi-k2-turbo-preview"
 # label = "Kimi K2 Turbo"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "kimi/kimi-k2-0905-preview"
 # label = "Kimi K2 0905"
 
@@ -96,22 +98,22 @@
 # Requires `npm install -g pi-acp` + provider API keys configured in `pi`.
 # Model ids are pi's "<provider>/<model>" patterns; run `pi --list-models`
 # to see what's actually available with your configured providers.
-# [[agent]]
-# preset = "pi"
+# [[harness]]
+# name = "pi"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "cerebras/gpt-oss-120b"
 # label = "GPT-OSS 120B (Cerebras)"
 # default = true
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "cerebras/qwen-3-235b-a22b-instruct-2507"
 # label = "Qwen 3 235B (Cerebras)"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "cerebras/zai-glm-4.7"
 # label = "GLM 4.7 (Cerebras)"
 #
-# [[agent.models]]
+# [[harness.models]]
 # id = "cerebras/llama3.1-8b"
 # label = "Llama 3.1 8B (Cerebras)"

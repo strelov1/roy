@@ -260,7 +260,7 @@ async fn run_fire_for_agent(
             agents::update_persistent_session_id(pool, &agent.id, None).await?;
             did_fallback_spawn = true;
             let retry_target = roy::FireTarget::Spawn {
-                preset: agent.preset.clone(),
+                harness: agent.harness.clone(),
                 system_prompt: None,
             };
             outcome = roy_client::fire(
@@ -383,7 +383,7 @@ fn build_target(agent: &Agent) -> roy::FireTarget {
         }
     }
     roy::FireTarget::Spawn {
-        preset: agent.preset.clone(),
+        harness: agent.harness.clone(),
         system_prompt: None,
     }
 }
@@ -402,7 +402,7 @@ mod tests {
         Agent {
             id: "agent-id".into(),
             name: "n".into(),
-            preset: "claude".into(),
+            harness: "claude".into(),
             project_id: None,
             task: task.into(),
             model: None,
@@ -442,7 +442,7 @@ mod tests {
             &pool,
             agents::NewAgent {
                 name: "x".into(),
-                preset: "claude".into(),
+                harness: "claude".into(),
                 project_id: None,
                 task: "t".into(),
                 model: None,
@@ -480,7 +480,7 @@ mod tests {
             &pool,
             agents::NewAgent {
                 name: "x".into(),
-                preset: "claude".into(),
+                harness: "claude".into(),
                 project_id: None,
                 task: "t".into(),
                 model: None,
@@ -614,7 +614,7 @@ mod tests {
             &pool,
             agents::NewAgent {
                 name: "ad-hoc-agent".into(),
-                preset: "claude".into(),
+                harness: "claude".into(),
                 project_id: None,
                 task: "task".into(),
                 model: None,
@@ -684,7 +684,7 @@ mod tests {
             &pool,
             agents::NewAgent {
                 name: "persist".into(),
-                preset: "claude".into(),
+                harness: "claude".into(),
                 project_id: None,
                 task: "t".into(),
                 model: None,
@@ -731,7 +731,7 @@ mod tests {
             &pool,
             agents::NewAgent {
                 name: "with-parent".into(),
-                preset: "claude".into(),
+                harness: "claude".into(),
                 project_id: None,
                 task: "t".into(),
                 model: None,
@@ -810,7 +810,7 @@ mod tests {
             &pool,
             agents::NewAgent {
                 name: "persist".into(),
-                preset: "claude".into(),
+                harness: "claude".into(),
                 project_id: None,
                 task: "t".into(),
                 model: None,
@@ -846,7 +846,7 @@ mod tests {
             &pool,
             agents::NewAgent {
                 name: "x".into(),
-                preset: "claude".into(),
+                harness: "claude".into(),
                 project_id: None,
                 task: "t".into(),
                 model: None,

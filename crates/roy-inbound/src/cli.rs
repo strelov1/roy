@@ -29,9 +29,9 @@ pub struct Args {
     /// roy daemon Unix socket.
     #[arg(long, env = "ROY_SOCKET")]
     pub socket: Option<PathBuf>,
-    /// Default preset used when resolving Spawn targets.
+    /// Default harness used when resolving Spawn targets.
     #[arg(long, default_value = "claude")]
-    pub preset: String,
+    pub harness: String,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -76,7 +76,7 @@ pub async fn run(args: Args) -> Result<()> {
     let webhook = Arc::new(WebhookPublisher::new(bind, webhook_sources)?);
 
     let router: Arc<dyn crate::router::Router> = Arc::new(ConfigRouter::from_config(&cfg));
-    let resolver = SessionResolver::new(bindings.clone(), args.preset);
+    let resolver = SessionResolver::new(bindings.clone(), args.harness);
 
     let dispatcher = InboundDispatcher {
         bus: bus_rx,

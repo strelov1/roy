@@ -103,7 +103,7 @@ async fn build_telegram_task(
     );
     let conn_factory = Arc::new(RealConnFactory::new(socket_path.to_path_buf()));
     let orch_cfg = Arc::new(OrchestratorConfig {
-        preset: tg.preset.clone(),
+        harness: tg.harness.clone(),
         cwd: tg.cwd.clone(),
         turn_timeout: Duration::from_secs(tg.turn_timeout_secs),
         typing_interval: Duration::from_secs(4),

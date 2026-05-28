@@ -5,10 +5,10 @@
 //!   - `<workspace>/teams/<tid>/.roy/agents/` — team-shared agents.
 //!
 //! Each file starts with a YAML frontmatter block. Required keys: `name`,
-//! `description`, `engine`. Optional: `model`. The body (after the second
+//! `description`, `harness`. Optional: `model`. The body (after the second
 //! `---`) becomes the session's `system_prompt` when the agent is run.
 //!
-//! Files without `engine` are silently dropped — that is what distinguishes
+//! Files without `harness` are silently dropped — that is what distinguishes
 //! an agent file from a stray markdown note in the same directory.
 
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ pub enum AgentScope {
 pub struct AgentFile {
     pub name: String,
     pub description: String,
-    pub engine: String,
+    pub harness: String,
     pub model: Option<String>,
     pub body: String,
     pub scope: AgentScope,
@@ -153,13 +153,13 @@ async fn list_dir(dir: &Path, scope: AgentScope) -> Vec<AgentFile> {
         let Some(parsed) = parse_agent_md(&contents) else {
             continue;
         };
-        let Some(engine) = parsed.engine else {
+        let Some(harness) = parsed.harness else {
             continue;
         };
         out.push(AgentFile {
             name: parsed.name.unwrap_or(stem),
             description: parsed.description.unwrap_or_default(),
-            engine,
+            harness,
             model: parsed.model,
             body: parsed.body,
             scope: scope.clone(),
@@ -199,7 +199,7 @@ pub async fn list_all_agents(
 struct ParsedAgent {
     name: Option<String>,
     description: Option<String>,
-    engine: Option<String>,
+    harness: Option<String>,
     model: Option<String>,
     body: String,
 }
@@ -210,14 +210,14 @@ fn parse_agent_md(s: &str) -> Option<ParsedAgent> {
     let front = &s[..end];
     let after = &s[end + 4..];
     let body = after.strip_prefix('\n').unwrap_or(after).to_string();
-    let (mut name, mut desc, mut engine, mut model) = (None, None, None, None);
+    let (mut name, mut desc, mut harness, mut model) = (None, None, None, None);
     for line in front.lines() {
         if let Some(rest) = line.strip_prefix("name:") {
             name = Some(rest.trim().trim_matches('"').to_string());
         } else if let Some(rest) = line.strip_prefix("description:") {
             desc = Some(rest.trim().trim_matches('"').to_string());
-        } else if let Some(rest) = line.strip_prefix("engine:") {
-            engine = Some(rest.trim().trim_matches('"').to_string());
+        } else if let Some(rest) = line.strip_prefix("harness:") {
+            harness = Some(rest.trim().trim_matches('"').to_string());
         } else if let Some(rest) = line.strip_prefix("model:") {
             model = Some(rest.trim().trim_matches('"').to_string());
         }
@@ -225,7 +225,7 @@ fn parse_agent_md(s: &str) -> Option<ParsedAgent> {
     Some(ParsedAgent {
         name,
         description: desc,
-        engine,
+        harness,
         model,
         body,
     })
@@ -256,12 +256,12 @@ mod tests {
         write(
             &dir,
             "pirate.md",
-            "---\nname: pirate\ndescription: pirate coder\nengine: codex\n---\n\nArr.\n",
+            "---\nname: pirate\ndescription: pirate coder\nharness: codex\n---\n\nArr.\n",
         );
         write(
             &dir,
             "marketing.md",
-            "---\nname: marketing\ndescription: gtm helper\nengine: claude\nmodel: claude-opus-4-7\n---\n\nYou are a marketer.\n",
+            "---\nname: marketing\ndescription: gtm helper\nharness: claude\nmodel: claude-opus-4-7\n---\n\nYou are a marketer.\n",
         );
         let list = list_all_agents(
             &home.path().join("builtin"),
@@ -272,18 +272,18 @@ mod tests {
         .await;
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "marketing");
-        assert_eq!(list[0].engine, "claude");
+        assert_eq!(list[0].harness, "claude");
         assert_eq!(list[0].model.as_deref(), Some("claude-opus-4-7"));
         assert!(list[0].body.contains("You are a marketer"));
         assert!(matches!(list[0].scope, AgentScope::Personal));
         assert_eq!(list[1].name, "pirate");
-        assert_eq!(list[1].engine, "codex");
+        assert_eq!(list[1].harness, "codex");
         assert_eq!(list[1].model, None);
         assert!(matches!(list[1].scope, AgentScope::Personal));
     }
 
     #[tokio::test]
-    async fn skips_files_without_engine_field() {
+    async fn skips_files_without_harness_field() {
         let home = TempDir::new().unwrap();
         let dir = home.path().join("workspace/users/u1/.roy/agents");
         write(
@@ -308,7 +308,7 @@ mod tests {
         write(
             &dir,
             "../escape.md",
-            "---\nname: x\nengine: claude\n---\n\nx",
+            "---\nname: x\nharness: claude\n---\n\nx",
         );
         let list = list_all_agents(
             &home.path().join("builtin"),
@@ -327,19 +327,19 @@ mod tests {
         write(
             &home.path().join("builtin"),
             "roy-coder.md",
-            "---\nname: roy-coder\ndescription: bi\nengine: claude\n---\nbody",
+            "---\nname: roy-coder\ndescription: bi\nharness: claude\n---\nbody",
         );
         // personal
         write(
             &home.path().join("workspace/users/u1/.roy/agents"),
             "pirate.md",
-            "---\nname: pirate\ndescription: arr\nengine: codex\n---\nbody",
+            "---\nname: pirate\ndescription: arr\nharness: codex\n---\nbody",
         );
         // team
         write(
             &home.path().join("workspace/teams/tid-1/.roy/agents"),
             "gtm.md",
-            "---\nname: gtm\ndescription: gtm\nengine: codex\n---\nbody",
+            "---\nname: gtm\ndescription: gtm\nharness: codex\n---\nbody",
         );
         let list = list_all_agents(
             &home.path().join("builtin"),
@@ -414,9 +414,9 @@ mod tests {
 
     #[test]
     fn parses_minimal_frontmatter() {
-        let p = parse_agent_md("---\nname: x\nengine: claude\n---\n\nhello\n").unwrap();
+        let p = parse_agent_md("---\nname: x\nharness: claude\n---\n\nhello\n").unwrap();
         assert_eq!(p.name.as_deref(), Some("x"));
-        assert_eq!(p.engine.as_deref(), Some("claude"));
+        assert_eq!(p.harness.as_deref(), Some("claude"));
         assert_eq!(p.body.trim(), "hello");
         assert!(p.description.is_none());
         assert!(p.model.is_none());

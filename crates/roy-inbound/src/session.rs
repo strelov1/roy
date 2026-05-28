@@ -99,12 +99,12 @@ impl From<&SessionStrategyConfig> for SessionStrategy {
 
 pub struct SessionResolver {
     bindings: Arc<BindingStore>,
-    preset: String,
+    harness: String,
 }
 
 impl SessionResolver {
-    pub fn new(bindings: Arc<BindingStore>, preset: String) -> Self {
-        Self { bindings, preset }
+    pub fn new(bindings: Arc<BindingStore>, harness: String) -> Self {
+        Self { bindings, harness }
     }
 
     pub async fn resolve(
@@ -115,7 +115,7 @@ impl SessionResolver {
         strategy: SessionStrategy,
     ) -> Result<(FireTarget, Option<PendingBinding>)> {
         let spawn_target = || FireTarget::Spawn {
-            preset: self.preset.clone(),
+            harness: self.harness.clone(),
             system_prompt: None,
         };
 
