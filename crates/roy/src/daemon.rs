@@ -86,12 +86,17 @@ impl TransportFactory for DefaultTransportFactory {
                 }
             };
         }
-        // MVP: only the claude harness supports MCP injection. Reject any
-        // non-claude harness that arrives with non-empty connections so the
-        // user sees an actionable error instead of silently-missing tools.
-        if !connections.is_empty() && !matches!(harness, Harness::Claude) {
+        // Reject any harness that doesn't advertise an MCP injection channel
+        // when connections were requested, so the user sees an actionable
+        // error instead of silently-missing tools.
+        if !connections.is_empty()
+            && matches!(
+                config.mcp_injection,
+                crate::transport::McpInjectionStyle::None
+            )
+        {
             return Err(RoyError::Protocol(format!(
-                "harness '{harness}' does not yet support MCP connections (MVP supports only 'claude')"
+                "harness '{harness}' does not yet support MCP connections"
             )));
         }
         config.connections = connections.to_vec();
@@ -1118,7 +1123,7 @@ mod tests {
                 env_remove: Vec::new(),
                 system_prompt_channel: crate::transport::SystemPromptChannel::Meta,
                 connections: Vec::new(),
-                inject_mcp: false,
+                mcp_injection: crate::transport::McpInjectionStyle::None,
             })))
         }
     }

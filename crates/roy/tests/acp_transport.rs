@@ -17,7 +17,7 @@ fn fake_config(extra: &[&str]) -> AcpConfig {
         env_remove: Vec::new(),
         system_prompt_channel: roy::transport::SystemPromptChannel::Meta,
         connections: Vec::new(),
-        inject_mcp: false,
+        mcp_injection: roy::transport::McpInjectionStyle::None,
     }
 }
 
@@ -115,7 +115,7 @@ async fn open_without_mode_skips_set_mode() {
         env_remove: Vec::new(),
         system_prompt_channel: roy::transport::SystemPromptChannel::Meta,
         connections: Vec::new(),
-        inject_mcp: false,
+        mcp_injection: roy::transport::McpInjectionStyle::None,
     };
     let transport = AcpTransport::new(config);
     let mut handle = transport
