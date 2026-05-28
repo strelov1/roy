@@ -101,6 +101,60 @@ pub async fn test_app_with_mock_daemon() -> (
     (router_for_tests(state), pool, workspace_dir, mock)
 }
 
+/// Variant of `test_app` whose catalog is pre-loaded with a one-entry GitHub
+/// provider — enough to exercise the catalog-backed POST flow without
+/// touching the user's real ~/.roy/connections.yaml.
+pub async fn test_app_with_catalog() -> (axum::Router, sqlx::SqlitePool, std::path::PathBuf) {
+    use roy_management::provider_catalog::{Catalog, Provider, SecretSchema};
+    let github = Provider {
+        id: "github".into(),
+        name: "GitHub".into(),
+        description: "Read/write".into(),
+        icon: "github".into(),
+        command: "npx".into(),
+        args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
+        env: Default::default(),
+        secrets: vec![SecretSchema {
+            key: "GITHUB_PERSONAL_ACCESS_TOKEN".into(),
+            label: "Personal Access Token".into(),
+            help: None,
+        }],
+    };
+    let catalog = std::sync::Arc::new(Catalog::from_providers(vec![github]));
+
+    std::env::set_var("ROY_JWT_SECRET", TEST_JWT_SECRET);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = roy_agents::open(&dir.path().join("agents.db"))
+        .await
+        .unwrap();
+    roy_management::meta_store::MetaStore::apply_migrations(&pool)
+        .await
+        .unwrap();
+    roy_auth::apply_migrations(&pool).await.unwrap();
+    std::mem::forget(dir);
+    let workspace_dir = std::env::temp_dir().join(format!("roy-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace_dir).unwrap();
+    let meta = roy_management::meta_store::MetaStore::new(pool.clone(), workspace_dir.clone());
+
+    let daemon = std::sync::Arc::new(
+        roy_management::roy_client::mock::MockDaemonClient::new().with_spawn("sess-1"),
+    );
+    let state = AppState {
+        store: roy_agents::Store::new(pool.clone()),
+        meta,
+        daemon,
+        socket_path: std::path::PathBuf::from("/tmp/fake.sock"),
+        scheduler_pool: None,
+        pool: pool.clone(),
+        workspace_dir: workspace_dir.clone(),
+        login_limiter: std::sync::Arc::new(roy_management::rate_limit::LoginLimiter::default()),
+        commands_cache: std::sync::Arc::new(roy_management::commands::CommandsCache::default()),
+        connections: roy_management::connections::Store::new(pool.clone()),
+        catalog,
+    };
+    (router_for_tests(state), pool, workspace_dir)
+}
+
 /// POST /auth/login and return the `set-cookie` header value. Panics on
 /// non-200 responses — call sites assume a successful login.
 pub async fn login_as(app: &axum::Router, username: &str, password: &str) -> String {

@@ -269,7 +269,18 @@ impl Store {
                         provider_id,
                     });
                 }
-                Err(sqlx::Error::Database(d)) if d.is_unique_violation() => continue,
+                Err(sqlx::Error::Database(d)) if d.is_unique_violation() => {
+                    // Only retry on slug collisions. Other UNIQUE violations
+                    // (e.g. the partial `(owner_id, provider_id, name)` index
+                    // for catalog-backed rows) must propagate so the handler
+                    // can map them to 409. Without this guard the slug-retry
+                    // loop would spin forever — the regenerated slug doesn't
+                    // affect a `(provider_id, name)` collision.
+                    if d.message().contains("slug") {
+                        continue;
+                    }
+                    return Err(StoreError::Db(sqlx::Error::Database(d)));
+                }
                 Err(e) => return Err(StoreError::Db(e)),
             }
         }
