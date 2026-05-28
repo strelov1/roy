@@ -1,6 +1,8 @@
-//! Filesystem-based agent discovery. Single source:
+//! Filesystem-based agent discovery. Three sources:
 //!
-//!   - `~/.roy/agents/<name>.md` — top-level markdown files, one per agent.
+//!   - `<builtin_dir>/` — built-in agents shipped with the daemon image.
+//!   - `<workspace>/users/<uid>/.roy/agents/` — personal agents.
+//!   - `<workspace>/teams/<tid>/.roy/agents/` — team-shared agents.
 //!
 //! Each file starts with a YAML frontmatter block. Required keys: `name`,
 //! `description`, `engine`. Optional: `model`. The body (after the second
@@ -9,11 +11,20 @@
 //! Files without `engine` are silently dropped — that is what distinguishes
 //! an agent file from a stray markdown note in the same directory.
 
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum AgentScope {
+    Builtin,
+    Personal,
+    Team { team_id: String },
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentFile {
@@ -22,39 +33,46 @@ pub struct AgentFile {
     pub engine: String,
     pub model: Option<String>,
     pub body: String,
+    pub scope: AgentScope,
 }
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
+type CacheKey = (String, Vec<String>);
+
 #[derive(Default)]
 pub struct AgentsCache {
-    inner: Mutex<Option<(Instant, Vec<AgentFile>)>>,
+    inner: Mutex<HashMap<CacheKey, (Instant, Vec<AgentFile>)>>,
 }
 
 impl AgentsCache {
-    pub async fn get(&self) -> Vec<AgentFile> {
+    pub async fn get(
+        &self,
+        builtin_dir: &Path,
+        workspace_dir: &Path,
+        user_id: &str,
+        team_ids: &[String],
+    ) -> Vec<AgentFile> {
+        let mut tids: Vec<String> = team_ids.to_vec();
+        tids.sort();
+        let key = (user_id.to_string(), tids.clone());
         {
             let g = self.inner.lock().unwrap();
-            if let Some((ts, ref v)) = *g {
+            if let Some((ts, ref v)) = g.get(&key) {
                 if ts.elapsed() < CACHE_TTL {
                     return v.clone();
                 }
             }
         }
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-        let v = list_agents_from(&home).await;
+        let v = list_all_agents(builtin_dir, workspace_dir, user_id, &tids).await;
         let mut g = self.inner.lock().unwrap();
-        *g = Some((Instant::now(), v.clone()));
+        g.insert(key, (Instant::now(), v.clone()));
         v
     }
 
     pub fn invalidate(&self) {
-        *self.inner.lock().unwrap() = None;
+        self.inner.lock().unwrap().clear();
     }
-}
-
-pub fn roy_agents_dir(home: &Path) -> PathBuf {
-    home.join(".roy/agents")
 }
 
 /// Build the per-user/per-team env-var map that the daemon sets on the
@@ -118,10 +136,9 @@ fn slugify_team(name: &str) -> String {
     raw.trim_matches('-').to_string()
 }
 
-pub async fn list_agents_from(home: &Path) -> Vec<AgentFile> {
-    let dir = roy_agents_dir(home);
+async fn list_dir(dir: &Path, scope: AgentScope) -> Vec<AgentFile> {
     let mut out = Vec::new();
-    let Ok(mut rd) = tokio::fs::read_dir(&dir).await else {
+    let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
         return out;
     };
     while let Ok(Some(entry)) = rd.next_entry().await {
@@ -136,19 +153,42 @@ pub async fn list_agents_from(home: &Path) -> Vec<AgentFile> {
         let Ok(contents) = tokio::fs::read_to_string(&path).await else {
             continue;
         };
-        let Some(parsed) = parse_agent_md(&contents) else {
-            continue;
-        };
+        let Some(parsed) = parse_agent_md(&contents) else { continue };
         let Some(engine) = parsed.engine else { continue };
         out.push(AgentFile {
-            name: parsed.name.unwrap_or(stem.clone()),
+            name: parsed.name.unwrap_or(stem),
             description: parsed.description.unwrap_or_default(),
             engine,
             model: parsed.model,
             body: parsed.body,
+            scope: scope.clone(),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+pub async fn list_all_agents(
+    builtin_dir: &Path,
+    workspace_dir: &Path,
+    user_id: &str,
+    team_ids: &[String],
+) -> Vec<AgentFile> {
+    let mut out = list_dir(builtin_dir, AgentScope::Builtin).await;
+    let user_dir = workspace_dir
+        .join("users")
+        .join(user_id)
+        .join(".roy/agents");
+    out.extend(list_dir(&user_dir, AgentScope::Personal).await);
+    for tid in team_ids {
+        let team_dir = workspace_dir
+            .join("teams")
+            .join(tid)
+            .join(".roy/agents");
+        out.extend(
+            list_dir(&team_dir, AgentScope::Team { team_id: tid.clone() }).await,
+        );
+    }
     out
 }
 
@@ -202,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn lists_agents_in_alphabetical_order() {
         let home = TempDir::new().unwrap();
-        let dir = roy_agents_dir(home.path());
+        let dir = home.path().join("workspace/users/u1/.roy/agents");
         write(
             &dir,
             "pirate.md",
@@ -213,41 +253,99 @@ mod tests {
             "marketing.md",
             "---\nname: marketing\ndescription: gtm helper\nengine: claude\nmodel: claude-opus-4-7\n---\n\nYou are a marketer.\n",
         );
-        let list = list_agents_from(home.path()).await;
+        let list = list_all_agents(
+            &home.path().join("builtin"),
+            &home.path().join("workspace"),
+            "u1",
+            &[],
+        )
+        .await;
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "marketing");
         assert_eq!(list[0].engine, "claude");
         assert_eq!(list[0].model.as_deref(), Some("claude-opus-4-7"));
         assert!(list[0].body.contains("You are a marketer"));
+        assert!(matches!(list[0].scope, AgentScope::Personal));
         assert_eq!(list[1].name, "pirate");
         assert_eq!(list[1].engine, "codex");
         assert_eq!(list[1].model, None);
+        assert!(matches!(list[1].scope, AgentScope::Personal));
     }
 
     #[tokio::test]
     async fn skips_files_without_engine_field() {
         let home = TempDir::new().unwrap();
-        let dir = roy_agents_dir(home.path());
+        let dir = home.path().join("workspace/users/u1/.roy/agents");
         write(
             &dir,
             "skill-only.md",
             "---\nname: notes\ndescription: just a note\n---\n\nbody\n",
         );
-        let list = list_agents_from(home.path()).await;
+        let list = list_all_agents(
+            &home.path().join("builtin"),
+            &home.path().join("workspace"),
+            "u1",
+            &[],
+        )
+        .await;
         assert_eq!(list.len(), 0);
     }
 
     #[tokio::test]
     async fn rejects_unsafe_names() {
         let home = TempDir::new().unwrap();
-        let dir = roy_agents_dir(home.path());
+        let dir = home.path().join("workspace/users/u1/.roy/agents");
         write(
             &dir,
             "../escape.md",
             "---\nname: x\nengine: claude\n---\n\nx",
         );
-        let list = list_agents_from(home.path()).await;
+        let list = list_all_agents(
+            &home.path().join("builtin"),
+            &home.path().join("workspace"),
+            "u1",
+            &[],
+        )
+        .await;
         assert_eq!(list.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn lists_builtin_personal_and_team() {
+        let home = TempDir::new().unwrap();
+        // builtin
+        write(
+            &home.path().join("builtin"),
+            "roy-coder.md",
+            "---\nname: roy-coder\ndescription: bi\nengine: claude\n---\nbody",
+        );
+        // personal
+        write(
+            &home.path().join("workspace/users/u1/.roy/agents"),
+            "pirate.md",
+            "---\nname: pirate\ndescription: arr\nengine: codex\n---\nbody",
+        );
+        // team
+        write(
+            &home.path().join("workspace/teams/tid-1/.roy/agents"),
+            "gtm.md",
+            "---\nname: gtm\ndescription: gtm\nengine: codex\n---\nbody",
+        );
+        let list = list_all_agents(
+            &home.path().join("builtin"),
+            &home.path().join("workspace"),
+            "u1",
+            &["tid-1".to_string()],
+        )
+        .await;
+        assert_eq!(list.len(), 3);
+        // Built-in first, then personal, then team — by source order in list_all_agents
+        assert_eq!(list[0].name, "roy-coder");
+        assert!(matches!(list[0].scope, AgentScope::Builtin));
+        assert_eq!(list[1].name, "pirate");
+        assert!(matches!(list[1].scope, AgentScope::Personal));
+        assert_eq!(list[2].name, "gtm");
+        assert!(matches!(&list[2].scope, AgentScope::Team { team_id } if team_id == "tid-1"));
     }
 
     #[test]
