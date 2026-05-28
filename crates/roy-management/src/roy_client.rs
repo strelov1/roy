@@ -60,6 +60,7 @@ impl DaemonClient for UnixSocketDaemonClient {
             permission: req.permission,
             resume: None,
             system_prompt: req.system_prompt,
+            extra_env: Default::default(),
         };
         let mut lines = self.connect_and_send(&cmd).await?;
         loop {

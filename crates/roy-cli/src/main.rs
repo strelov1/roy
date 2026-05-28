@@ -577,6 +577,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
                 permission: args.permission.clone(),
                 resume: args.resume.clone(),
                 system_prompt,
+                extra_env: Default::default(),
             },
         )
         .await?;

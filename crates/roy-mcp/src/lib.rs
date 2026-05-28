@@ -550,6 +550,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
             permission,
             resume,
             system_prompt,
+            extra_env: Default::default(),
         },
     )
     .await?;
@@ -663,6 +664,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
             permission,
             resume,
             system_prompt,
+            extra_env: Default::default(),
         },
     )
     .await?;
