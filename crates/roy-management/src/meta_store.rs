@@ -64,6 +64,11 @@ pub struct SessionMeta {
     pub team_id: Option<String>,
     pub tags: BTreeMap<String, String>,
     pub created_at: i64,
+    /// Connection IDs that were attached when this session was spawned.
+    /// JSON-encoded in the `session_meta.connection_ids` column. Used for
+    /// audit/UI display; NOT used for resume (MVP: resume gets a clean MCP
+    /// slate — see manager::resume).
+    pub connection_ids: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -245,11 +250,13 @@ impl MetaStore {
         // pinned to the original insert — these identify *who* created the
         // session and must not be silently rewritten by an upsert from a
         // different caller.
+        let connection_ids_json =
+            serde_json::to_string(&meta.connection_ids).unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
             "INSERT INTO session_meta \
             (session_id, project_id, agent_id, agent_name, display_label, \
-             created_by, team_id, created_at) \
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             created_by, team_id, created_at, connection_ids) \
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
             ON CONFLICT(session_id) DO UPDATE SET \
                 project_id = excluded.project_id, \
                 agent_id = excluded.agent_id, \
@@ -264,6 +271,7 @@ impl MetaStore {
         .bind(&meta.created_by)
         .bind(&meta.team_id)
         .bind(meta.created_at)
+        .bind(&connection_ids_json)
         .execute(&mut *tx)
         .await?;
 
@@ -298,9 +306,10 @@ impl MetaStore {
             String,
             Option<String>,
             i64,
+            String,
         )> = sqlx::query_as(
             "SELECT session_id, project_id, agent_id, agent_name, display_label, \
-                    created_by, team_id, created_at \
+                    created_by, team_id, created_at, connection_ids \
             FROM session_meta WHERE session_id = ?",
         )
         .bind(session_id)
@@ -318,6 +327,7 @@ impl MetaStore {
                 created_by,
                 team_id,
                 created_at,
+                conn_ids_json,
             )) => {
                 let tag_rows: Vec<(String, String)> = sqlx::query_as(
                     "SELECT key, value FROM session_tags WHERE session_id = ? ORDER BY key",
@@ -338,6 +348,7 @@ impl MetaStore {
                     team_id,
                     tags,
                     created_at,
+                    connection_ids: parse_connection_ids(&conn_ids_json),
                 }))
             }
         }
@@ -360,7 +371,7 @@ impl MetaStore {
             .join(",");
         let meta_sql = format!(
             "SELECT session_id, project_id, agent_id, agent_name, display_label, \
-                    created_by, team_id, created_at \
+                    created_by, team_id, created_at, connection_ids \
              FROM session_meta WHERE session_id IN ({placeholders})"
         );
         let tag_sql = format!(
@@ -378,6 +389,7 @@ impl MetaStore {
                 String,
                 Option<String>,
                 i64,
+                String,
             ),
         >(&meta_sql);
         for sid in session_ids {
@@ -409,6 +421,7 @@ impl MetaStore {
                     created_by,
                     team_id,
                     created_at,
+                    conn_ids_json,
                 )| SessionMeta {
                     tags: tags_by_sid.remove(&sid).unwrap_or_default(),
                     session_id: sid,
@@ -419,6 +432,7 @@ impl MetaStore {
                     created_by,
                     team_id,
                     created_at,
+                    connection_ids: parse_connection_ids(&conn_ids_json),
                 },
             )
             .collect())
@@ -506,6 +520,13 @@ fn validate_project_name(name: &str) -> Result<(), MetaError> {
         }
     }
     Ok(())
+}
+
+/// Parse the `connection_ids` JSON-encoded column. Corrupted rows become an
+/// empty list — `connection_ids` is audit data, not load-bearing, so we'd
+/// rather show the session than fail.
+fn parse_connection_ids(s: &str) -> Vec<String> {
+    serde_json::from_str(s).unwrap_or_default()
 }
 
 /// `$ROY_WORKSPACE_DIR`, else `~/.roy/workspace`. Resolved at startup by
@@ -653,7 +674,10 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![(1,), (2,), (3,), (4,), (5,), (6,)]);
+        assert_eq!(
+            versions,
+            vec![(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
+        );
     }
 
     fn meta_with(session_id: &str, created_by: &str, tags: &[(&str, &str)]) -> SessionMeta {
@@ -670,6 +694,7 @@ mod tests {
                 .map(|(k, v)| ((*k).into(), (*v).into()))
                 .collect(),
             created_at: 1_700_000_000,
+            connection_ids: Vec::new(),
         }
     }
 
@@ -692,6 +717,29 @@ mod tests {
         assert_eq!(retrieved.tags.len(), 2);
         assert_eq!(retrieved.tags.get("env"), Some(&"prod".into()));
         assert_eq!(retrieved.tags.get("team"), Some(&"platform".into()));
+    }
+
+    #[tokio::test]
+    async fn connection_ids_round_trip() {
+        let (store, uid) = fresh_store().await;
+        let meta = SessionMeta {
+            session_id: "sess-conn".into(),
+            project_id: None,
+            agent_id: None,
+            agent_name: None,
+            display_label: None,
+            created_by: uid,
+            team_id: None,
+            tags: Default::default(),
+            created_at: 0,
+            connection_ids: vec!["conn-1".into(), "conn-2".into()],
+        };
+        store.upsert_session_meta(&meta).await.unwrap();
+        let got = store.get_session_meta("sess-conn").await.unwrap().unwrap();
+        assert_eq!(
+            got.connection_ids,
+            vec!["conn-1".to_string(), "conn-2".to_string()]
+        );
     }
 
     #[tokio::test]
