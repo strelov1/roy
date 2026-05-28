@@ -52,6 +52,7 @@ pub async fn test_app() -> (axum::Router, SqlitePool, PathBuf) {
         commands_cache: std::sync::Arc::new(roy_management::commands::CommandsCache::default()),
         agents_cache: std::sync::Arc::new(roy_management::agents::AgentsCache::default()),
         connections: roy_management::connections::Store::new(pool.clone()),
+        catalog: std::sync::Arc::new(roy_management::provider_catalog::Catalog::empty()),
     };
     (router_for_tests(state), pool, workspace_dir)
 }
@@ -67,7 +68,7 @@ pub async fn test_app_with_mock_daemon() -> (
 ) {
     std::env::set_var("ROY_JWT_SECRET", TEST_JWT_SECRET);
     let dir = tempfile::tempdir().expect("tempdir");
-    let pool = roy_agents::open(&dir.path().join("agents.db"))
+    let pool = roy_management::db::open(&dir.path().join("agents.db"))
         .await
         .unwrap();
     roy_management::meta_store::MetaStore::apply_migrations(&pool)
@@ -85,7 +86,6 @@ pub async fn test_app_with_mock_daemon() -> (
     let daemon: std::sync::Arc<dyn roy_management::roy_client::DaemonClient> =
         std::sync::Arc::clone(&mock) as _;
     let state = AppState {
-        store: roy_agents::Store::new(pool.clone()),
         meta,
         daemon,
         socket_path: std::path::PathBuf::from("/tmp/fake.sock"),
@@ -94,7 +94,9 @@ pub async fn test_app_with_mock_daemon() -> (
         workspace_dir: workspace_dir.clone(),
         login_limiter: std::sync::Arc::new(roy_management::rate_limit::LoginLimiter::default()),
         commands_cache: std::sync::Arc::new(roy_management::commands::CommandsCache::default()),
+        agents_cache: std::sync::Arc::new(roy_management::agents::AgentsCache::default()),
         connections: roy_management::connections::Store::new(pool.clone()),
+        catalog: std::sync::Arc::new(roy_management::provider_catalog::Catalog::empty()),
     };
     (router_for_tests(state), pool, workspace_dir, mock)
 }
