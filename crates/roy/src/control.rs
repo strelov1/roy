@@ -47,9 +47,9 @@ pub enum ErrorCode {
     CancelFailed,
     /// `SetModel` failed (no such session, metadata write failed).
     SetModelFailed,
-    /// I/O failure reading/writing `agents.toml` (permission denied, disk
+    /// I/O failure reading/writing `harnesses.toml` (permission denied, disk
     /// full, etc.). Parse and validation errors do NOT use this code —
-    /// they're surfaced via `AgentsList { status: Invalid }`.
+    /// they're surfaced via `HarnessesList { status: Invalid }`.
     ConfigError,
     /// Forward-compat: a code emitted by a newer server.
     Other(String),
