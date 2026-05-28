@@ -234,7 +234,8 @@ impl MetaStore {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        row.map(Project::from_row).ok_or(MetaError::NotFound(id.into()))
+        row.map(Project::from_row)
+            .ok_or(MetaError::NotFound(id.into()))
     }
 
     pub async fn upsert_session_meta(&self, meta: &SessionMeta) -> Result<(), MetaError> {
