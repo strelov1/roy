@@ -67,6 +67,9 @@ pub struct SessionSpawnConfig {
     /// Inline persona prompt. Forwarded to `Transport::open`; later snapshotted
     /// into the session store and (for FirstTurn presets) injected as a first turn.
     pub system_prompt: Option<String>,
+    /// Extra environment variables forwarded to the agent process via
+    /// `Transport::open`. Callers that don't need custom env pass an empty map.
+    pub extra_env: std::collections::HashMap<String, String>,
 }
 
 /// Owned by `SessionManager` (or directly by callers in single-session use).
@@ -186,6 +189,7 @@ impl SessionEngine {
                 cfg.resume_cursor.as_deref(),
                 cwd.clone(),
                 cfg.system_prompt.as_deref(),
+                &cfg.extra_env,
             )
             .await?;
         let initial_cursor = handle.resume_cursor().or(cfg.resume_cursor.clone());

@@ -29,6 +29,7 @@ pub trait Transport: Send + Sync {
         resume_cursor: Option<&str>,
         cwd: PathBuf,
         system_prompt: Option<&str>,
+        extra_env: &std::collections::HashMap<String, String>,
     ) -> Result<Box<dyn Handle>>;
 }
 

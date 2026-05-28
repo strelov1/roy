@@ -288,6 +288,7 @@ impl Daemon {
                 permission,
                 resume,
                 system_prompt,
+                extra_env,
             } => {
                 let preset: AgentPreset = match agent.parse() {
                     Ok(p) => p,
@@ -304,6 +305,7 @@ impl Daemon {
                     permission,
                     resume,
                     system_prompt,
+                    extra_env,
                     event_tx,
                 )
                 .await
@@ -402,6 +404,7 @@ impl Daemon {
         permission: Option<String>,
         resume: Option<String>,
         system_prompt: Option<String>,
+        extra_env: std::collections::HashMap<String, String>,
         event_tx: &EventTx,
     ) {
         let _ = event_tx.send(ServerEvent::Spawning { agent: agent_label });
@@ -413,6 +416,7 @@ impl Daemon {
             resume_cursor: resume,
             fixed_session_id: None,
             system_prompt,
+            extra_env,
         };
         match self.manager.spawn(cfg, 256, 1024).await {
             Ok(engine) => {
@@ -562,6 +566,7 @@ impl Daemon {
                     resume_cursor: None,
                     fixed_session_id: None,
                     system_prompt,
+                    extra_env: Default::default(),
                 };
                 match self.manager.spawn(cfg, 256, 1024).await {
                     Ok(e) => e,
@@ -1203,6 +1208,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                extra_env: Default::default(),
             },
         )
         .await;
@@ -1328,6 +1334,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: Some("PERSONA".into()),
+                extra_env: Default::default(),
             },
         )
         .await;
@@ -1394,6 +1401,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                extra_env: Default::default(),
             },
         )
         .await;
@@ -1540,6 +1548,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                extra_env: Default::default(),
             },
         )
         .await;
@@ -1728,6 +1737,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                extra_env: Default::default(),
             },
         )
         .await;
@@ -1897,6 +1907,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                extra_env: Default::default(),
             },
         )
         .await;
@@ -1918,6 +1929,7 @@ mod tests {
                 permission: None,
                 resume: Some("prior-session-sid".into()),
                 system_prompt: None,
+                extra_env: Default::default(),
             },
         )
         .await;
@@ -1982,6 +1994,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                extra_env: Default::default(),
             },
         )
         .await;
@@ -2326,6 +2339,7 @@ mod tests {
                 permission: None,
                 resume: None,
                 system_prompt: None,
+                extra_env: Default::default(),
             },
         )
         .await;
