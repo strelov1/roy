@@ -521,6 +521,7 @@ pub fn router() -> Router<AppState> {
             "/connections/{id}",
             get(get_handler).put(update_handler).delete(delete_handler),
         )
+        .route("/providers", get(providers_handler))
 }
 
 async fn list_handler(
@@ -599,6 +600,13 @@ async fn delete_handler(
 ) -> Result<StatusCode, ApiError> {
     s.connections.delete(&uid, &id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn providers_handler(
+    Extension(_): Extension<AuthUser>,
+    State(s): State<AppState>,
+) -> Json<Vec<crate::provider_catalog::Provider>> {
+    Json(s.catalog.providers().to_vec())
 }
 
 #[cfg(test)]
