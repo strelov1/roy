@@ -626,23 +626,36 @@ fn builtin_agents_dir() -> std::path::PathBuf {
     std::path::PathBuf::from("/home/roy/.roy/agents")
 }
 
-// TODO(B5): add Extension<AuthUser>, fetch teams, filter by identity.
 async fn list_agent_files(
+    State(s): State<AppState>,
     axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
         crate::auth::AuthUser,
     >,
-    State(s): State<AppState>,
-) -> Json<Vec<crate::agents::AgentFile>> {
-    Json(
+) -> Result<Json<Vec<crate::agents::AgentFile>>, ApiError> {
+    // Team lookup is best-effort: a DB error here would degrade the response
+    // by hiding team-scope agents, not break the whole list. The session-
+    // create handler uses the same pattern (see B3 commit 8da46dc).
+    let teams = match roy_auth::TeamStore::new(s.pool.clone())
+        .list_for_user(&user_id)
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, user = %user_id, "team lookup failed; listing agents without team scope");
+            Vec::new()
+        }
+    };
+    let team_ids: Vec<String> = teams.into_iter().map(|t| t.id).collect();
+    Ok(Json(
         s.agents_cache
             .get(
                 &builtin_agents_dir(),
                 &s.workspace_dir,
                 &user_id,
-                &[],
+                &team_ids,
             )
             .await,
-    )
+    ))
 }
 
 fn meta_to_api(e: crate::meta_store::MetaError) -> ApiError {
@@ -1205,4 +1218,65 @@ mod tests {
 
     // list_agent_files_returns_files_from_home removed — replaced by a
     // scope-aware test in B5 (list_agent_files_returns_builtin_entries).
+
+    #[tokio::test]
+    async fn list_agent_files_returns_scoped_entries() {
+        let cookie = auth_cookie();
+        let (st, _uid) = test_state().await;
+
+        // Builtin dir override — avoids polluting the host /home/roy/.roy/agents
+        // in tests. We keep it under the workspace_dir so the temp dir cleanup
+        // also removes it.
+        let builtin = st.workspace_dir.join("builtin-agents");
+        std::fs::create_dir_all(&builtin).unwrap();
+        std::fs::write(
+            builtin.join("roy-coder.md"),
+            "---\nname: roy-coder\ndescription: helper\nengine: claude\n---\n\nbody",
+        )
+        .unwrap();
+        std::env::set_var("ROY_BUILTIN_AGENTS_DIR", &builtin);
+
+        // Personal dir for the "root" user (the one the JWT fixture issues).
+        let user_agents_dir = st
+            .workspace_dir
+            .join("users")
+            .join("root")
+            .join(".roy/agents");
+        std::fs::create_dir_all(&user_agents_dir).unwrap();
+        std::fs::write(
+            user_agents_dir.join("pirate.md"),
+            "---\nname: pirate\ndescription: arr\nengine: codex\n---\n\nbody",
+        )
+        .unwrap();
+
+        // Invalidate cache so a previous test run's warm entry doesn't mask the
+        // files we just wrote.
+        st.agents_cache.invalidate();
+
+        let app = router(st);
+        let resp = app
+            .oneshot(
+                Request::get("/agents")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let agents: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(agents.len(), 2, "expected builtin + personal, got {agents:?}");
+        let scopes: Vec<&str> = agents
+            .iter()
+            .map(|a| a["scope"]["kind"].as_str().unwrap())
+            .collect();
+        assert!(scopes.contains(&"builtin"), "missing builtin scope");
+        assert!(scopes.contains(&"personal"), "missing personal scope");
+
+        // Clean up the env override so other tests are not affected.
+        std::env::remove_var("ROY_BUILTIN_AGENTS_DIR");
+    }
 }
