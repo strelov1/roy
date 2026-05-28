@@ -12,6 +12,7 @@ pub mod db;
 pub mod http;
 pub mod meta_store;
 pub mod orphan_sweep;
+pub mod provider_catalog;
 pub mod rate_limit;
 pub mod roy_client;
 pub mod state;
