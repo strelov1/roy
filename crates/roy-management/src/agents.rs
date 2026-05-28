@@ -76,7 +76,17 @@ pub fn spawn_env_for(
     );
     let mut slugs: Vec<String> = Vec::with_capacity(teams.len());
     for t in teams {
-        let slug = slugify_team(&t.name);
+        // Slugify the team name. If the result is empty (e.g. the name is
+        // entirely non-ASCII like "Маркетинг"), fall back to a deterministic
+        // id-derived slug so the env-var key is always valid shell syntax.
+        let slug = {
+            let s = slugify_team(&t.name);
+            if s.is_empty() {
+                format!("team-{}", &t.id[..t.id.len().min(8)])
+            } else {
+                s
+            }
+        };
         let key = format!(
             "ROY_AGENTS_DIR_TEAM_{}",
             slug.to_ascii_uppercase().replace('-', "_"),
@@ -270,6 +280,23 @@ mod tests {
         assert_eq!(env["ROY_AGENTS_DIR_TEAM_GTM_TEAM"], "/ws/teams/tid-1/.roy/agents");
         assert_eq!(env["ROY_AGENTS_DIR_TEAM_ENG"], "/ws/teams/tid-2/.roy/agents");
         assert_eq!(env["ROY_TEAMS"], "gtm-team,eng");
+    }
+
+    #[test]
+    fn spawn_env_for_non_ascii_team_name_falls_back_to_id() {
+        use roy_auth::types::{Role, TeamMembership};
+        let teams = vec![TeamMembership {
+            id: "abcd1234-ef56-7890-1234-567890abcdef".into(),
+            name: "Маркетинг".into(),
+            role: Role::Owner,
+        }];
+        let env = spawn_env_for(std::path::Path::new("/ws"), "u", &teams);
+        // Non-ASCII name slugifies to empty, so we fall back to team-<id-prefix>.
+        assert_eq!(
+            env["ROY_AGENTS_DIR_TEAM_TEAM_ABCD1234"],
+            "/ws/teams/abcd1234-ef56-7890-1234-567890abcdef/.roy/agents",
+        );
+        assert_eq!(env["ROY_TEAMS"], "team-abcd1234");
     }
 
     #[test]
