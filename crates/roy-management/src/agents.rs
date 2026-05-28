@@ -57,6 +57,57 @@ pub fn roy_agents_dir(home: &Path) -> PathBuf {
     home.join(".roy/agents")
 }
 
+/// Build the per-user/per-team env-var map that the daemon sets on the
+/// spawned ACP child so chat-level skills can locate the right agents
+/// directory. `workspace_dir` is the daemon's `$ROY_WORKSPACE_DIR` root.
+pub fn spawn_env_for(
+    workspace_dir: &Path,
+    user_id: &str,
+    teams: &[roy_auth::types::TeamMembership],
+) -> std::collections::HashMap<String, String> {
+    let mut env = std::collections::HashMap::new();
+    let user_dir = workspace_dir
+        .join("users")
+        .join(user_id)
+        .join(".roy/agents");
+    env.insert(
+        "ROY_AGENTS_DIR_USER".to_string(),
+        user_dir.to_string_lossy().into_owned(),
+    );
+    let mut slugs: Vec<String> = Vec::with_capacity(teams.len());
+    for t in teams {
+        let slug = slugify_team(&t.name);
+        let key = format!(
+            "ROY_AGENTS_DIR_TEAM_{}",
+            slug.to_ascii_uppercase().replace('-', "_"),
+        );
+        let dir = workspace_dir
+            .join("teams")
+            .join(&t.id)
+            .join(".roy/agents");
+        env.insert(key, dir.to_string_lossy().into_owned());
+        slugs.push(slug);
+    }
+    if !slugs.is_empty() {
+        env.insert("ROY_TEAMS".to_string(), slugs.join(","));
+    }
+    env
+}
+
+fn slugify_team(name: &str) -> String {
+    let raw: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    raw.trim_matches('-').to_string()
+}
+
 pub async fn list_agents_from(home: &Path) -> Vec<AgentFile> {
     let dir = roy_agents_dir(home);
     let mut out = Vec::new();
@@ -187,6 +238,38 @@ mod tests {
         );
         let list = list_agents_from(home.path()).await;
         assert_eq!(list.len(), 0);
+    }
+
+    #[test]
+    fn spawn_env_for_personal_only() {
+        let env = spawn_env_for(
+            std::path::Path::new("/ws"),
+            "user-uuid",
+            &[],
+        );
+        assert_eq!(env["ROY_AGENTS_DIR_USER"], "/ws/users/user-uuid/.roy/agents");
+        assert!(!env.contains_key("ROY_TEAMS"));
+    }
+
+    #[test]
+    fn spawn_env_for_with_teams() {
+        use roy_auth::types::{Role, TeamMembership};
+        let teams = vec![
+            TeamMembership {
+                id: "tid-1".into(),
+                name: "GTM Team".into(),
+                role: Role::Member,
+            },
+            TeamMembership {
+                id: "tid-2".into(),
+                name: "Eng".into(),
+                role: Role::Owner,
+            },
+        ];
+        let env = spawn_env_for(std::path::Path::new("/ws"), "u", &teams);
+        assert_eq!(env["ROY_AGENTS_DIR_TEAM_GTM_TEAM"], "/ws/teams/tid-1/.roy/agents");
+        assert_eq!(env["ROY_AGENTS_DIR_TEAM_ENG"], "/ws/teams/tid-2/.roy/agents");
+        assert_eq!(env["ROY_TEAMS"], "gtm-team,eng");
     }
 
     #[test]

@@ -437,6 +437,19 @@ async fn create_session(
     std::fs::create_dir_all(&cwd)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir cwd: {e}")))?;
 
+    let teams = {
+        let team_store = roy_auth::TeamStore::new(s.pool.clone());
+        team_store.list_for_user(&user_id).await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, user = %user_id, "failed to list teams for env-var injection; spawning without team dirs");
+            Vec::new()
+        })
+    };
+    let extra_env = crate::agents::spawn_env_for(
+        &s.workspace_dir,
+        &user_id,
+        &teams,
+    );
+
     let sid = match s
         .daemon
         .spawn(crate::roy_client::SpawnRequest {
@@ -445,6 +458,7 @@ async fn create_session(
             model: req.model.clone(),
             permission: req.permission.clone(),
             system_prompt: req.system_prompt.clone(),
+            extra_env,
         })
         .await
     {
