@@ -39,7 +39,7 @@ fn fake_acp_transport_with_channel(
 
 fn test_cfg() -> SessionSpawnConfig {
     SessionSpawnConfig {
-        agent: roy::AgentPreset::Opencode,
+        harness: roy::Harness::Opencode,
         cwd: Some(std::env::current_dir().unwrap()),
         model: None,
         permission: None,

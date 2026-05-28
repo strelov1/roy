@@ -35,7 +35,7 @@ async fn non_member_cannot_create_team_session() {
     let body = serde_json::to_vec(&serde_json::json!({
         "scope": "team",
         "team_id": team.id,
-        "agent": "claude",
+        "harness": "claude",
     }))
     .unwrap();
 

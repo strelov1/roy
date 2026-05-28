@@ -25,7 +25,7 @@ pub trait Replier: DraftReplier + TypingReplier {
 
 #[derive(Debug, Clone)]
 pub struct OrchestratorConfig {
-    pub preset: String,
+    pub harness: String,
     pub cwd: Option<PathBuf>,
     pub turn_timeout: Duration,
     pub typing_interval: Duration,
@@ -34,7 +34,7 @@ pub struct OrchestratorConfig {
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
-            preset: "claude".into(),
+            harness: "claude".into(),
             cwd: None,
             turn_timeout: Duration::from_secs(600),
             typing_interval: Duration::from_secs(4),
@@ -106,7 +106,7 @@ where
 
     let session_id = match binder.get(chat_id).await {
         Some(sid) => conn.resume(&sid).await,
-        None => conn.spawn(&cfg.preset, cfg.cwd.clone()).await,
+        None => conn.spawn(&cfg.harness, cfg.cwd.clone()).await,
     };
     let session_id = match session_id {
         Ok(s) => s,
@@ -276,7 +276,7 @@ mod tests {
 
     #[async_trait]
     impl Conn for MockConn {
-        async fn spawn(&mut self, _preset: &str, _cwd: Option<PathBuf>) -> Result<String> {
+        async fn spawn(&mut self, _harness: &str, _cwd: Option<PathBuf>) -> Result<String> {
             match self.pop() {
                 Some(MockStep::SpawnReturns(s)) => Ok(s),
                 other => panic!("unexpected spawn call, next step was {other:?}"),
@@ -355,7 +355,7 @@ mod tests {
 
     fn cfg() -> OrchestratorConfig {
         OrchestratorConfig {
-            preset: "claude".into(),
+            harness: "claude".into(),
             cwd: None,
             turn_timeout: Duration::from_secs(60),
             typing_interval: Duration::from_secs(60),
@@ -505,7 +505,7 @@ mod tests {
         let replier = Arc::new(MockReplier::new());
 
         let cfg_with_short_timeout = OrchestratorConfig {
-            preset: "claude".into(),
+            harness: "claude".into(),
             cwd: None,
             turn_timeout: Duration::from_millis(100),
             typing_interval: Duration::from_secs(60),

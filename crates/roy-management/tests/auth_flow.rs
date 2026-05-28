@@ -123,7 +123,7 @@ async fn create_session_cwd_is_under_user_dir() {
 
     let body = serde_json::to_vec(&serde_json::json!({
         "scope": "personal",
-        "agent": "claude",
+        "harness": "claude",
         "agent_name": "hello"
     }))
     .unwrap();

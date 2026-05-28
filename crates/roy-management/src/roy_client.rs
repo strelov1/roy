@@ -15,7 +15,7 @@ use crate::meta_store::{MetaStore, SessionMeta};
 
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
-    pub agent: String,
+    pub harness: String,
     pub cwd: Option<PathBuf>,
     pub model: Option<String>,
     pub permission: Option<String>,
@@ -29,7 +29,7 @@ pub trait DaemonClient: Send + Sync {
     async fn close(&self, session_id: &str) -> Result<()>;
     async fn list(&self) -> Result<Vec<String>>;
     async fn list_archived(&self) -> Result<Vec<String>>;
-    async fn list_presets(&self) -> Result<serde_json::Value>;
+    async fn list_harnesses(&self) -> Result<serde_json::Value>;
 }
 
 pub struct UnixSocketDaemonClient {
@@ -52,10 +52,8 @@ impl UnixSocketDaemonClient {
 #[async_trait]
 impl DaemonClient for UnixSocketDaemonClient {
     async fn spawn(&self, req: SpawnRequest) -> Result<String> {
-        // NOTE: After Phase 3 lands, `ClientCommand::Spawn` will have `cwd`
-        // instead of `project_id`. This impl assumes that final shape.
         let cmd = ClientCommand::Spawn {
-            agent: req.agent,
+            harness: req.harness,
             cwd: req.cwd,
             model: req.model,
             permission: req.permission,
@@ -109,16 +107,16 @@ impl DaemonClient for UnixSocketDaemonClient {
         list_inner(&self.socket, ClientCommand::ListArchived).await
     }
 
-    async fn list_presets(&self) -> Result<serde_json::Value> {
-        let mut lines = self.connect_and_send(&ClientCommand::ListAgents).await?;
+    async fn list_harnesses(&self) -> Result<serde_json::Value> {
+        let mut lines = self.connect_and_send(&ClientCommand::ListHarnesses).await?;
         loop {
             let raw = lines
                 .next_line()
                 .await?
-                .ok_or_else(|| anyhow!("daemon hung up before AgentsList"))?;
+                .ok_or_else(|| anyhow!("daemon hung up before HarnessesList"))?;
             let trimmed = raw.trim();
             match serde_json::from_str::<ServerEvent>(trimmed)? {
-                ServerEvent::AgentsList { .. } => return Ok(serde_json::from_str(trimmed)?),
+                ServerEvent::HarnessesList { .. } => return Ok(serde_json::from_str(trimmed)?),
                 ServerEvent::Error { code, message, .. } => {
                     return Err(anyhow!("daemon error [{code}]: {message}"))
                 }
@@ -230,7 +228,7 @@ pub mod mock {
         async fn list_archived(&self) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_presets(&self) -> Result<serde_json::Value> {
+        async fn list_harnesses(&self) -> Result<serde_json::Value> {
             Ok(serde_json::json!({}))
         }
     }
@@ -246,7 +244,7 @@ pub mod mock {
 pub async fn spawn(
     socket: &Path,
     meta: &MetaStore,
-    preset: &str,
+    harness: &str,
     model: Option<String>,
     system_prompt: Option<String>,
     tags: BTreeMap<String, String>,
@@ -254,7 +252,7 @@ pub async fn spawn(
 ) -> Result<String> {
     let session = UnixSocketDaemonClient::new(socket.to_path_buf())
         .spawn(SpawnRequest {
-            agent: preset.into(),
+            harness: harness.into(),
             cwd: None,
             model,
             permission: None,
@@ -285,8 +283,8 @@ pub async fn spawn(
     Ok(session)
 }
 
-pub async fn list_presets(socket: &Path) -> Result<serde_json::Value> {
+pub async fn list_harnesses(socket: &Path) -> Result<serde_json::Value> {
     UnixSocketDaemonClient::new(socket.to_path_buf())
-        .list_presets()
+        .list_harnesses()
         .await
 }

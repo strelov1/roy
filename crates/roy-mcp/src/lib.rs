@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
-use roy::{AgentPreset, ClientCommand, ServerEvent, TurnEvent};
+use roy::{ClientCommand, Harness, ServerEvent, TurnEvent};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -106,7 +106,7 @@ fn error_response(id: Value, code: i32, message: &str) -> Value {
 }
 
 fn tools_list() -> Value {
-    let agent_enum: Vec<&'static str> = AgentPreset::ALL.iter().map(|p| p.as_str()).collect();
+    let harness_enum: Vec<&'static str> = Harness::ALL.iter().map(|h| h.as_str()).collect();
     json!({
         "tools": [
             {
@@ -121,11 +121,11 @@ fn tools_list() -> Value {
             },
             {
                 "name": "roy_run",
-                "description": "Spawn an agent session, send one task, wait for the turn to finish, and return the agent's concatenated text plus the stop reason. Suitable for short, synchronous tasks.",
+                "description": "Spawn a session against a harness, send one task, wait for the turn to finish, and return the harness's concatenated text plus the stop reason. Suitable for short, synchronous tasks.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent": {"type": "string", "enum": agent_enum},
+                        "harness": {"type": "string", "enum": harness_enum},
                         "task": {"type": "string"},
                         "cwd": {"type": "string", "description": "Filesystem path to run the agent in. Omit to create an orphan session in the daemon's workspace."},
                         "model": {"type": "string"},
@@ -133,17 +133,17 @@ fn tools_list() -> Value {
                         "resume": {"type": "string", "description": "Agent-side resume cursor (e.g. prior ACP sessionId)."},
                         "system_prompt": {"type": "string", "description": "Inline system/persona prompt injected at session start."}
                     },
-                    "required": ["agent", "task"],
+                    "required": ["harness", "task"],
                     "additionalProperties": false
                 }
             },
             {
                 "name": "roy_run_detached",
-                "description": "Spawn an agent session, queue a task, and return immediately with the new session id. The session keeps running on the daemon — use roy_read_session to poll its progress and roy_close when done. Use this for long-running background tasks.",
+                "description": "Spawn a session against a harness, queue a task, and return immediately with the new session id. The session keeps running on the daemon — use roy_read_session to poll its progress and roy_close when done. Use this for long-running background tasks.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent": {"type": "string", "enum": agent_enum},
+                        "harness": {"type": "string", "enum": harness_enum},
                         "task": {"type": "string"},
                         "cwd": {"type": "string", "description": "Filesystem path to run the agent in. Omit to create an orphan session in the daemon's workspace."},
                         "model": {"type": "string"},
@@ -151,7 +151,7 @@ fn tools_list() -> Value {
                         "resume": {"type": "string"},
                         "system_prompt": {"type": "string", "description": "Inline system/persona prompt injected at session start."}
                     },
-                    "required": ["agent", "task"],
+                    "required": ["harness", "task"],
                     "additionalProperties": false
                 }
             },
@@ -195,11 +195,11 @@ fn tools_list() -> Value {
             },
             {
                 "name": "roy_fire",
-                "description": "One-shot: Spawn (or Resume) a session, send a prompt, wait for the terminal Result. Returns assistant_text + stop_reason. Pass `resume` to reuse an existing session id, otherwise pass `agent`. Pass `parent` to record the caller's session id on the fire as the reserved tag `roy-scheduler:initiated_by_session`.",
+                "description": "One-shot: Spawn (or Resume) a session, send a prompt, wait for the terminal Result. Returns assistant_text + stop_reason. Pass `resume` to reuse an existing session id, otherwise pass `harness`. Pass `parent` to record the caller's session id on the fire as the reserved tag `roy-scheduler:initiated_by_session`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent": {"type": "string", "enum": agent_enum},
+                        "harness": {"type": "string", "enum": harness_enum},
                         "resume": {"type": "string", "description": "Existing roy session id to resume into."},
                         "prompt": {"type": "string"},
                         "tags": {"type": "object", "additionalProperties": {"type": "string"}},
@@ -211,8 +211,8 @@ fn tools_list() -> Value {
                 }
             },
             {
-                "name": "roy_list_engines",
-                "description": "List engines (preset+model catalog) configured in ~/.config/roy/agents.toml with their available models. Use to discover what `agent` string and `model` id values are valid for roy_run.",
+                "name": "roy_list_harnesses",
+                "description": "List harnesses (the ACP-adapter binaries claude/gemini/opencode/codex/pi) configured in ~/.config/roy/harnesses.toml with their available models. Use to discover what `harness` string and `model` id values are valid for roy_run.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
             }
         ]
@@ -233,7 +233,7 @@ async fn tools_call(id: Value, req: &Value, socket_path: &Path) -> Value {
         "roy_close" => tool_close(socket_path, args).await,
         "roy_wait_for_result" => tool_wait_for_result(socket_path, args).await,
         "roy_fire" => tool_fire(socket_path, args).await,
-        "roy_list_engines" => tool_list_engines(socket_path).await,
+        "roy_list_harnesses" => tool_list_harnesses(socket_path).await,
         other => Err(anyhow!("unknown tool: {other}")),
     };
 
@@ -289,7 +289,7 @@ async fn send_cmd(
 /// queue a `Spawn` with the same fields; only the post-spawn behavior differs.
 #[derive(Debug)]
 struct SpawnArgs {
-    agent: String,
+    harness: String,
     task: String,
     cwd: Option<PathBuf>,
     model: Option<String>,
@@ -307,7 +307,7 @@ fn parse_spawn_args(args: &Value) -> anyhow::Result<SpawnArgs> {
     };
     let optional = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
     Ok(SpawnArgs {
-        agent: required("agent")?,
+        harness: required("harness")?,
         task: required("task")?,
         cwd: optional("cwd").map(PathBuf::from),
         model: optional("model"),
@@ -433,20 +433,20 @@ async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing 'prompt'"))?
         .to_string();
-    let agent = args.get("agent").and_then(Value::as_str);
+    let harness = args.get("harness").and_then(Value::as_str);
     let resume = args.get("resume").and_then(Value::as_str);
     let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64);
 
-    let target = match (agent, resume) {
-        (Some(a), None) => FireTarget::Spawn {
-            preset: a.to_string(),
+    let target = match (harness, resume) {
+        (Some(h), None) => FireTarget::Spawn {
+            harness: h.to_string(),
             system_prompt: None,
         },
         (None, Some(sid)) => FireTarget::Resume {
             session_id: sid.to_string(),
         },
-        (Some(_), Some(_)) => return Err(anyhow!("`agent` and `resume` are mutually exclusive")),
-        (None, None) => return Err(anyhow!("provide either `agent` or `resume`")),
+        (Some(_), Some(_)) => return Err(anyhow!("`harness` and `resume` are mutually exclusive")),
+        (None, None) => return Err(anyhow!("provide either `harness` or `resume`")),
     };
 
     let mut tags = BTreeMap::new();
@@ -529,7 +529,7 @@ async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
 
 async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     let SpawnArgs {
-        agent,
+        harness,
         task,
         cwd,
         model,
@@ -544,7 +544,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     send_cmd(
         &mut writer,
         &ClientCommand::Spawn {
-            agent,
+            harness,
             cwd,
             model,
             permission,
@@ -644,7 +644,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
 
 async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<String> {
     let SpawnArgs {
-        agent,
+        harness,
         task,
         cwd,
         model,
@@ -658,7 +658,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
     send_cmd(
         &mut writer,
         &ClientCommand::Spawn {
-            agent,
+            harness,
             cwd,
             model,
             permission,
@@ -814,16 +814,16 @@ async fn tool_read_session(socket_path: &Path, args: Value) -> anyhow::Result<St
     }
 }
 
-async fn tool_list_engines(socket_path: &Path) -> anyhow::Result<String> {
+async fn tool_list_harnesses(socket_path: &Path) -> anyhow::Result<String> {
     let (mut lines, mut writer) = open_daemon(socket_path).await?;
-    send_cmd(&mut writer, &ClientCommand::ListAgents).await?;
+    send_cmd(&mut writer, &ClientCommand::ListHarnesses).await?;
     match next_event(&mut lines).await? {
-        ServerEvent::AgentsList {
-            agents,
+        ServerEvent::HarnessesList {
+            harnesses,
             config_path,
             status,
         } => Ok(serde_json::to_string(&json!({
-            "agents": agents,
+            "harnesses": harnesses,
             "config_path": config_path,
             "status": status,
         }))?),
@@ -867,7 +867,7 @@ mod tests {
                 "roy_close",
                 "roy_wait_for_result",
                 "roy_fire",
-                "roy_list_engines",
+                "roy_list_harnesses",
             ]
         );
     }
@@ -902,7 +902,7 @@ mod tests {
     #[test]
     fn parse_spawn_args_extracts_required_and_optional_fields() {
         let parsed = parse_spawn_args(&json!({
-            "agent": "opencode",
+            "harness": "opencode",
             "task": "do it",
             "cwd": "/tmp/proj",
             "model": "gpt-x",
@@ -910,7 +910,7 @@ mod tests {
             "resume": "sid-1"
         }))
         .unwrap();
-        assert_eq!(parsed.agent, "opencode");
+        assert_eq!(parsed.harness, "opencode");
         assert_eq!(parsed.task, "do it");
         assert_eq!(parsed.cwd.as_deref(), Some(Path::new("/tmp/proj")));
         assert_eq!(parsed.model.as_deref(), Some("gpt-x"));
@@ -921,11 +921,11 @@ mod tests {
     #[test]
     fn parse_spawn_args_omits_missing_optional_fields() {
         let parsed = parse_spawn_args(&json!({
-            "agent": "gemini",
+            "harness": "gemini",
             "task": "go"
         }))
         .unwrap();
-        assert_eq!(parsed.agent, "gemini");
+        assert_eq!(parsed.harness, "gemini");
         assert_eq!(parsed.task, "go");
         assert!(parsed.cwd.is_none());
         assert!(parsed.model.is_none());
@@ -936,9 +936,9 @@ mod tests {
     #[test]
     fn parse_spawn_args_errors_when_required_fields_missing() {
         let err = parse_spawn_args(&json!({"task": "x"})).unwrap_err();
-        assert!(err.to_string().contains("'agent'"));
+        assert!(err.to_string().contains("'harness'"));
 
-        let err = parse_spawn_args(&json!({"agent": "gemini"})).unwrap_err();
+        let err = parse_spawn_args(&json!({"harness": "gemini"})).unwrap_err();
         assert!(err.to_string().contains("'task'"));
     }
 

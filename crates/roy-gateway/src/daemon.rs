@@ -19,7 +19,7 @@ use tokio::net::UnixStream;
 /// because it opened and closed its own connection inside the daemon call.
 #[async_trait]
 pub trait Conn: Send {
-    async fn spawn(&mut self, preset: &str, cwd: Option<PathBuf>) -> Result<String>;
+    async fn spawn(&mut self, harness: &str, cwd: Option<PathBuf>) -> Result<String>;
 
     async fn resume(&mut self, session_id: &str) -> Result<String>;
 
@@ -104,9 +104,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TurnConn<S> {
 
 #[async_trait]
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Conn for TurnConn<S> {
-    async fn spawn(&mut self, preset: &str, cwd: Option<PathBuf>) -> Result<String> {
+    async fn spawn(&mut self, harness: &str, cwd: Option<PathBuf>) -> Result<String> {
         self.send_cmd(&ClientCommand::Spawn {
-            agent: preset.into(),
+            harness: harness.into(),
             cwd,
             model: None,
             permission: None,
@@ -254,8 +254,8 @@ mod tests {
             server,
             vec![(
                 Box::new(|cmd| match cmd {
-                    ClientCommand::Spawn { agent, cwd, .. } => {
-                        assert_eq!(agent, "claude");
+                    ClientCommand::Spawn { harness, cwd, .. } => {
+                        assert_eq!(harness, "claude");
                         assert!(cwd.is_none());
                     }
                     other => panic!("expected Spawn, got {other:?}"),

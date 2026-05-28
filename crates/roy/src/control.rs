@@ -122,26 +122,26 @@ impl<'de> Deserialize<'de> for ErrorCode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ClientCommand {
-    /// Open a new session. `agent` is the preset name (claude, gemini,
-    /// opencode, codex). `resume` re-attaches an agent-side session via the
-    /// transport's resume_cursor.
+    /// Open a new session. `harness` is the harness name (claude, gemini,
+    /// opencode, codex, pi). `resume` re-attaches an agent-side session via
+    /// the transport's resume_cursor.
     ///
     /// `cwd: Some(path)` — spawn inside the given directory.
     /// `cwd: None` — orphan session; daemon allocates
     /// `<workspace>/<session_id>/` as the cwd.
     Spawn {
-        agent: String,
+        harness: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<PathBuf>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        /// `allow` / `deny`. Overrides the preset's default `PermissionPolicy`.
+        /// `allow` / `deny`. Overrides the harness's default `PermissionPolicy`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permission: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume: Option<String>,
         /// Inline system/persona prompt. The daemon injects it (ACP
-        /// `_meta.systemPrompt` where the preset supports it, else as a first
+        /// `_meta.systemPrompt` where the harness supports it, else as a first
         /// journaled turn) and snapshots it into `SessionMetadata`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
@@ -236,17 +236,17 @@ pub enum ClientCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_session: Option<String>,
     },
-    /// Read `~/.config/roy/agents.toml` (creating a sample if missing) and
-    /// return the configured agents + models. Pull-only: clients call this
+    /// Read `~/.config/roy/harnesses.toml` (creating a sample if missing) and
+    /// return the configured harnesses + models. Pull-only: clients call this
     /// whenever they want fresh data.
-    ListAgents,
+    ListHarnesses,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FireTarget {
     Spawn {
-        preset: String,
+        harness: String,
         /// Inline system/persona prompt (see `ClientCommand::Spawn`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
@@ -272,17 +272,17 @@ pub enum ServerEvent {
     /// process launch + ACP `initialize` + `session/new` round-trip. The
     /// session id is not yet known at this point — clients correlate by
     /// request order on their own connection.
-    Spawning { agent: String },
+    Spawning { harness: String },
     /// Response to `Attach`. `seq_at_attach` is the next seq after the replay.
-    /// `agent` is the preset name the session was spawned with (e.g. `claude`,
+    /// `harness` is the harness name the session was spawned with (e.g. `claude`,
     /// `gemini`) — read from the live engine or the on-disk metadata.
     /// `model` is the LLM label the session was spawned with (e.g.
     /// `claude-opus-4-7`) — recorded for display only, the daemon does not
-    /// currently steer the agent with it.
+    /// currently steer the harness with it.
     Attached {
         session: String,
         seq_at_attach: Seq,
-        agent: String,
+        harness: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
@@ -369,13 +369,13 @@ pub enum ServerEvent {
         code: ErrorCode,
         message: String,
     },
-    /// Response to `ListAgents`. `agents` is empty when `status` is `Created`
-    /// or `Invalid`; `config_path` is always the resolved path even on errors
-    /// so the UI can show it.
-    AgentsList {
-        agents: Vec<crate::agents_config::AgentInfo>,
+    /// Response to `ListHarnesses`. `harnesses` is empty when `status` is
+    /// `Created` or `Invalid`; `config_path` is always the resolved path even
+    /// on errors so the UI can show it.
+    HarnessesList {
+        harnesses: Vec<crate::harnesses_config::HarnessInfo>,
         config_path: std::path::PathBuf,
-        status: crate::agents_config::AgentsConfigStatus,
+        status: crate::harnesses_config::HarnessesConfigStatus,
     },
 }
 
@@ -383,7 +383,7 @@ pub enum ServerEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session: String,
-    pub agent: String,
+    pub harness: String,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn spawn_command_roundtrips() {
         roundtrip(&ClientCommand::Spawn {
-            agent: "opencode".into(),
+            harness: "opencode".into(),
             cwd: Some(PathBuf::from("/tmp/proj")),
             model: None,
             permission: Some("allow".into()),
@@ -419,7 +419,7 @@ mod tests {
         });
         // Orphan spawn (no cwd)
         roundtrip(&ClientCommand::Spawn {
-            agent: "claude".into(),
+            harness: "claude".into(),
             cwd: None,
             model: None,
             permission: None,
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn spawn_with_extra_env_roundtrips() {
         roundtrip(&ClientCommand::Spawn {
-            agent: "claude".to_string(),
+            harness: "claude".to_string(),
             cwd: None,
             model: None,
             permission: None,
@@ -546,10 +546,10 @@ mod tests {
     #[test]
     fn spawning_event_roundtrips() {
         roundtrip(&ServerEvent::Spawning {
-            agent: "claude".into(),
+            harness: "claude".into(),
         });
         roundtrip(&ServerEvent::Spawning {
-            agent: "opencode".into(),
+            harness: "opencode".into(),
         });
     }
 
@@ -563,10 +563,10 @@ mod tests {
     #[test]
     fn spawning_event_wire_format() {
         let json = serde_json::to_string(&ServerEvent::Spawning {
-            agent: "claude".into(),
+            harness: "claude".into(),
         })
         .unwrap();
-        assert_eq!(json, r#"{"kind":"spawning","agent":"claude"}"#);
+        assert_eq!(json, r#"{"kind":"spawning","harness":"claude"}"#);
     }
 
     #[test]
@@ -579,11 +579,11 @@ mod tests {
     }
 
     #[test]
-    fn list_agents_roundtrips() {
-        let cmd = ClientCommand::ListAgents;
+    fn list_harnesses_roundtrips() {
+        let cmd = ClientCommand::ListHarnesses;
         let s = serde_json::to_string(&cmd).unwrap();
         let back: ClientCommand = serde_json::from_str(&s).unwrap();
-        assert!(matches!(back, ClientCommand::ListAgents));
+        assert!(matches!(back, ClientCommand::ListHarnesses));
     }
 
     #[test]
@@ -619,33 +619,36 @@ mod tests {
     }
 
     #[test]
-    fn agents_list_event_roundtrips() {
-        use crate::agents_config::{AgentInfo, AgentPreset, AgentsConfigStatus, ModelInfo};
-        let ev = ServerEvent::AgentsList {
-            agents: vec![AgentInfo {
-                preset: AgentPreset::Claude,
+    fn harnesses_list_event_roundtrips() {
+        use crate::harnesses_config::{Harness, HarnessInfo, HarnessesConfigStatus, ModelInfo};
+        let ev = ServerEvent::HarnessesList {
+            harnesses: vec![HarnessInfo {
+                name: Harness::Claude,
                 models: vec![ModelInfo {
                     id: "claude-sonnet-4-6".into(),
                     label: "Claude Sonnet 4.6".into(),
                     default: true,
                 }],
             }],
-            config_path: "/tmp/agents.toml".into(),
-            status: AgentsConfigStatus::Ok,
+            config_path: "/tmp/harnesses.toml".into(),
+            status: HarnessesConfigStatus::Ok,
         };
         let s = serde_json::to_string(&ev).unwrap();
         let back: ServerEvent = serde_json::from_str(&s).unwrap();
-        let ServerEvent::AgentsList { agents, status, .. } = back else {
+        let ServerEvent::HarnessesList {
+            harnesses, status, ..
+        } = back
+        else {
             panic!()
         };
-        assert_eq!(agents.len(), 1);
-        assert!(matches!(status, AgentsConfigStatus::Ok));
+        assert_eq!(harnesses.len(), 1);
+        assert!(matches!(status, HarnessesConfigStatus::Ok));
     }
 
     #[test]
     fn spawn_with_system_prompt_roundtrips() {
         roundtrip(&ClientCommand::Spawn {
-            agent: "claude".into(),
+            harness: "claude".into(),
             cwd: None,
             model: None,
             permission: None,
@@ -658,7 +661,7 @@ mod tests {
     #[test]
     fn spawn_omits_system_prompt_when_none() {
         let s = serde_json::to_string(&ClientCommand::Spawn {
-            agent: "claude".into(),
+            harness: "claude".into(),
             cwd: None,
             model: None,
             permission: None,
@@ -673,7 +676,7 @@ mod tests {
     #[test]
     fn fire_target_spawn_with_system_prompt_roundtrips() {
         roundtrip(&FireTarget::Spawn {
-            preset: "claude".into(),
+            harness: "claude".into(),
             system_prompt: Some("persona".into()),
         });
     }

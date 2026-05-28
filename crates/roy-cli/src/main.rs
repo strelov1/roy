@@ -10,10 +10,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context};
 use clap::{Args, Parser, Subcommand};
 #[cfg(test)]
-use roy::AgentPreset;
+use roy::Harness;
 use roy::{
     daemon::{Daemon, DefaultTransportFactory},
-    AgentsConfigStatus, ClientCommand, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
+    ClientCommand, HarnessesConfigStatus, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -81,10 +81,10 @@ enum Cmd {
     Management(roy_management::Args),
     /// Start the inbound event bus (axum webhook server + dispatcher).
     Inbound(roy_inbound::cli::Args),
-    /// Inspect configured engines at `~/.config/roy/agents.toml`.
-    Engines {
+    /// Inspect configured harnesses at `~/.config/roy/harnesses.toml`.
+    Harnesses {
         #[command(subcommand)]
-        cmd: EnginesCmd,
+        cmd: HarnessesCmd,
     },
     /// Manage projects (HTTP-routed through roy-management).
     Projects {
@@ -178,9 +178,9 @@ struct ServeArgs {
 #[derive(clap::Args)]
 struct RunArgs {
     /// claude | gemini | opencode | codex | pi
-    agent: String,
+    harness: String,
     task: String,
-    /// Working directory to spawn the agent in. Omit to create an orphan
+    /// Working directory to spawn the harness in. Omit to create an orphan
     /// session in the daemon's workspace.
     #[arg(long)]
     cwd: Option<PathBuf>,
@@ -275,12 +275,12 @@ struct WaitArgs {
 
 #[derive(clap::Args)]
 struct FireArgs {
-    /// The prompt to send to the agent.
+    /// The prompt to send to the harness.
     prompt: String,
-    /// Preset to spawn: claude | gemini | opencode | codex | pi. Required
+    /// Harness to spawn: claude | gemini | opencode | codex | pi. Required
     /// when `--resume` is absent.
     #[arg(long, conflicts_with = "resume", required_unless_present = "resume")]
-    agent: Option<String>,
+    harness: Option<String>,
     /// Resume an existing session id instead of spawning a new one.
     #[arg(long)]
     resume: Option<String>,
@@ -309,17 +309,17 @@ struct MgmtBaseArgs {
 }
 
 #[derive(Subcommand)]
-enum EnginesCmd {
-    /// List configured engines (and optionally their models).
-    List(EnginesListArgs),
+enum HarnessesCmd {
+    /// List configured harnesses (and optionally their models).
+    List(HarnessesListArgs),
 }
 
 #[derive(clap::Args)]
-struct EnginesListArgs {
-    /// One row per (engine, model) instead of summary per engine.
+struct HarnessesListArgs {
+    /// One row per (harness, model) instead of summary per harness.
     #[arg(long)]
     models: bool,
-    /// Machine-readable JSON output — the full EnginesList event.
+    /// Machine-readable JSON output — the full HarnessesList event.
     #[arg(long)]
     json: bool,
 }
@@ -372,7 +372,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Inbound(args) => roy_inbound::cli::run(args)
             .await
             .map(|()| ExitCode::SUCCESS),
-        Cmd::Engines { cmd } => cmd_engines(cmd).await,
+        Cmd::Harnesses { cmd } => cmd_harnesses(cmd).await,
         Cmd::Projects { cmd } => cmd_projects(cmd).await,
         Cmd::SetTags(args) => cmd_set_tags(args).await,
         Cmd::Auth(args) => cmd_auth(args).await,
@@ -568,7 +568,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     // does not currently surface it).
     let (session, resume_cursor) = if needs_mgmt {
         let req = crate::management::CreateSessionReq {
-            agent: args.agent.clone(),
+            harness: args.harness.clone(),
             project_id: args.project.clone(),
             cwd: args.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
             model: args.model.clone(),
@@ -594,7 +594,7 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         send_cmd(
             &mut writer,
             &ClientCommand::Spawn {
-                agent: args.agent.clone(),
+                harness: args.harness.clone(),
                 cwd: args.cwd.clone(),
                 model: args.model.clone(),
                 permission: args.permission.clone(),
@@ -606,11 +606,11 @@ async fn cmd_run(args: RunArgs) -> anyhow::Result<ExitCode> {
         .await?;
         loop {
             match read_event(&mut events).await? {
-                ServerEvent::Spawning { agent } => {
+                ServerEvent::Spawning { harness } => {
                     if let Some(cwd) = args.cwd.as_ref() {
-                        eprintln!("roy run: spawning {agent} in {}…", cwd.display());
+                        eprintln!("roy run: spawning {harness} in {}…", cwd.display());
                     } else {
-                        eprintln!("roy run: spawning {agent}…");
+                        eprintln!("roy run: spawning {harness}…");
                     }
                 }
                 ServerEvent::Spawned {
@@ -1007,14 +1007,14 @@ async fn cmd_wait(args: WaitArgs) -> anyhow::Result<ExitCode> {
 async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
     use roy::FireTarget;
 
-    let target = match (args.agent, args.resume) {
-        (Some(agent), None) => FireTarget::Spawn {
-            preset: agent,
+    let target = match (args.harness, args.resume) {
+        (Some(harness), None) => FireTarget::Spawn {
+            harness,
             system_prompt: None,
         },
         (None, Some(session_id)) => FireTarget::Resume { session_id },
-        (Some(_), Some(_)) => anyhow::bail!("--agent conflicts with --resume"),
-        (None, None) => anyhow::bail!("provide either --agent or --resume"),
+        (Some(_), Some(_)) => anyhow::bail!("--harness conflicts with --resume"),
+        (None, None) => anyhow::bail!("provide either --harness or --resume"),
     };
 
     let tags: BTreeMap<String, String> = args.tags.into_iter().collect();
@@ -1091,29 +1091,29 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
     }
 }
 
-async fn cmd_engines(cmd: EnginesCmd) -> anyhow::Result<ExitCode> {
+async fn cmd_harnesses(cmd: HarnessesCmd) -> anyhow::Result<ExitCode> {
     match cmd {
-        EnginesCmd::List(args) => cmd_engines_list(args).await,
+        HarnessesCmd::List(args) => cmd_harnesses_list(args).await,
     }
 }
 
-async fn cmd_engines_list(args: EnginesListArgs) -> anyhow::Result<ExitCode> {
+async fn cmd_harnesses_list(args: HarnessesListArgs) -> anyhow::Result<ExitCode> {
     let (mut writer, mut events) = open_daemon().await?;
 
-    send_cmd(&mut writer, &ClientCommand::ListAgents).await?;
+    send_cmd(&mut writer, &ClientCommand::ListHarnesses).await?;
     let ev = read_event(&mut events).await?;
-    let ServerEvent::AgentsList {
-        agents,
+    let ServerEvent::HarnessesList {
+        harnesses,
         config_path,
         status,
     } = ev
     else {
-        anyhow::bail!("unexpected response to ListAgents: {ev:?}");
+        anyhow::bail!("unexpected response to ListHarnesses: {ev:?}");
     };
 
     if args.json {
         let payload = serde_json::json!({
-            "agents": agents,
+            "harnesses": harnesses,
             "config_path": config_path,
             "status": status,
         });
@@ -1122,29 +1122,29 @@ async fn cmd_engines_list(args: EnginesListArgs) -> anyhow::Result<ExitCode> {
     }
 
     match &status {
-        AgentsConfigStatus::Created => {
+        HarnessesConfigStatus::Created => {
             eprintln!("created sample at {}", config_path.display());
         }
-        AgentsConfigStatus::Invalid { reason } => {
+        HarnessesConfigStatus::Invalid { reason } => {
             eprintln!("config invalid ({}): {reason}", config_path.display());
             return Ok(ExitCode::from(1));
         }
-        AgentsConfigStatus::Ok if agents.is_empty() => {
-            eprintln!("no engines configured in {}", config_path.display());
+        HarnessesConfigStatus::Ok if harnesses.is_empty() => {
+            eprintln!("no harnesses configured in {}", config_path.display());
         }
-        AgentsConfigStatus::Ok => {}
+        HarnessesConfigStatus::Ok => {}
     }
 
     if args.models {
-        for a in &agents {
-            for m in &a.models {
+        for h in &harnesses {
+            for m in &h.models {
                 let mark = if m.default { "*default" } else { "" };
-                println!("{}\t{}\t{}\t{}", a.preset, m.id, m.label, mark);
+                println!("{}\t{}\t{}\t{}", h.name, m.id, m.label, mark);
             }
         }
     } else {
-        for a in &agents {
-            let default = a
+        for h in &harnesses {
+            let default = h
                 .models
                 .iter()
                 .find(|m| m.default)
@@ -1152,8 +1152,8 @@ async fn cmd_engines_list(args: EnginesListArgs) -> anyhow::Result<ExitCode> {
                 .unwrap_or("-");
             println!(
                 "{}\t{} models\t(default: {})",
-                a.preset,
-                a.models.len(),
+                h.name,
+                h.models.len(),
                 default
             );
         }
@@ -1175,10 +1175,10 @@ pub(crate) fn parse_tag_kv(s: &str) -> anyhow::Result<(String, String)> {
 
 fn validate_flags(args: &RunArgs) -> anyhow::Result<()> {
     // Only claude-code-acp accepts a per-spawn `--model` switch over ACP
-    // (via its slash-command). For other presets the model is fixed by the
-    // CLI's own config or agents.toml, so a runtime `--model` would be
+    // (via its slash-command). For other harnesses the model is fixed by the
+    // CLI's own config or harnesses.toml, so a runtime `--model` would be
     // silently ignored — bail loudly instead.
-    if args.model.is_some() && args.agent != "claude" {
+    if args.model.is_some() && args.harness != "claude" {
         anyhow::bail!("--model only applies to claude");
     }
     if let Some(p) = args.permission.as_deref() {
@@ -1244,9 +1244,9 @@ mod tests {
 
     /// Build a `RunArgs` with sensible defaults; only override what each test
     /// case needs to vary.
-    fn args(agent: &str) -> RunArgs {
+    fn args(harness: &str) -> RunArgs {
         RunArgs {
-            agent: agent.into(),
+            harness: harness.into(),
             task: "noop".into(),
             cwd: None,
             model: None,
@@ -1263,26 +1263,26 @@ mod tests {
     }
 
     #[test]
-    fn validate_flags_accepts_acp_agents_without_optional_args() {
-        for preset in AgentPreset::ALL {
-            let agent = preset.as_str();
-            validate_flags(&args(agent)).unwrap_or_else(|e| panic!("{agent}: {e}"));
+    fn validate_flags_accepts_acp_harnesses_without_optional_args() {
+        for h in Harness::ALL {
+            let name = h.as_str();
+            validate_flags(&args(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
     }
 
     #[test]
     fn validate_flags_rejects_model_on_non_claude() {
-        for preset in AgentPreset::ALL {
-            if *preset == AgentPreset::Claude {
+        for h in Harness::ALL {
+            if *h == Harness::Claude {
                 continue;
             }
-            let agent = preset.as_str();
-            let mut a = args(agent);
+            let name = h.as_str();
+            let mut a = args(name);
             a.model = Some("gpt-x".into());
             let err = validate_flags(&a).unwrap_err().to_string();
             assert!(
                 err.contains("--model"),
-                "{agent}: unexpected error message: {err}"
+                "{name}: unexpected error message: {err}"
             );
         }
     }
@@ -1296,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_flags_accepts_allow_and_deny_on_acp_agents() {
+    fn validate_flags_accepts_allow_and_deny_on_acp_harnesses() {
         for value in ["allow", "deny"] {
             let mut a = args("gemini");
             a.permission = Some(value.into());
@@ -1342,8 +1342,8 @@ mod fire_args_tests {
     use clap::Parser;
 
     #[test]
-    fn fire_with_agent_and_prompt_parses() {
-        let cli = Cli::try_parse_from(["roy", "fire", "hello world", "--agent", "claude"]);
+    fn fire_with_harness_and_prompt_parses() {
+        let cli = Cli::try_parse_from(["roy", "fire", "hello world", "--harness", "claude"]);
         assert!(cli.is_ok(), "expected success, got {:?}", cli.err());
     }
 
@@ -1354,20 +1354,21 @@ mod fire_args_tests {
     }
 
     #[test]
-    fn fire_without_agent_or_resume_rejected() {
+    fn fire_without_harness_or_resume_rejected() {
         let cli = Cli::try_parse_from(["roy", "fire", "hello world"]);
         assert!(
             cli.is_err(),
-            "expected error when neither --agent nor --resume given"
+            "expected error when neither --harness nor --resume given"
         );
     }
 
     #[test]
-    fn fire_with_agent_and_resume_rejected() {
-        let cli = Cli::try_parse_from(["roy", "fire", "p", "--agent", "claude", "--resume", "abc"]);
+    fn fire_with_harness_and_resume_rejected() {
+        let cli =
+            Cli::try_parse_from(["roy", "fire", "p", "--harness", "claude", "--resume", "abc"]);
         assert!(
             cli.is_err(),
-            "expected error: --agent conflicts with --resume"
+            "expected error: --harness conflicts with --resume"
         );
     }
 

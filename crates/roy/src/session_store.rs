@@ -23,7 +23,7 @@ pub fn default_db_path() -> PathBuf {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRow {
     pub session_id: String,
-    pub agent: String,
+    pub harness: String,
     pub cwd: PathBuf,
     pub model: Option<String>,
     pub permission: Option<String>,
@@ -62,12 +62,12 @@ impl SessionStore {
     pub async fn insert(&self, row: &SessionRow) -> Result<()> {
         sqlx::query(
             "INSERT INTO sessions \
-             (session_id, agent, cwd, model, permission, resume_cursor, \
+             (session_id, harness, cwd, model, permission, resume_cursor, \
               system_prompt, created_at, closed_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.session_id)
-        .bind(&row.agent)
+        .bind(&row.harness)
         .bind(row.cwd.to_string_lossy().as_ref())
         .bind(&row.model)
         .bind(&row.permission)
@@ -93,7 +93,7 @@ impl SessionStore {
             i64,
             Option<i64>,
         )> = sqlx::query_as(
-            "SELECT session_id, agent, cwd, model, permission, resume_cursor, \
+            "SELECT session_id, harness, cwd, model, permission, resume_cursor, \
              system_prompt, created_at, closed_at FROM sessions WHERE session_id = ?",
         )
         .bind(session_id)
@@ -102,7 +102,7 @@ impl SessionStore {
         .map_err(|e| RoyError::Protocol(format!("get session: {e}")))?;
         Ok(row.map(|r| SessionRow {
             session_id: r.0,
-            agent: r.1,
+            harness: r.1,
             cwd: PathBuf::from(r.2),
             model: r.3,
             permission: r.4,
@@ -168,7 +168,7 @@ impl SessionStore {
             "closed_at IS NOT NULL"
         };
         let sql = format!(
-            "SELECT session_id, agent, cwd, model, permission, resume_cursor, \
+            "SELECT session_id, harness, cwd, model, permission, resume_cursor, \
              system_prompt, created_at, closed_at FROM sessions WHERE {predicate} \
              ORDER BY created_at"
         );
@@ -190,7 +190,7 @@ impl SessionStore {
             .into_iter()
             .map(|r| SessionRow {
                 session_id: r.0,
-                agent: r.1,
+                harness: r.1,
                 cwd: PathBuf::from(r.2),
                 model: r.3,
                 permission: r.4,
@@ -211,7 +211,7 @@ mod tests {
     fn sample_row(sid: &str) -> SessionRow {
         SessionRow {
             session_id: sid.into(),
-            agent: "claude".into(),
+            harness: "claude".into(),
             cwd: PathBuf::from("/tmp/x"),
             model: Some("claude-opus-4-7".into()),
             permission: Some("allow".into()),

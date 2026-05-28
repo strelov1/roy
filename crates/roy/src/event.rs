@@ -204,7 +204,7 @@ pub enum TurnEvent {
         subtype: String,
         /// Optional human-visible body. `None` for marker-only system events
         /// (e.g. `model_changed:<m>`); `Some(text)` when the journal needs to
-        /// stay self-contained — notably for FirstTurn-preset persona turns,
+        /// stay self-contained — notably for FirstTurn-harness persona turns,
         /// where the agent reacts to this text but doesn't echo it back.
         text: Option<String>,
     },

@@ -112,9 +112,9 @@ pub(crate) enum AgentsCmd {
 pub(crate) struct AgentAddArgs {
     #[arg(long)]
     pub(crate) name: String,
-    /// claude | gemini | opencode | codex
+    /// claude | gemini | opencode | codex | pi
     #[arg(long)]
-    pub(crate) preset: String,
+    pub(crate) harness: String,
     /// Prompt sent to the agent on every fire.
     #[arg(long)]
     pub(crate) task: String,
@@ -352,7 +352,7 @@ async fn cmd_agents(cmd: AgentsCmd) -> anyhow::Result<()> {
                 &pool,
                 store::agents::NewAgent {
                     name: a.name,
-                    preset: a.preset,
+                    harness: a.harness,
                     project_id: a.project,
                     task: a.task,
                     model: a.model,

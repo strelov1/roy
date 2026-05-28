@@ -33,9 +33,9 @@ pub struct TelegramConfig {
     /// Telegram user ids may.
     #[serde(default)]
     pub allowed_user_ids: Vec<u64>,
-    /// roy preset to spawn for new chats (`claude` / `gemini` / `opencode` / `codex`).
-    pub preset: String,
-    /// Filesystem path to use as the agent's cwd when a new session is
+    /// roy harness to spawn for new chats (`claude` / `gemini` / `opencode` / `codex` / `pi`).
+    pub harness: String,
+    /// Filesystem path to use as the harness's cwd when a new session is
     /// spawned for a chat. `None` lets the daemon allocate an orphan
     /// `<workspace>/<session_id>/` directory.
     #[serde(default)]
@@ -102,7 +102,7 @@ mod tests {
 
             [telegram]
             token = "1234:abc"
-            preset = "claude"
+            harness = "claude"
 
             [binder]
             path = "/tmp/binder.json"
@@ -156,7 +156,7 @@ mod tests {
         let raw = r#"
             [telegram]
             token = "x"
-            preset = "claude"
+            harness = "claude"
         "#;
         let cfg: GatewayConfig = toml::from_str(raw).unwrap();
         assert!(cfg.validate().is_err(), "telegram requires a binder");

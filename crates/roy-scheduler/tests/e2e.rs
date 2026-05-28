@@ -1,4 +1,4 @@
-//! End-to-end: real roy daemon + real roy-scheduler + real preset binary.
+//! End-to-end: real roy daemon + real roy-scheduler + real harness binary.
 //!
 //! Ignored by default — runs only when both binaries are built and
 //! `cargo test -p roy-scheduler --test e2e -- --ignored` is requested
@@ -104,7 +104,7 @@ fn e2e_fire_completes() {
             "add",
             "--name",
             "smoke",
-            "--preset",
+            "--harness",
             "opencode",
             "--task",
             "say something",
