@@ -452,11 +452,7 @@ async fn create_session(
             Vec::new()
         })
     };
-    let extra_env = crate::agents::spawn_env_for(
-        &s.workspace_dir,
-        &user_id,
-        &teams,
-    );
+    let extra_env = crate::agents::spawn_env_for(&s.workspace_dir, &user_id, &teams);
 
     let sid = match s
         .daemon
@@ -656,12 +652,7 @@ async fn list_agent_files(
     let team_ids: Vec<String> = teams.into_iter().map(|t| t.id).collect();
     Ok(Json(
         s.agents_cache
-            .get(
-                &builtin_agents_dir(),
-                &s.workspace_dir,
-                &user_id,
-                &team_ids,
-            )
+            .get(&builtin_agents_dir(), &s.workspace_dir, &user_id, &team_ids)
             .await,
     ))
 }
@@ -1276,7 +1267,11 @@ mod tests {
             .await
             .unwrap();
         let agents: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(agents.len(), 2, "expected builtin + personal, got {agents:?}");
+        assert_eq!(
+            agents.len(),
+            2,
+            "expected builtin + personal, got {agents:?}"
+        );
         let scopes: Vec<&str> = agents
             .iter()
             .map(|a| a["scope"]["kind"].as_str().unwrap())

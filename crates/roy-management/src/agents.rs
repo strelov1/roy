@@ -109,10 +109,7 @@ pub fn spawn_env_for(
             "ROY_AGENTS_DIR_TEAM_{}",
             slug.to_ascii_uppercase().replace('-', "_"),
         );
-        let dir = workspace_dir
-            .join("teams")
-            .join(&t.id)
-            .join(".roy/agents");
+        let dir = workspace_dir.join("teams").join(&t.id).join(".roy/agents");
         env.insert(key, dir.to_string_lossy().into_owned());
         slugs.push(slug);
     }
@@ -153,8 +150,12 @@ async fn list_dir(dir: &Path, scope: AgentScope) -> Vec<AgentFile> {
         let Ok(contents) = tokio::fs::read_to_string(&path).await else {
             continue;
         };
-        let Some(parsed) = parse_agent_md(&contents) else { continue };
-        let Some(engine) = parsed.engine else { continue };
+        let Some(parsed) = parse_agent_md(&contents) else {
+            continue;
+        };
+        let Some(engine) = parsed.engine else {
+            continue;
+        };
         out.push(AgentFile {
             name: parsed.name.unwrap_or(stem),
             description: parsed.description.unwrap_or_default(),
@@ -181,12 +182,15 @@ pub async fn list_all_agents(
         .join(".roy/agents");
     out.extend(list_dir(&user_dir, AgentScope::Personal).await);
     for tid in team_ids {
-        let team_dir = workspace_dir
-            .join("teams")
-            .join(tid)
-            .join(".roy/agents");
+        let team_dir = workspace_dir.join("teams").join(tid).join(".roy/agents");
         out.extend(
-            list_dir(&team_dir, AgentScope::Team { team_id: tid.clone() }).await,
+            list_dir(
+                &team_dir,
+                AgentScope::Team {
+                    team_id: tid.clone(),
+                },
+            )
+            .await,
         );
     }
     out
@@ -218,7 +222,13 @@ fn parse_agent_md(s: &str) -> Option<ParsedAgent> {
             model = Some(rest.trim().trim_matches('"').to_string());
         }
     }
-    Some(ParsedAgent { name, description: desc, engine, model, body })
+    Some(ParsedAgent {
+        name,
+        description: desc,
+        engine,
+        model,
+        body,
+    })
 }
 
 fn is_safe_agent_name(name: &str) -> bool {
@@ -350,12 +360,11 @@ mod tests {
 
     #[test]
     fn spawn_env_for_personal_only() {
-        let env = spawn_env_for(
-            std::path::Path::new("/ws"),
-            "user-uuid",
-            &[],
+        let env = spawn_env_for(std::path::Path::new("/ws"), "user-uuid", &[]);
+        assert_eq!(
+            env["ROY_AGENTS_DIR_USER"],
+            "/ws/users/user-uuid/.roy/agents"
         );
-        assert_eq!(env["ROY_AGENTS_DIR_USER"], "/ws/users/user-uuid/.roy/agents");
         assert!(!env.contains_key("ROY_TEAMS"));
     }
 
@@ -375,8 +384,14 @@ mod tests {
             },
         ];
         let env = spawn_env_for(std::path::Path::new("/ws"), "u", &teams);
-        assert_eq!(env["ROY_AGENTS_DIR_TEAM_GTM_TEAM"], "/ws/teams/tid-1/.roy/agents");
-        assert_eq!(env["ROY_AGENTS_DIR_TEAM_ENG"], "/ws/teams/tid-2/.roy/agents");
+        assert_eq!(
+            env["ROY_AGENTS_DIR_TEAM_GTM_TEAM"],
+            "/ws/teams/tid-1/.roy/agents"
+        );
+        assert_eq!(
+            env["ROY_AGENTS_DIR_TEAM_ENG"],
+            "/ws/teams/tid-2/.roy/agents"
+        );
         assert_eq!(env["ROY_TEAMS"], "gtm-team,eng");
     }
 
@@ -399,10 +414,7 @@ mod tests {
 
     #[test]
     fn parses_minimal_frontmatter() {
-        let p = parse_agent_md(
-            "---\nname: x\nengine: claude\n---\n\nhello\n",
-        )
-        .unwrap();
+        let p = parse_agent_md("---\nname: x\nengine: claude\n---\n\nhello\n").unwrap();
         assert_eq!(p.name.as_deref(), Some("x"));
         assert_eq!(p.engine.as_deref(), Some("claude"));
         assert_eq!(p.body.trim(), "hello");

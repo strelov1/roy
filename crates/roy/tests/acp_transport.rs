@@ -29,7 +29,13 @@ fn fake_config_with_timeout(extra: &[&str], open_timeout: Duration) -> AcpConfig
 async fn open_send_streams_until_result() {
     let transport = AcpTransport::new(fake_config(&[]));
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -71,7 +77,13 @@ async fn open_send_streams_until_result() {
 async fn auto_allows_permission_requests() {
     let transport = AcpTransport::new(fake_config(&["--permission"]));
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -103,7 +115,13 @@ async fn open_without_mode_skips_set_mode() {
     };
     let transport = AcpTransport::new(config);
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -126,7 +144,13 @@ async fn open_surfaces_error_when_agent_dies_during_initialize() {
     ));
 
     let err = match transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
     {
         Ok(_) => panic!("open should fail when the agent exits during initialize"),
@@ -149,7 +173,13 @@ async fn open_times_out_when_agent_never_replies() {
     ));
 
     let err = match transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
     {
         Ok(_) => panic!("open should fail when initialize times out"),
@@ -167,7 +197,13 @@ async fn open_surfaces_json_rpc_errors() {
     ));
 
     let err = match transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
     {
         Ok(_) => panic!("open should surface protocol errors"),
@@ -181,7 +217,13 @@ async fn open_surfaces_json_rpc_errors() {
 async fn mid_turn_exit_emits_error_result() {
     let transport = AcpTransport::new(fake_config(&["--exit-mid-turn"]));
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -212,7 +254,13 @@ async fn dropping_a_turn_cancels_it_and_the_next_turn_proceeds() {
     // stream actually cancelled it and freed the actor.
     let transport = AcpTransport::new(fake_config(&["--cancellable"]));
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -268,7 +316,13 @@ async fn real_gemini_spawn_and_turn() {
     }
     let transport = AcpTransport::new(AcpConfig::gemini());
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -304,7 +358,13 @@ async fn real_opencode_spawn_and_turn() {
     }
     let transport = AcpTransport::new(AcpConfig::opencode());
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -337,7 +397,13 @@ async fn real_codex_spawn_and_turn() {
     }
     let transport = AcpTransport::new(AcpConfig::codex());
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -371,7 +437,13 @@ async fn real_claude_spawn_and_turn() {
     }
     let transport = AcpTransport::new(AcpConfig::claude());
     let mut handle = transport
-        .open("ignored", None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            "ignored",
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -415,7 +487,13 @@ async fn open_propagates_roy_session_id_env() {
 
     let session_id = "test-session-id-abc123";
     let _handle = transport
-        .open(session_id, None, std::env::current_dir().unwrap(), None, &Default::default())
+        .open(
+            session_id,
+            None,
+            std::env::current_dir().unwrap(),
+            None,
+            &Default::default(),
+        )
         .await
         .expect("open should succeed");
 
