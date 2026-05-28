@@ -31,8 +31,30 @@ pub struct Connection {
     pub provider_id: Option<String>,
 }
 
+/// Two ways to create a connection:
+/// * **Catalog-backed:** `{ provider_id, name, secrets }` — backend resolves
+///   command/args/env from the yaml catalog. The dominant flow.
+/// * **Legacy/custom:** `{ name, kind, config, secrets }` — free-form.
+///   Kept for the existing CLI/test paths; UI no longer exposes it in MVP.
+///
+/// `serde(untagged)` picks the right variant by which fields the body has.
 #[derive(Debug, Clone, Deserialize)]
-pub struct NewConnection {
+#[serde(untagged)]
+pub enum NewConnection {
+    FromProvider(NewConnectionFromProvider),
+    Custom(NewConnectionCustom),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewConnectionFromProvider {
+    pub provider_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub secrets: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewConnectionCustom {
     pub name: String,
     pub kind: String,
     pub config: Value,
@@ -159,20 +181,45 @@ impl Store {
         Self { pool }
     }
 
-    /// Insert a new connection for `owner_id`. The slug is derived from `name`
-    /// and made unique per-owner by suffixing (`base-2`, `base-3`, ...).
-    pub async fn create(
+    /// Insert a row built directly from a catalog provider definition.
+    pub async fn create_from_provider(
         &self,
         owner_id: &str,
-        new: NewConnection,
+        req: NewConnectionFromProvider,
+        provider: &crate::provider_catalog::Provider,
     ) -> Result<Connection, StoreError> {
-        self.create_inner(owner_id, new, None).await
+        validate_required_secrets(provider, req.secrets.as_ref())
+            .map_err(StoreError::Invalid)?;
+        let config = serde_json::json!({
+            "command": provider.command,
+            "args": provider.args,
+            "env": provider.env,
+        });
+        let custom = NewConnectionCustom {
+            name: req.name,
+            kind: KIND_MCP_STDIO.to_string(),
+            config,
+            secrets: req.secrets,
+            description: Some(provider.description.clone()).filter(|s| !s.is_empty()),
+        };
+        self.create_inner(owner_id, custom, Some(provider.id.clone()))
+            .await
+    }
+
+    /// Free-form CRUD path — used by the legacy CLI/test surface. UI no
+    /// longer exposes this.
+    pub async fn create_custom(
+        &self,
+        owner_id: &str,
+        req: NewConnectionCustom,
+    ) -> Result<Connection, StoreError> {
+        self.create_inner(owner_id, req, None).await
     }
 
     async fn create_inner(
         &self,
         owner_id: &str,
-        new: NewConnection,
+        new: NewConnectionCustom,
         provider_id: Option<String>,
     ) -> Result<Connection, StoreError> {
         validate_kind(&new.kind).map_err(StoreError::Invalid)?;
@@ -392,6 +439,44 @@ fn row_to_connection(r: ConnectionRow) -> Result<Connection, StoreError> {
     })
 }
 
+fn validate_required_secrets(
+    provider: &crate::provider_catalog::Provider,
+    supplied: Option<&Value>,
+) -> Result<(), String> {
+    if provider.secrets.is_empty() {
+        return Ok(());
+    }
+    let supplied_obj = supplied
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            format!(
+                "secrets must be an object with keys: {}",
+                required_keys(provider)
+            )
+        })?;
+    let mut missing: Vec<&str> = Vec::new();
+    for s in &provider.secrets {
+        match supplied_obj.get(&s.key) {
+            Some(Value::String(v)) if !v.is_empty() => {}
+            _ => missing.push(s.key.as_str()),
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("missing required secrets: {}", missing.join(", ")))
+    }
+}
+
+fn required_keys(provider: &crate::provider_catalog::Provider) -> String {
+    provider
+        .secrets
+        .iter()
+        .map(|s| s.key.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 // ---------------- HTTP ----------------
 
 use axum::{
@@ -448,10 +533,46 @@ async fn list_handler(
 async fn create_handler(
     Extension(AuthUser(uid)): Extension<AuthUser>,
     State(s): State<AppState>,
-    Json(new): Json<NewConnection>,
+    Json(body): Json<NewConnection>,
 ) -> Result<(StatusCode, Json<Connection>), ApiError> {
-    let c = s.connections.create(&uid, new).await?;
+    let c = match body {
+        NewConnection::FromProvider(req) => {
+            let provider = s
+                .catalog
+                .get(&req.provider_id)
+                .ok_or_else(|| {
+                    ApiError(
+                        StatusCode::BAD_REQUEST,
+                        format!("unknown provider: {}", req.provider_id),
+                    )
+                })?
+                .clone();
+            s.connections
+                .create_from_provider(&uid, req, &provider)
+                .await
+                .map_err(map_store_err)?
+        }
+        NewConnection::Custom(req) => s
+            .connections
+            .create_custom(&uid, req)
+            .await
+            .map_err(map_store_err)?,
+    };
     Ok((StatusCode::CREATED, Json(c)))
+}
+
+fn map_store_err(e: StoreError) -> ApiError {
+    // UNIQUE violation on the partial index `connections_owner_provider_label_unique`
+    // → 409 Conflict with a user-readable message.
+    if let StoreError::Db(sqlx::Error::Database(d)) = &e {
+        if d.is_unique_violation() {
+            return ApiError(
+                StatusCode::CONFLICT,
+                "a connection with this provider and label already exists".into(),
+            );
+        }
+    }
+    e.into()
 }
 
 async fn get_handler(
@@ -546,9 +667,9 @@ mod tests {
         let store = Store::new(pool.clone());
 
         let c = store
-            .create(
+            .create_custom(
                 &user.id,
-                NewConnection {
+                NewConnectionCustom {
                     name: "My Linear".into(),
                     kind: KIND_MCP_STDIO.into(),
                     config: json!({"command": "npx", "args": ["-y", "@linear/mcp"]}),
@@ -589,9 +710,9 @@ mod tests {
         let user = make_user(&pool, "alice").await;
         let store = Store::new(pool.clone());
         let a = store
-            .create(
+            .create_custom(
                 &user.id,
-                NewConnection {
+                NewConnectionCustom {
                     name: "Linear".into(),
                     kind: KIND_MCP_STDIO.into(),
                     config: json!({"command": "npx"}),
@@ -602,9 +723,9 @@ mod tests {
             .await
             .unwrap();
         let b = store
-            .create(
+            .create_custom(
                 &user.id,
-                NewConnection {
+                NewConnectionCustom {
                     name: "Linear".into(),
                     kind: KIND_MCP_STDIO.into(),
                     config: json!({"command": "npx"}),
@@ -625,9 +746,9 @@ mod tests {
         let bob = make_user(&pool, "bob").await;
         let store = Store::new(pool.clone());
         store
-            .create(
+            .create_custom(
                 &alice.id,
-                NewConnection {
+                NewConnectionCustom {
                     name: "L".into(),
                     kind: KIND_MCP_STDIO.into(),
                     config: json!({"command": "npx"}),
