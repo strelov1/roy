@@ -28,6 +28,7 @@ pub struct Connection {
     pub description: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub provider_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +136,7 @@ type ConnectionRow = (
     Option<String>,
     i64,
     i64,
+    Option<String>,
 );
 
 #[derive(Debug, thiserror::Error)]
@@ -164,6 +166,15 @@ impl Store {
         owner_id: &str,
         new: NewConnection,
     ) -> Result<Connection, StoreError> {
+        self.create_inner(owner_id, new, None).await
+    }
+
+    async fn create_inner(
+        &self,
+        owner_id: &str,
+        new: NewConnection,
+        provider_id: Option<String>,
+    ) -> Result<Connection, StoreError> {
         validate_kind(&new.kind).map_err(StoreError::Invalid)?;
         validate_config(&new.kind, &new.config).map_err(StoreError::Invalid)?;
         let id = Uuid::new_v4().to_string();
@@ -179,8 +190,8 @@ impl Store {
             let slug = self.unique_slug(owner_id, &base).await?;
             let res = sqlx::query(
                 "INSERT INTO connections
-                 (id, owner_id, name, slug, kind, config_json, secrets_json, description, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (id, owner_id, name, slug, kind, config_json, secrets_json, description, created_at, updated_at, provider_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(owner_id)
@@ -192,6 +203,7 @@ impl Store {
             .bind(new.description.as_deref())
             .bind(now)
             .bind(now)
+            .bind(provider_id.as_deref())
             .execute(&self.pool)
             .await;
             match res {
@@ -207,6 +219,7 @@ impl Store {
                         description: new.description,
                         created_at: now,
                         updated_at: now,
+                        provider_id,
                     });
                 }
                 Err(sqlx::Error::Database(d)) if d.is_unique_violation() => continue,
@@ -217,7 +230,7 @@ impl Store {
 
     pub async fn list_by_owner(&self, owner_id: &str) -> Result<Vec<Connection>, StoreError> {
         let rows: Vec<ConnectionRow> = sqlx::query_as(
-            "SELECT id, owner_id, name, slug, kind, config_json, secrets_json, description, created_at, updated_at
+            "SELECT id, owner_id, name, slug, kind, config_json, secrets_json, description, created_at, updated_at, provider_id
              FROM connections WHERE owner_id = ? ORDER BY created_at DESC",
         )
         .bind(owner_id)
@@ -228,7 +241,7 @@ impl Store {
 
     pub async fn get(&self, owner_id: &str, id: &str) -> Result<Connection, StoreError> {
         let row: Option<ConnectionRow> = sqlx::query_as(
-            "SELECT id, owner_id, name, slug, kind, config_json, secrets_json, description, created_at, updated_at
+            "SELECT id, owner_id, name, slug, kind, config_json, secrets_json, description, created_at, updated_at, provider_id
              FROM connections WHERE owner_id = ? AND id = ?",
         )
         .bind(owner_id)
@@ -353,6 +366,7 @@ fn row_to_connection(r: ConnectionRow) -> Result<Connection, StoreError> {
         description,
         created_at,
         updated_at,
+        provider_id,
     ) = r;
     let config: Value = serde_json::from_str(&config_json)
         .map_err(|e| StoreError::Invalid(format!("config_json corrupt: {e}")))?;
@@ -374,6 +388,7 @@ fn row_to_connection(r: ConnectionRow) -> Result<Connection, StoreError> {
         description,
         created_at,
         updated_at,
+        provider_id,
     })
 }
 
