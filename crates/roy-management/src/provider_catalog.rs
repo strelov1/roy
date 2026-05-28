@@ -68,6 +68,13 @@ impl Catalog {
         Self::default()
     }
 
+    /// Constructor for tests that want a pre-loaded catalog without writing
+    /// a yaml file. Production code goes through `load_from`.
+    #[doc(hidden)]
+    pub fn from_providers(providers: Vec<Provider>) -> Self {
+        Self { providers }
+    }
+
     pub fn providers(&self) -> &[Provider] {
         &self.providers
     }

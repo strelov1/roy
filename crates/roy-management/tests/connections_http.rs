@@ -381,3 +381,121 @@ async fn cross_user_isolation() {
     let listed: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(listed.as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn create_from_provider_happy_path() {
+    let (app, pool, _ws) = common::test_app_with_catalog().await;
+    let _alice = roy_auth::test_support::make_user(&pool, "alice").await;
+    let cookie = login_as(&app, "alice", "test-password-1234").await;
+
+    let body = json!({
+        "provider_id": "github",
+        "name": "work",
+        "secrets": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connections")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let created: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(created["provider_id"], "github");
+    assert_eq!(created["name"], "work");
+    assert_eq!(created["config"]["command"], "npx");
+}
+
+#[tokio::test]
+async fn create_from_provider_unknown_id_returns_400() {
+    let (app, pool, _ws) = common::test_app_with_catalog().await;
+    let _alice = roy_auth::test_support::make_user(&pool, "alice").await;
+    let cookie = login_as(&app, "alice", "test-password-1234").await;
+
+    let body = json!({"provider_id": "nope", "name": "x", "secrets": {}});
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connections")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_from_provider_missing_secret_returns_400() {
+    let (app, pool, _ws) = common::test_app_with_catalog().await;
+    let _alice = roy_auth::test_support::make_user(&pool, "alice").await;
+    let cookie = login_as(&app, "alice", "test-password-1234").await;
+
+    let body = json!({"provider_id": "github", "name": "work", "secrets": {}});
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connections")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn duplicate_provider_label_returns_409() {
+    let (app, pool, _ws) = common::test_app_with_catalog().await;
+    let _alice = roy_auth::test_support::make_user(&pool, "alice").await;
+    let cookie = login_as(&app, "alice", "test-password-1234").await;
+
+    let body = json!({
+        "provider_id": "github",
+        "name": "work",
+        "secrets": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}
+    });
+
+    let resp1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connections")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), StatusCode::CREATED);
+
+    let resp2 = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connections")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::CONFLICT);
+}
