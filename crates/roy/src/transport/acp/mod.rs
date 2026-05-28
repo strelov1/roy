@@ -269,9 +269,11 @@ impl Transport for AcpTransport {
                 mcp_injection::McpInjectionStyle::GeminiSettings => {
                     let dir = cwd.join(mcp_injection::GEMINI_SETTINGS_DIR);
                     std::fs::create_dir_all(&dir).map_err(RoyError::Io)?;
+                    // Gemini-cli accepts the same `mcpServers` schema as Claude
+                    // Code, so we reuse `build_mcp_config` directly.
                     (
                         dir.join(mcp_injection::GEMINI_SETTINGS_FILENAME),
-                        mcp_injection::build_gemini_config(
+                        mcp_injection::build_mcp_config(
                             &mcp_injection::roy_binary_path(),
                             &bundle_path,
                         ),
