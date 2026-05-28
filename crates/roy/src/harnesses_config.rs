@@ -71,7 +71,7 @@ impl std::str::FromStr for Harness {
         Harness::ALL
             .iter()
             .copied()
-            .find(|p| p.as_str() == s)
+            .find(|h| h.as_str() == s)
             .ok_or_else(|| format!("unknown harness: {s}"))
     }
 }
