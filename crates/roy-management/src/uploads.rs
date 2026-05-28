@@ -8,11 +8,7 @@
 //! Body size is capped externally via `DefaultBodyLimit` on the route — the
 //! `Multipart` extractor itself doesn't enforce a ceiling.
 
-use axum::{
-    extract::Multipart,
-    http::StatusCode,
-    Extension, Json,
-};
+use axum::{extract::Multipart, http::StatusCode, Extension, Json};
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
