@@ -9,12 +9,12 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 use clap::{Args, Parser, Subcommand};
+#[cfg(test)]
+use roy::AgentPreset;
 use roy::{
     daemon::{Daemon, DefaultTransportFactory},
     AgentsConfigStatus, ClientCommand, JournalEntry, ServeOpts, ServerEvent, TurnEvent,
 };
-#[cfg(test)]
-use roy::AgentPreset;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
