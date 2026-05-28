@@ -13,7 +13,7 @@
 //! and `run_session` / `run_turn` bail out via `dead_rx.changed()`,
 //! producing a terminal `Result { stop_reason: Error }`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -79,6 +79,15 @@ impl Drop for BundleGuard {
     }
 }
 
+/// Serialize `value` as pretty JSON and write it to `path`. Used by every
+/// file-based MCP injection style (claude/opencode/gemini); codex doesn't
+/// call this because it ships its overrides on argv instead.
+fn write_mcp_config_file(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| RoyError::Protocol(format!("mcp config serialize: {e}")))?;
+    std::fs::write(path, bytes).map_err(RoyError::Io)
+}
+
 /// Launch + behaviour config for an ACP agent.
 pub struct AcpConfig {
     pub command: String,
@@ -137,7 +146,9 @@ impl AcpConfig {
         }
     }
 
-    /// codex via the codex-acp adapter, using its `full-access` mode.
+    /// codex via the codex-acp adapter, using its `full-access` mode. MCP
+    /// connections (if any) are injected via `-c mcp_servers.*` TOML
+    /// overrides on the spawn command line — no files written.
     pub fn codex() -> Self {
         Self {
             command: "codex-acp".to_string(),
@@ -148,7 +159,7 @@ impl AcpConfig {
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
             connections: Vec::new(),
-            mcp_injection: mcp_injection::McpInjectionStyle::None,
+            mcp_injection: mcp_injection::McpInjectionStyle::CodexCliOverrides,
         }
     }
 
@@ -234,11 +245,15 @@ impl Transport for AcpTransport {
             SystemPromptChannel::FirstTurn => (None, None),
         };
 
-        // MCP injection: write project-level config + sibling bundle. The
-        // bundle lives in a temp dir so secrets stay out of cwd (which the
-        // agent can read with file tools). The project config itself is
-        // benign — it just points at our proxy.
-        let mcp_bundle_guard = if !self.config.connections.is_empty()
+        // MCP injection: write project-level config + sibling bundle for
+        // file-based presets (claude/opencode/gemini); for codex, emit `-c`
+        // TOML overrides to append to the spawn command line. The bundle
+        // (which contains secrets) lives in a temp dir so it stays out of
+        // cwd (which the agent can read with file tools).
+        let (mcp_bundle_guard, mcp_extra_args): (Option<BundleGuard>, Vec<String>) = if !self
+            .config
+            .connections
+            .is_empty()
             && self.config.mcp_injection != mcp_injection::McpInjectionStyle::None
         {
             let bundle = mcp_injection::build_bundle(session_id, &self.config.connections);
@@ -251,52 +266,57 @@ impl Transport for AcpTransport {
             )
             .map_err(RoyError::Io)?;
 
-            let (cfg_path, cfg_value) = match self.config.mcp_injection {
-                mcp_injection::McpInjectionStyle::ClaudeMcpJson => (
-                    cwd.join(mcp_injection::MCP_CONFIG_FILENAME),
-                    mcp_injection::build_mcp_config(
-                        &mcp_injection::roy_binary_path(),
-                        &bundle_path,
-                    ),
-                ),
-                mcp_injection::McpInjectionStyle::OpencodeJson => (
-                    cwd.join(mcp_injection::OPENCODE_CONFIG_FILENAME),
-                    mcp_injection::build_opencode_config(
-                        &mcp_injection::roy_binary_path(),
-                        &bundle_path,
-                    ),
-                ),
-                mcp_injection::McpInjectionStyle::GeminiSettings => {
-                    let dir = cwd.join(mcp_injection::GEMINI_SETTINGS_DIR);
-                    std::fs::create_dir_all(&dir).map_err(RoyError::Io)?;
-                    // Gemini-cli accepts the same `mcpServers` schema as Claude
-                    // Code, so we reuse `build_mcp_config` directly.
-                    (
-                        dir.join(mcp_injection::GEMINI_SETTINGS_FILENAME),
-                        mcp_injection::build_mcp_config(
+            let extra_args = match self.config.mcp_injection {
+                mcp_injection::McpInjectionStyle::ClaudeMcpJson => {
+                    write_mcp_config_file(
+                        &cwd.join(mcp_injection::MCP_CONFIG_FILENAME),
+                        &mcp_injection::build_mcp_config(
                             &mcp_injection::roy_binary_path(),
                             &bundle_path,
                         ),
-                    )
+                    )?;
+                    Vec::new()
+                }
+                mcp_injection::McpInjectionStyle::OpencodeJson => {
+                    write_mcp_config_file(
+                        &cwd.join(mcp_injection::OPENCODE_CONFIG_FILENAME),
+                        &mcp_injection::build_opencode_config(
+                            &mcp_injection::roy_binary_path(),
+                            &bundle_path,
+                        ),
+                    )?;
+                    Vec::new()
+                }
+                mcp_injection::McpInjectionStyle::GeminiSettings => {
+                    let dir = cwd.join(mcp_injection::GEMINI_SETTINGS_DIR);
+                    std::fs::create_dir_all(&dir).map_err(RoyError::Io)?;
+                    // Gemini-cli accepts the same `mcpServers` schema as
+                    // Claude Code, so we reuse `build_mcp_config` directly.
+                    write_mcp_config_file(
+                        &dir.join(mcp_injection::GEMINI_SETTINGS_FILENAME),
+                        &mcp_injection::build_mcp_config(
+                            &mcp_injection::roy_binary_path(),
+                            &bundle_path,
+                        ),
+                    )?;
+                    Vec::new()
+                }
+                mcp_injection::McpInjectionStyle::CodexCliOverrides => {
+                    mcp_injection::build_codex_args(&mcp_injection::roy_binary_path(), &bundle_path)
                 }
                 mcp_injection::McpInjectionStyle::None => unreachable!("checked above"),
             };
-            std::fs::write(
-                &cfg_path,
-                serde_json::to_vec_pretty(&cfg_value)
-                    .map_err(|e| RoyError::Protocol(format!("mcp config serialize: {e}")))?,
-            )
-            .map_err(RoyError::Io)?;
             // Guard cleans up the bundle (which holds secrets) when the
-            // handle drops. The cwd's project config is left in place — the
-            // user's cwd is theirs to manage.
-            Some(BundleGuard { path: bundle_path })
+            // handle drops. For file-based presets the cwd's project
+            // config is left in place — the user's cwd is theirs to manage.
+            (Some(BundleGuard { path: bundle_path }), extra_args)
         } else {
-            None
+            (None, Vec::new())
         };
 
         let mut cmd = Command::new(&self.config.command);
         cmd.args(&self.config.args)
+            .args(&mcp_extra_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -877,7 +897,7 @@ mod tests {
         assert_eq!(AcpConfig::claude().mcp_injection, ClaudeMcpJson);
         assert_eq!(AcpConfig::opencode().mcp_injection, OpencodeJson);
         assert_eq!(AcpConfig::gemini().mcp_injection, GeminiSettings);
-        assert_eq!(AcpConfig::codex().mcp_injection, None);
+        assert_eq!(AcpConfig::codex().mcp_injection, CodexCliOverrides);
         assert_eq!(AcpConfig::pi().mcp_injection, None);
     }
 }
