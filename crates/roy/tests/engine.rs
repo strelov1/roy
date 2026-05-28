@@ -46,6 +46,7 @@ fn test_cfg() -> SessionSpawnConfig {
         resume_cursor: None,
         fixed_session_id: None,
         system_prompt: None,
+        extra_env: Default::default(),
     }
 }
 

@@ -186,6 +186,7 @@ impl Transport for AcpTransport {
         resume_cursor: Option<&str>,
         cwd: PathBuf,
         system_prompt: Option<&str>,
+        extra_env: &std::collections::HashMap<String, String>,
     ) -> Result<Box<dyn Handle>> {
         let cwd = std::path::absolute(&cwd).map_err(RoyError::Io)?;
 
@@ -209,6 +210,9 @@ impl Transport for AcpTransport {
             cmd.env_remove(key);
         }
         cmd.env("ROY_SESSION_ID", session_id);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
         let mut child = cmd.spawn().map_err(RoyError::Io)?;
         let stdin = child
             .stdin
