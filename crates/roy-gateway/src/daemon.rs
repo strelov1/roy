@@ -113,6 +113,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Conn for TurnConn<S> {
             resume: None,
             system_prompt: None,
             extra_env: Default::default(),
+            connections: Vec::new(),
         })
         .await?;
         loop {

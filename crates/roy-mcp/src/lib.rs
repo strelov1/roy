@@ -7,6 +7,8 @@
 //!
 //! Spec reference: <https://modelcontextprotocol.io/specification/2024-11-05>.
 
+pub mod serve_connections;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -551,6 +553,7 @@ async fn tool_run(socket_path: &Path, args: Value) -> anyhow::Result<String> {
             resume,
             system_prompt,
             extra_env: Default::default(),
+            connections: vec![],
         },
     )
     .await?;
@@ -665,6 +668,7 @@ async fn tool_run_detached(socket_path: &Path, args: Value) -> anyhow::Result<St
             resume,
             system_prompt,
             extra_env: Default::default(),
+            connections: vec![],
         },
     )
     .await?;

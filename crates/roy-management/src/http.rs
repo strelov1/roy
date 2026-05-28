@@ -65,6 +65,7 @@ pub fn router(state: AppState) -> Router {
         .route("/teams/{id}", axum::routing::delete(auth::delete_team))
         .route("/auth/invites", post(auth::create_invite))
         .route("/auth/accept-invite", post(auth::accept_invite))
+        .merge(crate::connections::router())
         .merge(auth::protected_router())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -287,7 +288,9 @@ async fn delete_project(
 /// value is `null`, so we can distinguish "field absent" (handled by
 /// `#[serde(default)]` returning the outer `None`) from "field set to null"
 /// (this function returning `Some(None)`).
-fn deserialize_optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn deserialize_optional_field<'de, T, D>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
 where
     T: serde::Deserialize<'de>,
     D: serde::Deserializer<'de>,
@@ -376,6 +379,8 @@ struct CreateSessionReq {
     agent_name: Option<String>,
     #[serde(default)]
     tags: BTreeMap<String, String>,
+    #[serde(default)]
+    connection_ids: Vec<String>,
 }
 
 fn default_scope_str() -> String {
@@ -454,6 +459,40 @@ async fn create_session(
     };
     let extra_env = crate::agents::spawn_env_for(&s.workspace_dir, &user_id, &teams);
 
+    // Resolve connection_ids → ConnectionSpec list. The store filters by
+    // owner_id, so unknown ids OR ids owned by another user both return
+    // StoreError::NotFound — mapped to 400 to avoid leaking existence.
+    let connection_specs: Vec<roy::ConnectionSpec> = if req.connection_ids.is_empty() {
+        Vec::new()
+    } else {
+        let conns = s
+            .connections
+            .get_many(&user_id, &req.connection_ids)
+            .await
+            .map_err(|e| match e {
+                crate::connections::StoreError::NotFound(id) => {
+                    ApiError(StatusCode::BAD_REQUEST, format!("unknown connection: {id}"))
+                }
+                crate::connections::StoreError::Invalid(msg) => {
+                    ApiError(StatusCode::BAD_REQUEST, msg)
+                }
+                crate::connections::StoreError::Db(db_err) => {
+                    tracing::error!(error = %db_err, "connection store db error");
+                    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+                }
+            })?;
+        conns
+            .into_iter()
+            .map(|c| roy::ConnectionSpec {
+                id: c.id,
+                slug: c.slug,
+                kind: c.kind,
+                config: c.config,
+                secrets: c.secrets,
+            })
+            .collect()
+    };
+
     let sid = match s
         .daemon
         .spawn(crate::roy_client::SpawnRequest {
@@ -463,6 +502,7 @@ async fn create_session(
             permission: req.permission.clone(),
             system_prompt: req.system_prompt.clone(),
             extra_env,
+            connections: connection_specs.clone(),
         })
         .await
     {
@@ -489,6 +529,7 @@ async fn create_session(
         team_id: req.team_id.clone(),
         tags: req.tags.clone(),
         created_at: chrono::Utc::now().timestamp(),
+        connection_ids: req.connection_ids.clone(),
     };
     if let Err(meta_err) = s.meta.upsert_session_meta(&meta).await {
         // Compensating action: the daemon already spawned the session, but
@@ -736,6 +777,8 @@ mod tests {
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
             scheduler_pool: None,
+            connections: crate::connections::Store::new(pool.clone()),
+            catalog: std::sync::Arc::new(crate::provider_catalog::Catalog::empty()),
             pool,
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
@@ -995,6 +1038,7 @@ mod tests {
                 team_id: None,
                 tags: BTreeMap::from([("k".into(), "v".into())]),
                 created_at: 1,
+                connection_ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -1065,6 +1109,7 @@ mod tests {
                 team_id: None,
                 tags: BTreeMap::from([("old".into(), "1".into())]),
                 created_at: 1,
+                connection_ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -1111,6 +1156,8 @@ mod tests {
             daemon: std::sync::Arc::new(roy_client::mock::MockDaemonClient::new()),
             socket_path: "/nonexistent.sock".into(),
             scheduler_pool: Some(sched_pool),
+            connections: crate::connections::Store::new(agents_pool.clone()),
+            catalog: std::sync::Arc::new(crate::provider_catalog::Catalog::empty()),
             pool: agents_pool,
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),

@@ -63,6 +63,22 @@ pub enum SystemPromptChannel {
     FirstTurn,
 }
 
+pub mod mcp_injection;
+
+/// RAII guard that deletes a bundle file when dropped. Used so the bundle
+/// (which contains secrets) only lives on disk for the lifetime of the
+/// session handle. `kill_on_drop` on the child and the guard's `Drop` are
+/// the two cleanup mechanisms — both fire when the handle is dropped.
+struct BundleGuard {
+    path: PathBuf,
+}
+
+impl Drop for BundleGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Launch + behaviour config for an ACP agent.
 pub struct AcpConfig {
     pub command: String,
@@ -79,6 +95,14 @@ pub struct AcpConfig {
     pub env_remove: Vec<String>,
     /// Which channel carries the persona prompt for this harness.
     pub system_prompt_channel: SystemPromptChannel,
+    /// MCP connections to inject into the agent's project-level config before
+    /// spawning. Currently only `AcpConfig::claude()` opts into using this —
+    /// other presets ignore it. Wired in D2.
+    pub connections: Vec<crate::control::ConnectionSpec>,
+    /// Which per-session MCP config file (if any) the underlying CLI reads.
+    /// Drives where AcpTransport::open writes the catalog of connections
+    /// before spawning the child.
+    pub mcp_injection: mcp_injection::McpInjectionStyle,
 }
 
 impl AcpConfig {
@@ -92,6 +116,8 @@ impl AcpConfig {
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
+            connections: Vec::new(),
+            mcp_injection: mcp_injection::McpInjectionStyle::None,
         }
     }
 
@@ -106,6 +132,8 @@ impl AcpConfig {
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::Meta,
+            connections: Vec::new(),
+            mcp_injection: mcp_injection::McpInjectionStyle::OpencodeJson,
         }
     }
 
@@ -119,6 +147,8 @@ impl AcpConfig {
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
+            connections: Vec::new(),
+            mcp_injection: mcp_injection::McpInjectionStyle::None,
         }
     }
 
@@ -135,6 +165,8 @@ impl AcpConfig {
             open_timeout: Duration::from_secs(30),
             env_remove: vec!["CLAUDECODE".to_string()],
             system_prompt_channel: SystemPromptChannel::Meta,
+            connections: Vec::new(),
+            mcp_injection: mcp_injection::McpInjectionStyle::ClaudeMcpJson,
         }
     }
 
@@ -152,6 +184,8 @@ impl AcpConfig {
             open_timeout: Duration::from_secs(30),
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
+            connections: Vec::new(),
+            mcp_injection: mcp_injection::McpInjectionStyle::None,
         }
     }
 }
@@ -198,6 +232,55 @@ impl Transport for AcpTransport {
             SystemPromptChannel::Meta => (system_prompt, None),
             SystemPromptChannel::FirstTurn if resume_cursor.is_none() => (None, system_prompt),
             SystemPromptChannel::FirstTurn => (None, None),
+        };
+
+        // MCP injection: write project-level config + sibling bundle. The
+        // bundle lives in a temp dir so secrets stay out of cwd (which the
+        // agent can read with file tools). The project config itself is
+        // benign — it just points at our proxy.
+        let mcp_bundle_guard = if !self.config.connections.is_empty()
+            && self.config.mcp_injection != mcp_injection::McpInjectionStyle::None
+        {
+            let bundle = mcp_injection::build_bundle(session_id, &self.config.connections);
+            let bundle_path =
+                std::env::temp_dir().join(format!("roy-mcp-bundle-{session_id}.json"));
+            std::fs::write(
+                &bundle_path,
+                serde_json::to_vec(&bundle)
+                    .map_err(|e| RoyError::Protocol(format!("bundle serialize: {e}")))?,
+            )
+            .map_err(RoyError::Io)?;
+
+            let (cfg_filename, cfg_value) = match self.config.mcp_injection {
+                mcp_injection::McpInjectionStyle::ClaudeMcpJson => (
+                    mcp_injection::MCP_CONFIG_FILENAME,
+                    mcp_injection::build_mcp_config(
+                        &mcp_injection::roy_binary_path(),
+                        &bundle_path,
+                    ),
+                ),
+                mcp_injection::McpInjectionStyle::OpencodeJson => (
+                    mcp_injection::OPENCODE_CONFIG_FILENAME,
+                    mcp_injection::build_opencode_config(
+                        &mcp_injection::roy_binary_path(),
+                        &bundle_path,
+                    ),
+                ),
+                mcp_injection::McpInjectionStyle::None => unreachable!("checked above"),
+            };
+            let cfg_path = cwd.join(cfg_filename);
+            std::fs::write(
+                &cfg_path,
+                serde_json::to_vec_pretty(&cfg_value)
+                    .map_err(|e| RoyError::Protocol(format!("mcp config serialize: {e}")))?,
+            )
+            .map_err(RoyError::Io)?;
+            // Guard cleans up the bundle (which holds secrets) when the
+            // handle drops. The cwd's project config is left in place — the
+            // user's cwd is theirs to manage.
+            Some(BundleGuard { path: bundle_path })
+        } else {
+            None
         };
 
         let mut cmd = Command::new(&self.config.command);
@@ -313,6 +396,7 @@ impl Transport for AcpTransport {
                 cmd_tx,
                 acp_sid,
                 pending_persona,
+                _mcp_bundle_guard: mcp_bundle_guard,
             })),
             Ok(Err(_)) => match task.await {
                 Ok(Err(err)) => Err(RoyError::Protocol(err.to_string())),
@@ -663,6 +747,9 @@ pub struct AcpHandle {
     cmd_tx: mpsc::UnboundedSender<SessionCommand>,
     acp_sid: String,
     pending_persona: Option<String>,
+    /// Lives as long as the session — drops the bundle JSON file when the
+    /// handle drops.
+    _mcp_bundle_guard: Option<BundleGuard>,
 }
 
 #[async_trait]
@@ -770,5 +857,15 @@ mod tests {
         let mut meta = None;
         super::apply_system_prompt_meta(&mut meta, None);
         assert!(meta.is_none());
+    }
+
+    #[test]
+    fn presets_advertise_mcp_injection_style_correctly() {
+        use mcp_injection::McpInjectionStyle::*;
+        assert_eq!(AcpConfig::claude().mcp_injection, ClaudeMcpJson);
+        assert_eq!(AcpConfig::opencode().mcp_injection, OpencodeJson);
+        assert_eq!(AcpConfig::gemini().mcp_injection, None);
+        assert_eq!(AcpConfig::codex().mcp_injection, None);
+        assert_eq!(AcpConfig::pi().mcp_injection, None);
     }
 }

@@ -1,0 +1,16 @@
+# Default provider catalog shipped with roy-management. The runtime loader
+# reads ~/.roy/connections.yaml (user-owned); this file is a reference only
+# and is NOT copied onto users' machines automatically.
+
+- id: github
+  name: GitHub
+  description: Read/write GitHub repos, issues, PRs
+  icon: github
+  command: npx
+  args:
+    - '-y'
+    - '@modelcontextprotocol/server-github'
+  secrets:
+    - key: GITHUB_PERSONAL_ACCESS_TOKEN
+      label: Personal Access Token
+      help: 'github.com/settings/tokens — scope: repo'

@@ -6,11 +6,13 @@ pub mod agents;
 pub mod auth;
 pub mod bootstrap;
 pub mod commands;
+pub mod connections;
 pub mod cwd;
 pub mod db;
 pub mod http;
 pub mod meta_store;
 pub mod orphan_sweep;
+pub mod provider_catalog;
 pub mod rate_limit;
 pub mod roy_client;
 pub mod state;
@@ -75,11 +77,33 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         None
     };
 
+    let catalog_path = crate::provider_catalog::default_path();
+    let catalog = match crate::provider_catalog::Catalog::load_from(&catalog_path) {
+        Ok(c) => {
+            tracing::info!(
+                path = %catalog_path.display(),
+                providers = c.providers().len(),
+                "provider catalog loaded"
+            );
+            std::sync::Arc::new(c)
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "provider catalog at {} is malformed: {e}. Fix the file or \
+                remove it to use an empty catalog. Reference sample at: \
+                crates/roy-management/resources/connections.default.yaml",
+                catalog_path.display()
+            );
+        }
+    };
+
     let state = AppState {
         meta,
         daemon,
         socket_path: socket,
         scheduler_pool,
+        connections: crate::connections::Store::new(pool.clone()),
+        catalog,
         pool,
         workspace_dir,
         login_limiter: Arc::new(crate::rate_limit::LoginLimiter::default()),

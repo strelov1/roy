@@ -53,6 +53,7 @@ pub trait TransportFactory: Send + Sync {
         harness: Harness,
         model: Option<&str>,
         permission: Option<&str>,
+        connections: &[crate::control::ConnectionSpec],
     ) -> Result<Arc<dyn Transport>>;
 }
 
@@ -65,6 +66,7 @@ impl TransportFactory for DefaultTransportFactory {
         harness: Harness,
         _model: Option<&str>,
         permission: Option<&str>,
+        connections: &[crate::control::ConnectionSpec],
     ) -> Result<Arc<dyn Transport>> {
         let mut config = match harness {
             Harness::Claude => AcpConfig::claude(),
@@ -84,6 +86,20 @@ impl TransportFactory for DefaultTransportFactory {
                 }
             };
         }
+        // Reject any harness that doesn't advertise an MCP injection channel
+        // when connections were requested, so the user sees an actionable
+        // error instead of silently-missing tools.
+        if !connections.is_empty()
+            && matches!(
+                config.mcp_injection,
+                crate::transport::McpInjectionStyle::None
+            )
+        {
+            return Err(RoyError::Protocol(format!(
+                "harness '{harness}' does not yet support MCP connections"
+            )));
+        }
+        config.connections = connections.to_vec();
         Ok(Arc::new(AcpTransport::new(config)))
     }
 }
@@ -290,6 +306,7 @@ impl Daemon {
                 resume,
                 system_prompt,
                 extra_env,
+                connections,
             } => {
                 let parsed: Harness = match harness.parse() {
                     Ok(p) => p,
@@ -307,6 +324,7 @@ impl Daemon {
                     resume,
                     system_prompt,
                     extra_env,
+                    connections,
                     event_tx,
                 )
                 .await
@@ -406,6 +424,7 @@ impl Daemon {
         resume: Option<String>,
         system_prompt: Option<String>,
         extra_env: std::collections::HashMap<String, String>,
+        connections: Vec<crate::control::ConnectionSpec>,
         event_tx: &EventTx,
     ) {
         let _ = event_tx.send(ServerEvent::Spawning {
@@ -420,6 +439,7 @@ impl Daemon {
             fixed_session_id: None,
             system_prompt,
             extra_env,
+            connections,
         };
         match self.manager.spawn(cfg, 256, 1024).await {
             Ok(engine) => {
@@ -570,6 +590,10 @@ impl Daemon {
                     fixed_session_id: None,
                     system_prompt,
                     extra_env: Default::default(),
+                    // Fire doesn't carry MCP connections; the scheduler/fire path
+                    // is for unattended one-shots that don't have a user-provided
+                    // connection list.
+                    connections: Vec::new(),
                 };
                 match self.manager.spawn(cfg, 256, 1024).await {
                     Ok(e) => e,
@@ -1088,6 +1112,7 @@ mod tests {
             _harness: Harness,
             _model: Option<&str>,
             _permission: Option<&str>,
+            _connections: &[crate::control::ConnectionSpec],
         ) -> Result<Arc<dyn Transport>> {
             Ok(Arc::new(AcpTransport::new(AcpConfig {
                 command: "python3".to_string(),
@@ -1097,6 +1122,8 @@ mod tests {
                 open_timeout: Duration::from_secs(5),
                 env_remove: Vec::new(),
                 system_prompt_channel: crate::transport::SystemPromptChannel::Meta,
+                connections: Vec::new(),
+                mcp_injection: crate::transport::McpInjectionStyle::None,
             })))
         }
     }
@@ -1213,6 +1240,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1339,6 +1367,7 @@ mod tests {
                 resume: None,
                 system_prompt: Some("PERSONA".into()),
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1406,6 +1435,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1553,6 +1583,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1742,6 +1773,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1912,6 +1944,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1934,6 +1967,7 @@ mod tests {
                 resume: Some("prior-session-sid".into()),
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -1999,6 +2033,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
@@ -2353,6 +2388,7 @@ mod tests {
                 resume: None,
                 system_prompt: None,
                 extra_env: Default::default(),
+                connections: vec![],
             },
         )
         .await;
