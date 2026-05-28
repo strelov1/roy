@@ -20,6 +20,11 @@ pub enum McpInjectionStyle {
     /// opencode: writes `<cwd>/opencode.json` with shape
     /// `{"$schema": "...", "mcp": {"<slug>": {"type": "local", "command": [cmd, ...args]}}}`.
     OpencodeJson,
+    /// gemini-cli: writes `<cwd>/.gemini/settings.json` with shape
+    /// `{"mcpServers": {"<slug>": {"command": "...", "args": [...]}}}`.
+    /// Identical to Claude's `.mcp.json` shape but nested under
+    /// `.gemini/` subdirectory and reading scope is project-local.
+    GeminiSettings,
 }
 
 /// Path under cwd where Claude Code looks for project-level MCP config.
@@ -28,6 +33,10 @@ pub const MCP_CONFIG_FILENAME: &str = ".mcp.json";
 /// Path under cwd where OpenCode looks for project-level config (including
 /// the `mcp` block).
 pub const OPENCODE_CONFIG_FILENAME: &str = "opencode.json";
+
+/// Subdirectory + filename gemini-cli reads for project-local config.
+pub const GEMINI_SETTINGS_DIR: &str = ".gemini";
+pub const GEMINI_SETTINGS_FILENAME: &str = "settings.json";
 
 /// Build the `.mcp.json` body that points at our proxy. The proxy reads the
 /// bundle at `bundle_path` on startup.

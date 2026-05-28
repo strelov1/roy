@@ -117,7 +117,7 @@ impl AcpConfig {
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
             connections: Vec::new(),
-            mcp_injection: mcp_injection::McpInjectionStyle::None,
+            mcp_injection: mcp_injection::McpInjectionStyle::GeminiSettings,
         }
     }
 
@@ -251,24 +251,36 @@ impl Transport for AcpTransport {
             )
             .map_err(RoyError::Io)?;
 
-            let (cfg_filename, cfg_value) = match self.config.mcp_injection {
+            let (cfg_path, cfg_value) = match self.config.mcp_injection {
                 mcp_injection::McpInjectionStyle::ClaudeMcpJson => (
-                    mcp_injection::MCP_CONFIG_FILENAME,
+                    cwd.join(mcp_injection::MCP_CONFIG_FILENAME),
                     mcp_injection::build_mcp_config(
                         &mcp_injection::roy_binary_path(),
                         &bundle_path,
                     ),
                 ),
                 mcp_injection::McpInjectionStyle::OpencodeJson => (
-                    mcp_injection::OPENCODE_CONFIG_FILENAME,
+                    cwd.join(mcp_injection::OPENCODE_CONFIG_FILENAME),
                     mcp_injection::build_opencode_config(
                         &mcp_injection::roy_binary_path(),
                         &bundle_path,
                     ),
                 ),
+                mcp_injection::McpInjectionStyle::GeminiSettings => {
+                    let dir = cwd.join(mcp_injection::GEMINI_SETTINGS_DIR);
+                    std::fs::create_dir_all(&dir).map_err(RoyError::Io)?;
+                    // Gemini-cli accepts the same `mcpServers` schema as Claude
+                    // Code, so we reuse `build_mcp_config` directly.
+                    (
+                        dir.join(mcp_injection::GEMINI_SETTINGS_FILENAME),
+                        mcp_injection::build_mcp_config(
+                            &mcp_injection::roy_binary_path(),
+                            &bundle_path,
+                        ),
+                    )
+                }
                 mcp_injection::McpInjectionStyle::None => unreachable!("checked above"),
             };
-            let cfg_path = cwd.join(cfg_filename);
             std::fs::write(
                 &cfg_path,
                 serde_json::to_vec_pretty(&cfg_value)
@@ -864,7 +876,7 @@ mod tests {
         use mcp_injection::McpInjectionStyle::*;
         assert_eq!(AcpConfig::claude().mcp_injection, ClaudeMcpJson);
         assert_eq!(AcpConfig::opencode().mcp_injection, OpencodeJson);
-        assert_eq!(AcpConfig::gemini().mcp_injection, None);
+        assert_eq!(AcpConfig::gemini().mcp_injection, GeminiSettings);
         assert_eq!(AcpConfig::codex().mcp_injection, None);
         assert_eq!(AcpConfig::pi().mcp_injection, None);
     }
