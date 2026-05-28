@@ -20,6 +20,11 @@ pub enum McpInjectionStyle {
     /// opencode: writes `<cwd>/opencode.json` with shape
     /// `{"$schema": "...", "mcp": {"<slug>": {"type": "local", "command": [cmd, ...args]}}}`.
     OpencodeJson,
+    /// gemini-cli: writes `<cwd>/.gemini/settings.json` with shape
+    /// `{"mcpServers": {"<slug>": {"command": "...", "args": [...]}}}`.
+    /// Identical to Claude's `.mcp.json` shape but nested under
+    /// `.gemini/` subdirectory and reading scope is project-local.
+    GeminiSettings,
 }
 
 /// Path under cwd where Claude Code looks for project-level MCP config.
@@ -28,6 +33,10 @@ pub const MCP_CONFIG_FILENAME: &str = ".mcp.json";
 /// Path under cwd where OpenCode looks for project-level config (including
 /// the `mcp` block).
 pub const OPENCODE_CONFIG_FILENAME: &str = "opencode.json";
+
+/// Subdirectory + filename gemini-cli reads for project-local config.
+pub const GEMINI_SETTINGS_DIR: &str = ".gemini";
+pub const GEMINI_SETTINGS_FILENAME: &str = "settings.json";
 
 /// Build the `.mcp.json` body that points at our proxy. The proxy reads the
 /// bundle at `bundle_path` on startup.
@@ -59,6 +68,24 @@ pub fn build_opencode_config(roy_binary: &str, bundle_path: &Path) -> Value {
                 "type": "local",
                 "command": [
                     roy_binary,
+                    "mcp",
+                    "serve-connections",
+                    "--specs",
+                    bundle_path.to_string_lossy(),
+                ],
+            }
+        }
+    })
+}
+
+/// Build the `<cwd>/.gemini/settings.json` body. Same `mcpServers` shape as
+/// Claude — gemini-cli's MCP config schema is intentionally Claude-compatible.
+pub fn build_gemini_config(roy_binary: &str, bundle_path: &Path) -> Value {
+    json!({
+        "mcpServers": {
+            "roy-connections": {
+                "command": roy_binary,
+                "args": [
                     "mcp",
                     "serve-connections",
                     "--specs",
@@ -117,6 +144,22 @@ mod tests {
         assert_eq!(cmd[2], "serve-connections");
         assert_eq!(cmd[3], "--specs");
         assert_eq!(cmd[4], "/tmp/b.json");
+    }
+
+    #[test]
+    fn gemini_config_shape() {
+        let v = build_gemini_config("/usr/local/bin/roy", &PathBuf::from("/tmp/b.json"));
+        assert_eq!(
+            v["mcpServers"]["roy-connections"]["command"],
+            "/usr/local/bin/roy"
+        );
+        let args = v["mcpServers"]["roy-connections"]["args"]
+            .as_array()
+            .unwrap();
+        assert_eq!(args[0], "mcp");
+        assert_eq!(args[1], "serve-connections");
+        assert_eq!(args[2], "--specs");
+        assert_eq!(args[3], "/tmp/b.json");
     }
 
     #[test]
