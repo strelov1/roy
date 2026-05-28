@@ -37,4 +37,8 @@ pub struct AppState {
     /// User-owned MCP connections store. Wraps an `Arc`'d pool so cloning
     /// `AppState` is cheap.
     pub connections: crate::connections::Store,
+    /// Read-only provider catalog loaded from `~/.roy/connections.yaml` at
+    /// boot. Cloneable because `Arc<Catalog>` is. Empty for users without
+    /// a yaml file.
+    pub catalog: std::sync::Arc<crate::provider_catalog::Catalog>,
 }
