@@ -1,19 +1,40 @@
-# roy
+# Roy — Harness Orchestrator
 
-**Agent orchestrator in Rust.** Spawn coding-agent CLIs (Claude Code, Gemini,
-OpenCode, Codex) as long-lived sessions, persist every turn as JSONL, attach
-multiple observers, and drive everything from a CLI, WebSocket, or MCP-aware
-LLM — all through one daemon, one journal, one control protocol.
+**Harness orchestrator in Rust.** Spawn ACP-adapter coding harnesses
+(Claude Code, Gemini, OpenCode, Codex, pi) as long-lived sessions,
+persist every turn as JSONL, attach multiple observers, and drive
+everything from a CLI, WebSocket, or MCP-aware LLM — all through one
+daemon, one journal, one control protocol.
 
-## Breaking changes (split-store refactor)
+**Vocabulary** (post-rename):
+- **harness** — one of the ACP-adapter binaries roy spawns
+  (`claude-code-acp`, `gemini`, `opencode`, `codex-acp`, `pi-acp`).
+  Configured in `~/.config/roy/harnesses.toml`.
+- **agent** — a persona, defined in a `.roy/agents/<slug>.md` file
+  with YAML frontmatter (`name`, `description`, `harness`, optional
+  `model`) and a body that becomes the session's system prompt.
+- **session** — one live conversation between roy and a harness,
+  optionally backed by an agent persona.
 
-Session metadata moved from per-session `.meta.json` files to two SQLite databases:
-- **Core sessions**: `~/.local/state/roy/sessions.db` (boot-kit per session: agent, cwd, model, permission, resume_cursor, system_prompt, created_at, closed_at).
-- **Management projects/tags/meta**: `~/.local/state/roy/agents.db` (joins existing `agents` table; adds `projects`, `session_meta`, `session_tags`).
+## Breaking changes (terminology rename + split-store refactor)
 
-After upgrading, clear obsolete files once:
+The rename unified the vocabulary: every place that called the ACP
+binary a "preset" (core wire/TOML/DB) or "engine" (file-based agent
+frontmatter) now uses **harness**. Upgrading from a pre-rename install:
 
 ```bash
+# Rename the harness catalog file.
+mv ~/.config/roy/agents.toml ~/.config/roy/harnesses.toml
+# …and inside it, `[[agent]] preset = "..."` becomes
+# `[[harness]] name = "..."`.
+
+# In any .roy/agents/*.md you authored, rename the YAML key:
+#   `engine: claude` → `harness: claude`
+
+# sessions.db and the scheduler agents.db migrate themselves
+# (ALTER COLUMN runs automatically on first start).
+
+# After the earlier split-store refactor, clear obsolete files once:
 rm -rf ~/.roy/journals/*.meta.json
 rm -f  ~/.roy/projects.json
 ```
@@ -22,7 +43,7 @@ Wire-protocol break: `SetTags`/`ListProjects`/`CreateProject`/`DeleteProject` co
 
 ## What this is
 
-roy started as a Rust library that wraps coding-agent CLIs as a single
+roy started as a Rust library that wraps coding-harness CLIs as a single
 `Session::send(prompt) -> Stream<TurnEvent>` API. It now ships as a small
 workspace with two crates:
 

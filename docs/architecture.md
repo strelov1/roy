@@ -36,8 +36,9 @@ semantics live in [persistence.md](./persistence.md).
  (127.0.0.1:8787, token-auth)
 ```
 
-Bytes only cross trait boundaries at `Transport`. Adding a new agent is a
-new `AcpConfig` preset, not new session/journal/protocol code.
+Bytes only cross trait boundaries at `Transport`. Adding a new harness is
+a new `AcpConfig` constructor plus a `Harness` enum variant, not new
+session/journal/protocol code.
 
 ## Layers
 
@@ -64,9 +65,10 @@ mid-turn process death so it can emit a synthetic `Result {
 stop_reason: Error }`; the SDK's high-level helper would otherwise leave
 `send_request` pending forever on a clean `exit(0)`.
 
-`AcpConfig` presets centralise agent-specific knobs (command, args, ACP
-mode, default permission policy, open-handshake timeout) for the four
-supported agents: `claude`, `gemini`, `opencode`, `codex`.
+`AcpConfig` constructors centralise harness-specific knobs (command,
+args, ACP mode, default permission policy, open-handshake timeout) for
+the five supported harnesses: `claude`, `gemini`, `opencode`, `codex`,
+`pi`.
 
 ### `SessionEngine` — the actor that owns a session
 
@@ -181,26 +183,26 @@ Telegram adapter: it speaks the control protocol over the Unix socket
 like any other external client, and re-frames the same JSON as
 `Message::Text` for WS peers. The daemon is unaware of WS.
 
-### Agents discovery layer
+### Harnesses discovery layer
 
-`crates/roy/src/agents_config.rs` is a stateless module that reads
-`~/.config/roy/agents.toml` on demand (`load_or_bootstrap`), validates
-it, and normalises into wire-facing `AgentInfo` / `ModelInfo`
-structures. The daemon's `handle_list_agents` (`daemon.rs`) is a thin
-wrapper that translates outcomes into `ServerEvent::AgentsList`
+`crates/roy/src/harnesses_config.rs` is a stateless module that reads
+`~/.config/roy/harnesses.toml` on demand (`load_or_bootstrap`), validates
+it, and normalises into wire-facing `HarnessInfo` / `ModelInfo`
+structures. The daemon's `handle_list_harnesses` (`daemon.rs`) is a thin
+wrapper that translates outcomes into `ServerEvent::HarnessesList`
 variants (`status: ok | created | invalid`).
 
-No cache, no file watcher — the file is re-read on every `ListAgents`
+No cache, no file watcher — the file is re-read on every `ListHarnesses`
 request. Bootstrap is atomic (write-to-tmp + rename) and concurrent-safe
 via per-call UUID-suffixed temp names. The daemon never overwrites a
-user's existing `agents.toml`.
+user's existing `harnesses.toml`.
 
 This module is the single source of truth for the set of available
-agents and models. The CLI (`roy agents list`), the MCP tool
-(`roy_list_agents`), and `roy-web`'s `agentsConfig` store all consume
-the same wire shape — see [agents-config.md](./agents-config.md) for
-the user-facing reference and [wire-protocol.md](./wire-protocol.md) for
-the JSON shapes.
+harnesses and models. The CLI (`roy harnesses list`), the MCP tool
+(`roy_list_harnesses`), and `roy-web`'s harness catalog store all
+consume the same wire shape — see
+[harnesses-config.md](./harnesses-config.md) for the user-facing
+reference and [wire-protocol.md](./wire-protocol.md) for the JSON shapes.
 
 ### Tests
 
