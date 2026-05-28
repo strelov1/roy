@@ -402,3 +402,30 @@ fn which(bin: &str) -> Option<()> {
         .filter(|s| s.success())
         .map(|_| ())
 }
+
+#[tokio::test]
+async fn open_propagates_roy_session_id_env() {
+    let env_out = tempfile::NamedTempFile::new().unwrap();
+    let env_out_path = env_out.path().to_path_buf();
+    let env_out_str = env_out_path.to_string_lossy().to_string();
+
+    let cfg = fake_config(&["--env-out", &env_out_str]);
+    let transport = AcpTransport::new(cfg);
+
+    let session_id = "test-session-id-abc123";
+    let _handle = transport
+        .open(session_id, None, std::env::current_dir().unwrap(), None)
+        .await
+        .expect("open should succeed");
+
+    // The fake agent wrote the env var to disk at process start, before
+    // the JSON-RPC initialize handshake completes — so by the time `open`
+    // returns, the file is on disk.
+    let body = std::fs::read_to_string(&env_out_path).expect("env-out file should exist");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("env-out should be JSON");
+    assert_eq!(
+        v["ROY_SESSION_ID"].as_str(),
+        Some(session_id),
+        "expected ROY_SESSION_ID to be set to the host session id; got {v}"
+    );
+}

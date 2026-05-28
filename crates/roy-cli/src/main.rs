@@ -61,6 +61,11 @@ enum Cmd {
     /// Inject a message into a live session as a background note (no input
     /// lease needed). A background agent calls this to notify a session.
     Inject(InjectArgs),
+    /// Synchronously ask another session or agent persona for a text
+    /// answer. Resolves `<target>` to a live session id (→ Fire Resume)
+    /// or, failing that, to an agent slug from roy-management
+    /// (→ Fire Spawn with that persona).
+    Ask(AskArgs),
     /// Run an MCP server (stdio JSON-RPC) that exposes roy daemon operations
     /// as MCP tools. Spawn this from an MCP-aware client (Claude Desktop,
     /// IDE plugin) which talks to it over stdio.
@@ -244,6 +249,23 @@ struct InjectArgs {
     /// background session that produced this message).
     #[arg(long)]
     source: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct AskArgs {
+    /// Target: a live roy session id, or an agent slug/id from
+    /// roy-management (`roy agents list`).
+    target: String,
+    /// The question or task text.
+    prompt: String,
+    /// Optional extra context, concatenated under a "Context:" label.
+    #[arg(long)]
+    context: Option<String>,
+    #[command(flatten)]
+    mgmt: MgmtBaseArgs,
+    /// Hard cap on the round-trip. Default 600_000 (10 min), same as Fire.
+    #[arg(long)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(clap::Args)]
@@ -431,6 +453,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Wait(args) => cmd_wait(args).await,
         Cmd::Fire(args) => cmd_fire(args).await,
         Cmd::Inject(args) => cmd_inject(args).await,
+        Cmd::Ask(args) => cmd_ask(args).await,
         Cmd::Mcp(args) => {
             let socket = args.socket.unwrap_or_else(default_socket);
             roy_mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
@@ -875,6 +898,19 @@ async fn cmd_close(args: CloseArgs) -> anyhow::Result<()> {
     }
 }
 
+/// Builds the prompt sent to the target agent in `roy ask`. With no
+/// context, the prompt is forwarded verbatim. With context, both are
+/// concatenated under explicit labels — the LLM-side equivalent of
+/// CrewAI's `(task, context)` tool schema.
+fn build_ask_prompt(prompt: &str, context: Option<&str>) -> String {
+    match context {
+        Some(ctx) if !ctx.is_empty() => {
+            format!("Context:\n{ctx}\n\nQuestion/Task:\n{prompt}")
+        }
+        _ => prompt.to_string(),
+    }
+}
+
 async fn cmd_inject(args: InjectArgs) -> anyhow::Result<ExitCode> {
     let (mut writer, mut events) = open_daemon().await?;
 
@@ -903,6 +939,111 @@ async fn cmd_inject(args: InjectArgs) -> anyhow::Result<ExitCode> {
         }
         other => anyhow::bail!("unexpected response to Inject: {other:?}"),
     }
+}
+
+async fn cmd_ask(args: AskArgs) -> anyhow::Result<ExitCode> {
+    let final_prompt = build_ask_prompt(&args.prompt, args.context.as_deref());
+
+    let Some(target) = resolve_ask_target(&args.target, &args.mgmt.mgmt_url).await? else {
+        eprintln!(
+            "roy ask: unknown target '{}' (not a live session id, not an agent slug or id)",
+            args.target
+        );
+        return Ok(ExitCode::from(2));
+    };
+
+    let (mut writer, mut events) = open_daemon().await?;
+    send_cmd(
+        &mut writer,
+        &ClientCommand::Fire {
+            target,
+            prompt: final_prompt,
+            tags: BTreeMap::new(),
+            timeout_ms: args.timeout_ms,
+        },
+    )
+    .await?;
+
+    match read_event(&mut events).await? {
+        ServerEvent::FireDone {
+            session,
+            seq_range: _,
+            result,
+            assistant_text,
+        } => {
+            let TurnEvent::Result {
+                cost_usd: _,
+                stop_reason,
+            } = &result
+            else {
+                anyhow::bail!("daemon sent non-Result in FireDone: {result:?}");
+            };
+            let payload = serde_json::json!({
+                "type": "answer",
+                "session": session,
+                "text": assistant_text,
+            });
+            println!("{payload}");
+            Ok(if stop_reason.is_error() {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            })
+        }
+        ServerEvent::FireTimeout { session, .. } => {
+            eprintln!("roy ask: timeout (session={session})");
+            Ok(ExitCode::from(2))
+        }
+        ServerEvent::FireError {
+            session,
+            code,
+            message,
+        } => {
+            eprintln!(
+                "roy ask: {code}: {message} (session={})",
+                session.as_deref().unwrap_or("<no session>")
+            );
+            Ok(ExitCode::from(2))
+        }
+        other => anyhow::bail!("unexpected response to Fire: {other:?}"),
+    }
+}
+
+/// Resolve `<target>`: try as a live roy session id first (one
+/// `ClientCommand::List` round-trip); on miss, try as an agent slug or
+/// id via roy-management. `Ok(None)` signals "unknown target" — the
+/// caller renders the stderr message and exits 2.
+async fn resolve_ask_target(
+    target: &str,
+    mgmt_url: &str,
+) -> anyhow::Result<Option<roy::FireTarget>> {
+    use roy::FireTarget;
+
+    let (mut writer, mut events) = open_daemon().await?;
+    send_cmd(&mut writer, &ClientCommand::List).await?;
+    let live_match = match read_event(&mut events).await? {
+        ServerEvent::Listed { sessions } => sessions.into_iter().any(|s| s.session == target),
+        other => anyhow::bail!("unexpected response to List: {other:?}"),
+    };
+    if live_match {
+        return Ok(Some(FireTarget::Resume {
+            session_id: target.to_string(),
+        }));
+    }
+
+    let client = crate::management_client::ManagementClient::new(mgmt_url);
+    let agents = client.list().await?;
+    if let Some(agent) = agents
+        .into_iter()
+        .find(|a| a.slug == target || a.id == target)
+    {
+        return Ok(Some(FireTarget::Spawn {
+            preset: agent.preset,
+            system_prompt: Some(agent.prompt),
+        }));
+    }
+
+    Ok(None)
 }
 
 async fn cmd_wait(args: WaitArgs) -> anyhow::Result<ExitCode> {
@@ -1484,5 +1625,29 @@ mod fire_args_tests {
             cli.is_err(),
             "expected error: --project conflicts with --resume"
         );
+    }
+}
+
+#[cfg(test)]
+mod build_ask_prompt_tests {
+    use super::build_ask_prompt;
+
+    #[test]
+    fn build_ask_prompt_without_context_is_plain_prompt() {
+        assert_eq!(build_ask_prompt("do the thing", None), "do the thing");
+    }
+
+    #[test]
+    fn build_ask_prompt_with_context_concatenates_with_labels() {
+        let p = build_ask_prompt("Is this OK?", Some("Found a possible match in row 7."));
+        assert_eq!(
+            p,
+            "Context:\nFound a possible match in row 7.\n\nQuestion/Task:\nIs this OK?"
+        );
+    }
+
+    #[test]
+    fn build_ask_prompt_empty_context_is_treated_as_no_context() {
+        assert_eq!(build_ask_prompt("hi", Some("")), "hi");
     }
 }
