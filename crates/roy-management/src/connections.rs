@@ -188,8 +188,7 @@ impl Store {
         req: NewConnectionFromProvider,
         provider: &crate::provider_catalog::Provider,
     ) -> Result<Connection, StoreError> {
-        validate_required_secrets(provider, req.secrets.as_ref())
-            .map_err(StoreError::Invalid)?;
+        validate_required_secrets(provider, req.secrets.as_ref()).map_err(StoreError::Invalid)?;
         let config = serde_json::json!({
             "command": provider.command,
             "args": provider.args,
@@ -276,7 +275,13 @@ impl Store {
                     // can map them to 409. Without this guard the slug-retry
                     // loop would spin forever — the regenerated slug doesn't
                     // affect a `(provider_id, name)` collision.
-                    if d.message().contains("slug") {
+                    //
+                    // We match on the literal `"connections.slug"` substring
+                    // because sqlx-sqlite 0.8 does NOT populate
+                    // `DatabaseError::constraint()` (Postgres-only). SQLite's
+                    // UNIQUE error message format is stable:
+                    // `UNIQUE constraint failed: <table>.<col>, ...`.
+                    if d.message().contains("connections.slug") {
                         continue;
                     }
                     return Err(StoreError::Db(sqlx::Error::Database(d)));
@@ -457,14 +462,12 @@ fn validate_required_secrets(
     if provider.secrets.is_empty() {
         return Ok(());
     }
-    let supplied_obj = supplied
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            format!(
-                "secrets must be an object with keys: {}",
-                required_keys(provider)
-            )
-        })?;
+    let supplied_obj = supplied.and_then(Value::as_object).ok_or_else(|| {
+        format!(
+            "secrets must be an object with keys: {}",
+            required_keys(provider)
+        )
+    })?;
     let mut missing: Vec<&str> = Vec::new();
     for s in &provider.secrets {
         match supplied_obj.get(&s.key) {
