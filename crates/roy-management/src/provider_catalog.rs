@@ -97,12 +97,11 @@ impl Catalog {
                 });
             }
         };
-        let providers: Vec<Provider> = serde_yaml::from_str(&text).map_err(|e| {
-            CatalogError::Parse {
+        let providers: Vec<Provider> =
+            serde_yaml::from_str(&text).map_err(|e| CatalogError::Parse {
                 path: path.to_path_buf(),
                 source: e,
-            }
-        })?;
+            })?;
         for (i, p) in providers.iter().enumerate() {
             if p.id.is_empty() {
                 return Err(CatalogError::Schema {
@@ -142,5 +141,4 @@ pub fn default_path() -> PathBuf {
 /// The default catalog shipped in the repo (`resources/connections.default.yaml`),
 /// available at compile time. Used by tests and as a reference path for the
 /// boot-error message.
-pub const DEFAULT_CATALOG_YAML: &str =
-    include_str!("../resources/connections.default.yaml");
+pub const DEFAULT_CATALOG_YAML: &str = include_str!("../resources/connections.default.yaml");

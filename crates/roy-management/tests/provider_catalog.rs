@@ -31,10 +31,7 @@ fn default_catalog_parses_and_contains_github() {
         serde_yaml::from_str(DEFAULT_CATALOG_YAML).unwrap();
     let github = providers.iter().find(|p| p.id == "github").unwrap();
     assert_eq!(github.command, "npx");
-    assert_eq!(
-        github.secrets[0].key,
-        "GITHUB_PERSONAL_ACCESS_TOKEN"
-    );
+    assert_eq!(github.secrets[0].key, "GITHUB_PERSONAL_ACCESS_TOKEN");
 }
 
 #[test]
@@ -58,16 +55,16 @@ fn empty_id_returns_schema_error() {
     let f = write_temp("- id: ''\n  name: x\n  command: x\n");
     let err = Catalog::load_from(f.path()).unwrap_err();
     match err {
-        CatalogError::Schema { reason, .. } => assert!(reason.contains("`id` is empty"), "{reason}"),
+        CatalogError::Schema { reason, .. } => {
+            assert!(reason.contains("`id` is empty"), "{reason}")
+        }
         _ => panic!("expected Schema error, got {err}"),
     }
 }
 
 #[test]
 fn duplicate_id_returns_schema_error() {
-    let f = write_temp(
-        "- id: dup\n  name: A\n  command: x\n- id: dup\n  name: B\n  command: y\n",
-    );
+    let f = write_temp("- id: dup\n  name: A\n  command: x\n- id: dup\n  name: B\n  command: y\n");
     let err = Catalog::load_from(f.path()).unwrap_err();
     match err {
         CatalogError::Schema { reason, .. } => assert!(reason.contains("duplicate"), "{reason}"),
@@ -77,9 +74,7 @@ fn duplicate_id_returns_schema_error() {
 
 #[test]
 fn get_by_id_returns_the_right_provider() {
-    let f = write_temp(
-        "- id: github\n  name: GitHub\n  command: npx\n  args: ['-y', '@x/y']\n",
-    );
+    let f = write_temp("- id: github\n  name: GitHub\n  command: npx\n  args: ['-y', '@x/y']\n");
     let cat = Catalog::load_from(f.path()).unwrap();
     assert_eq!(cat.get("github").unwrap().command, "npx");
     assert!(cat.get("nonexistent").is_none());
