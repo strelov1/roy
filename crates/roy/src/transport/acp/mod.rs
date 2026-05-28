@@ -241,9 +241,9 @@ impl Transport for AcpTransport {
         let mcp_bundle_guard = if !self.config.connections.is_empty()
             && self.config.mcp_injection != mcp_injection::McpInjectionStyle::None
         {
-            let bundle = mcp_injection::build_bundle(_session_id, &self.config.connections);
+            let bundle = mcp_injection::build_bundle(session_id, &self.config.connections);
             let bundle_path =
-                std::env::temp_dir().join(format!("roy-mcp-bundle-{_session_id}.json"));
+                std::env::temp_dir().join(format!("roy-mcp-bundle-{session_id}.json"));
             std::fs::write(
                 &bundle_path,
                 serde_json::to_vec(&bundle)

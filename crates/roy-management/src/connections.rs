@@ -2,7 +2,7 @@
 //!
 //! Owner is always a user (no team-shared connections in MVP). Slugs are
 //! derived from `name` and made unique per-owner by suffixing (`-2`, `-3`,
-//! ...) — same pattern as `roy_agents::store`.
+//! ...).
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -70,15 +70,9 @@ pub struct ConnectionUpdate {
     pub name: Option<String>,
     #[serde(default)]
     pub config: Option<Value>,
-    #[serde(
-        default,
-        deserialize_with = "roy_agents::types::deserialize_optional_field"
-    )]
+    #[serde(default, deserialize_with = "crate::http::deserialize_optional_field")]
     pub secrets: Option<Option<Value>>,
-    #[serde(
-        default,
-        deserialize_with = "roy_agents::types::deserialize_optional_field"
-    )]
+    #[serde(default, deserialize_with = "crate::http::deserialize_optional_field")]
     pub description: Option<Option<String>>,
 }
 
@@ -135,9 +129,26 @@ pub fn validate_config(kind: &str, config: &Value) -> Result<(), String> {
     }
 }
 
-/// Slugify the connection name using the same rules as roy_agents.
+/// Lowercase, non-alphanumeric runs collapse to a single `-`, leading/trailing
+/// `-` trimmed. Empty input (or all-punctuation) yields `"connection"`.
 pub fn slugify(name: &str) -> String {
-    roy_agents::slugify(name)
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "connection".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 // ---------------- Store ----------------
@@ -662,12 +673,12 @@ mod tests {
     /// Returns a pool with all migrations applied (roy-agents + roy-management
     /// + roy-auth), the canonical pattern used by `tests/common/mod.rs`.
     /// `roy_auth::test_support::temp_pool` alone only applies roy-auth
-    /// migrations and skips the roy-agents `agents` table that
+    /// migrations and skips the `agents` table that
     /// `MetaStore::apply_migrations` references via FK / migration shape, so
-    /// we open via `roy_agents::open` first.
+    /// we open via `crate::db::open` first.
     async fn setup_pool() -> SqlitePool {
         let dir = tempfile::tempdir().expect("tempdir");
-        let pool = roy_agents::open(&dir.path().join("agents.db"))
+        let pool = crate::db::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
         crate::meta_store::MetaStore::apply_migrations(&pool)

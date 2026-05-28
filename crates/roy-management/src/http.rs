@@ -288,7 +288,9 @@ async fn delete_project(
 /// value is `null`, so we can distinguish "field absent" (handled by
 /// `#[serde(default)]` returning the outer `None`) from "field set to null"
 /// (this function returning `Some(None)`).
-fn deserialize_optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn deserialize_optional_field<'de, T, D>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
 where
     T: serde::Deserialize<'de>,
     D: serde::Deserializer<'de>,
@@ -490,7 +492,6 @@ async fn create_session(
             })
             .collect()
     };
-
 
     let sid = match s
         .daemon

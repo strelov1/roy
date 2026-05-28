@@ -140,7 +140,7 @@ async fn session_create_forwards_connections() {
 
     // 2. Alice creates a session with both connection_ids attached.
     let body = json!({
-        "agent": "claude",
+        "harness": "claude",
         "scope": "personal",
         "connection_ids": [conn_a, conn_b]
     });
@@ -195,7 +195,7 @@ async fn session_create_rejects_unknown_connection() {
     let cookie = login_as(&app, "alice", "test-password-1234").await;
 
     let body = json!({
-        "agent": "claude",
+        "harness": "claude",
         "scope": "personal",
         "connection_ids": ["nonexistent-id"]
     });
@@ -227,7 +227,7 @@ async fn session_create_rejects_cross_user_connection() {
 
     // Bob tries to attach it. Should 400 (don't leak existence).
     let body = json!({
-        "agent": "claude",
+        "harness": "claude",
         "scope": "personal",
         "connection_ids": [alice_conn]
     });
@@ -279,7 +279,7 @@ async fn session_create_forwards_specs_to_daemon() {
 
     // Create a session referencing that connection.
     let body = json!({
-        "agent": "claude",
+        "harness": "claude",
         "scope": "personal",
         "connection_ids": [conn_id.clone()],
     });
