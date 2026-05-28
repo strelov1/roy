@@ -124,7 +124,7 @@ pub async fn test_app_with_catalog() -> (axum::Router, sqlx::SqlitePool, std::pa
 
     std::env::set_var("ROY_JWT_SECRET", TEST_JWT_SECRET);
     let dir = tempfile::tempdir().expect("tempdir");
-    let pool = roy_agents::open(&dir.path().join("agents.db"))
+    let pool = roy_management::db::open(&dir.path().join("agents.db"))
         .await
         .unwrap();
     roy_management::meta_store::MetaStore::apply_migrations(&pool)
@@ -140,7 +140,6 @@ pub async fn test_app_with_catalog() -> (axum::Router, sqlx::SqlitePool, std::pa
         roy_management::roy_client::mock::MockDaemonClient::new().with_spawn("sess-1"),
     );
     let state = AppState {
-        store: roy_agents::Store::new(pool.clone()),
         meta,
         daemon,
         socket_path: std::path::PathBuf::from("/tmp/fake.sock"),
@@ -149,6 +148,7 @@ pub async fn test_app_with_catalog() -> (axum::Router, sqlx::SqlitePool, std::pa
         workspace_dir: workspace_dir.clone(),
         login_limiter: std::sync::Arc::new(roy_management::rate_limit::LoginLimiter::default()),
         commands_cache: std::sync::Arc::new(roy_management::commands::CommandsCache::default()),
+        agents_cache: std::sync::Arc::new(roy_management::agents::AgentsCache::default()),
         connections: roy_management::connections::Store::new(pool.clone()),
         catalog,
     };

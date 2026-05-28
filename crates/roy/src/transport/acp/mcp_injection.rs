@@ -7,8 +7,27 @@ use crate::control::ConnectionSpec;
 use serde_json::{json, Value};
 use std::path::Path;
 
+/// Per-preset MCP injection channel. Each variant identifies a config file
+/// shape + filename the underlying CLI reads on startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpInjectionStyle {
+    /// Preset doesn't support MCP injection. Daemon rejects spawns with
+    /// non-empty connections.
+    None,
+    /// claude-code-acp: writes `<cwd>/.mcp.json` with shape
+    /// `{"mcpServers": {"<slug>": {"command": "...", "args": [...]}}}`.
+    ClaudeMcpJson,
+    /// opencode: writes `<cwd>/opencode.json` with shape
+    /// `{"$schema": "...", "mcp": {"<slug>": {"type": "local", "command": [cmd, ...args]}}}`.
+    OpencodeJson,
+}
+
 /// Path under cwd where Claude Code looks for project-level MCP config.
 pub const MCP_CONFIG_FILENAME: &str = ".mcp.json";
+
+/// Path under cwd where OpenCode looks for project-level config (including
+/// the `mcp` block).
+pub const OPENCODE_CONFIG_FILENAME: &str = "opencode.json";
 
 /// Build the `.mcp.json` body that points at our proxy. The proxy reads the
 /// bundle at `bundle_path` on startup.
@@ -18,6 +37,28 @@ pub fn build_mcp_config(roy_binary: &str, bundle_path: &Path) -> Value {
             "roy-connections": {
                 "command": roy_binary,
                 "args": [
+                    "mcp",
+                    "serve-connections",
+                    "--specs",
+                    bundle_path.to_string_lossy(),
+                ],
+            }
+        }
+    })
+}
+
+/// Build the `opencode.json` body that points OpenCode at our proxy.
+/// OpenCode's MCP schema is different from Claude's: it uses an `mcp` object
+/// (not `mcpServers`), each entry has a `type: "local"` discriminator, and
+/// `command` is a single array containing the command + args fused.
+pub fn build_opencode_config(roy_binary: &str, bundle_path: &Path) -> Value {
+    json!({
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {
+            "roy-connections": {
+                "type": "local",
+                "command": [
+                    roy_binary,
                     "mcp",
                     "serve-connections",
                     "--specs",
@@ -63,6 +104,19 @@ mod tests {
         assert_eq!(args[1], "serve-connections");
         assert_eq!(args[2], "--specs");
         assert_eq!(args[3], "/tmp/bundle.json");
+    }
+
+    #[test]
+    fn opencode_config_shape() {
+        let v = build_opencode_config("/usr/local/bin/roy", &PathBuf::from("/tmp/b.json"));
+        assert_eq!(v["$schema"], "https://opencode.ai/config.json");
+        assert_eq!(v["mcp"]["roy-connections"]["type"], "local");
+        let cmd = v["mcp"]["roy-connections"]["command"].as_array().unwrap();
+        assert_eq!(cmd[0], "/usr/local/bin/roy");
+        assert_eq!(cmd[1], "mcp");
+        assert_eq!(cmd[2], "serve-connections");
+        assert_eq!(cmd[3], "--specs");
+        assert_eq!(cmd[4], "/tmp/b.json");
     }
 
     #[test]

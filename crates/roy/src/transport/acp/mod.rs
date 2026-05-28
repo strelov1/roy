@@ -99,12 +99,10 @@ pub struct AcpConfig {
     /// spawning. Currently only `AcpConfig::claude()` opts into using this —
     /// other presets ignore it. Wired in D2.
     pub connections: Vec<crate::control::ConnectionSpec>,
-    /// When true, the transport materializes a `.mcp.json` in cwd and a sibling
-    /// bundle file in a temp dir before spawning the child, so the agent's
-    /// project-level MCP config points at `roy mcp serve-connections`. Only
-    /// honored by presets whose underlying CLI reads `<cwd>/.mcp.json`
-    /// (currently: claude-code-acp).
-    pub inject_mcp: bool,
+    /// Which per-session MCP config file (if any) the underlying CLI reads.
+    /// Drives where AcpTransport::open writes the catalog of connections
+    /// before spawning the child.
+    pub mcp_injection: mcp_injection::McpInjectionStyle,
 }
 
 impl AcpConfig {
@@ -119,7 +117,7 @@ impl AcpConfig {
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
             connections: Vec::new(),
-            inject_mcp: false,
+            mcp_injection: mcp_injection::McpInjectionStyle::None,
         }
     }
 
@@ -135,7 +133,7 @@ impl AcpConfig {
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::Meta,
             connections: Vec::new(),
-            inject_mcp: false,
+            mcp_injection: mcp_injection::McpInjectionStyle::OpencodeJson,
         }
     }
 
@@ -150,7 +148,7 @@ impl AcpConfig {
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
             connections: Vec::new(),
-            inject_mcp: false,
+            mcp_injection: mcp_injection::McpInjectionStyle::None,
         }
     }
 
@@ -168,7 +166,7 @@ impl AcpConfig {
             env_remove: vec!["CLAUDECODE".to_string()],
             system_prompt_channel: SystemPromptChannel::Meta,
             connections: Vec::new(),
-            inject_mcp: true,
+            mcp_injection: mcp_injection::McpInjectionStyle::ClaudeMcpJson,
         }
     }
 
@@ -187,7 +185,7 @@ impl AcpConfig {
             env_remove: Vec::new(),
             system_prompt_channel: SystemPromptChannel::FirstTurn,
             connections: Vec::new(),
-            inject_mcp: false,
+            mcp_injection: mcp_injection::McpInjectionStyle::None,
         }
     }
 }
@@ -238,9 +236,11 @@ impl Transport for AcpTransport {
 
         // MCP injection: write project-level config + sibling bundle. The
         // bundle lives in a temp dir so secrets stay out of cwd (which the
-        // agent can read with file tools). The .mcp.json itself is benign —
-        // it just points at our proxy.
-        let mcp_bundle_guard = if self.config.inject_mcp && !self.config.connections.is_empty() {
+        // agent can read with file tools). The project config itself is
+        // benign — it just points at our proxy.
+        let mcp_bundle_guard = if !self.config.connections.is_empty()
+            && self.config.mcp_injection != mcp_injection::McpInjectionStyle::None
+        {
             let bundle = mcp_injection::build_bundle(_session_id, &self.config.connections);
             let bundle_path =
                 std::env::temp_dir().join(format!("roy-mcp-bundle-{_session_id}.json"));
@@ -250,17 +250,33 @@ impl Transport for AcpTransport {
                     .map_err(|e| RoyError::Protocol(format!("bundle serialize: {e}")))?,
             )
             .map_err(RoyError::Io)?;
-            let mcp_cfg =
-                mcp_injection::build_mcp_config(&mcp_injection::roy_binary_path(), &bundle_path);
-            let mcp_cfg_path = cwd.join(mcp_injection::MCP_CONFIG_FILENAME);
+
+            let (cfg_filename, cfg_value) = match self.config.mcp_injection {
+                mcp_injection::McpInjectionStyle::ClaudeMcpJson => (
+                    mcp_injection::MCP_CONFIG_FILENAME,
+                    mcp_injection::build_mcp_config(
+                        &mcp_injection::roy_binary_path(),
+                        &bundle_path,
+                    ),
+                ),
+                mcp_injection::McpInjectionStyle::OpencodeJson => (
+                    mcp_injection::OPENCODE_CONFIG_FILENAME,
+                    mcp_injection::build_opencode_config(
+                        &mcp_injection::roy_binary_path(),
+                        &bundle_path,
+                    ),
+                ),
+                mcp_injection::McpInjectionStyle::None => unreachable!("checked above"),
+            };
+            let cfg_path = cwd.join(cfg_filename);
             std::fs::write(
-                &mcp_cfg_path,
-                serde_json::to_vec_pretty(&mcp_cfg)
+                &cfg_path,
+                serde_json::to_vec_pretty(&cfg_value)
                     .map_err(|e| RoyError::Protocol(format!("mcp config serialize: {e}")))?,
             )
             .map_err(RoyError::Io)?;
             // Guard cleans up the bundle (which holds secrets) when the
-            // handle drops. The cwd's .mcp.json is left in place — the
+            // handle drops. The cwd's project config is left in place — the
             // user's cwd is theirs to manage.
             Some(BundleGuard { path: bundle_path })
         } else {
@@ -844,14 +860,12 @@ mod tests {
     }
 
     #[test]
-    fn claude_preset_has_inject_mcp_on_by_default() {
-        assert!(
-            AcpConfig::claude().inject_mcp,
-            "claude must opt into MCP injection"
-        );
-        assert!(!AcpConfig::gemini().inject_mcp);
-        assert!(!AcpConfig::opencode().inject_mcp);
-        assert!(!AcpConfig::codex().inject_mcp);
-        assert!(!AcpConfig::pi().inject_mcp);
+    fn presets_advertise_mcp_injection_style_correctly() {
+        use mcp_injection::McpInjectionStyle::*;
+        assert_eq!(AcpConfig::claude().mcp_injection, ClaudeMcpJson);
+        assert_eq!(AcpConfig::opencode().mcp_injection, OpencodeJson);
+        assert_eq!(AcpConfig::gemini().mcp_injection, None);
+        assert_eq!(AcpConfig::codex().mcp_injection, None);
+        assert_eq!(AcpConfig::pi().mcp_injection, None);
     }
 }
