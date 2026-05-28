@@ -2,14 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Code quality bar
+## Working principles
 
-Non-negotiable expectations for any change in this repo:
+Non-negotiable for any change in this repo. Bias toward caution over speed; for trivial tasks, use judgment.
 
-- **No hacks, no temporary solutions, no tech debt.** Code must be reliable and simple. Don't ship "for now" workarounds or stop-gaps. When two designs exist, choose the idiomatic/intended one (e.g. a library's intended API) over a clever shim.
-- **Fix root causes, never symptoms.** When something breaks, trace it to the underlying cause and fix that. Don't patch the surface effect — prefer the fix that makes the symptom impossible, not merely invisible.
-- **Real refactors over awkward preservation.** If a clean change requires touching existing code (renaming, dropping a trait param, reshaping an abstraction), do it rather than bolting compatibility shims on top.
-- **No overengineering.** Each change must justify its own weight. When an audit or review surfaces many findings, filter to the ones with real impact (durability loss, lost panics, invisible IO errors) and skip paranoia-tier additions (logs for impossible cases, defensive instrumentation that doesn't change outcomes). "Clean and simple" beats "exhaustive".
+- **Think before coding.** Surface assumptions explicitly. If multiple interpretations exist, present them — don't pick silently. If a simpler approach exists, say so. If something is unclear, stop and ask.
+- **Simplicity first.** Minimum code that solves the problem. No features, abstractions, flexibility, or error handling that wasn't asked for. No hacks or "for now" workarounds — when two designs exist, choose the idiomatic one (e.g. a library's intended API) over a clever shim.
+- **Surgical changes, except when a real refactor is the task.** By default touch only what the task requires; don't improve adjacent code, refactor unbroken things, or rework formatting. Match existing style. Clean up imports/variables your changes orphaned; leave pre-existing dead code alone. **Exception:** when a clean change *requires* reshaping existing code (renaming, dropping a trait param, replacing an abstraction), do the real refactor rather than bolting a compatibility shim on top. Surgical ≠ avoiding the necessary refactor; surgical = not expanding scope beyond what the task needs.
+- **Fix root causes, never symptoms.** Trace breakage to the underlying cause and fix that. Prefer the fix that makes the symptom impossible, not merely invisible.
+- **No overengineering.** When an audit or review surfaces many findings, filter to the ones with real impact (durability loss, lost panics, invisible IO errors) and skip paranoia-tier additions (logs for impossible cases, defensive instrumentation that doesn't change outcomes). "Clean and simple" beats "exhaustive".
+- **Goal-driven execution.** Translate tasks into verifiable goals before coding: "add validation" → "write tests for invalid inputs, then make them pass"; "fix the bug" → "write a test that reproduces it, then make it pass". For multi-step work, state a brief plan with a verification check per step.
 
 ## What this is
 
@@ -45,6 +47,29 @@ $ROY_WORKSPACE_DIR/
 
 The daemon remains trusted: it accepts `ClientCommand::Spawn { cwd, ... }` from the Unix socket without knowing about users. The HTTP layer is the only auth boundary.
 
+### Session-to-session collaboration
+
+Two patterns sit on top of existing primitives, no new wire variants:
+
+- **Agent asks human.** A background agent runs
+  `roy inject <human_session> "<question>" --source $ROY_SESSION_ID`.
+  The daemon sets `ROY_SESSION_ID` on every spawned ACP child
+  (`transport/acp/mod.rs` `AcpTransport::open`), so the agent can pass
+  its own session id without the orchestrator templating it in. The
+  human's roy-web renders the `Note` with a clickable link back to the
+  asker's session (`MessageGroups.svelte`); the human navigates there
+  and types a reply, which goes to the agent as a normal `Cmd::Prompt`.
+- **Agent asks agent.** A background agent runs
+  `roy ask <target> "<prompt>" [--context "..."] [--timeout 10m]`.
+  `<target>` resolves to a live roy session id (→ `Fire { Resume }`) or
+  an agent slug/id from roy-management (→ `Fire { Spawn { preset,
+  system_prompt: agent.prompt } }`). The CLI blocks on `Fire`, prints
+  `{"type":"answer","session":..,"text":..}` on `FireDone`, and exits
+  0 / 1 / 2 just like `roy fire`.
+
+Both flows are sync from the agent's perspective. Neither introduces a
+pending-question store, a new `TurnEvent`, or a new `ClientCommand`.
+
 Each preset maps to a specific binary that must be on `PATH` and pre-authenticated:
 
 | Preset | Binary | Notes |
@@ -62,10 +87,6 @@ binaries above must still be installed and authenticated.
 ## Commands
 
 ```bash
-# Upgrade after split-store refactor: clear obsolete files once before first run.
-rm -rf ~/.roy/journals/*.meta.json
-rm -f  ~/.roy/projects.json
-
 cargo build --all-targets
 cargo fmt                # config in rustfmt.toml (edition 2021, max_width 100)
 cargo test --workspace   # unit + integration; uses a python fake ACP agent, no real CLI needed
@@ -109,18 +130,6 @@ cargo test --test acp_transport -- --ignored real_opencode       # needs `openco
 cargo test --test acp_transport -- --ignored real_codex          # needs `codex-acp` on PATH
 ```
 
-### Running the demos
-
-Each example drives one agent through a two-turn conversation (requires that agent's CLI installed and authenticated):
-
-```bash
-cargo run --example demo_claude
-cargo run --example demo_gemini
-cargo run --example demo_opencode
-cargo run --example demo_codex
-cargo run --example engine_two_attach     # SessionEngine + two concurrent attaches against the fake agent
-```
-
 ### Auth (multi-user)
 
 `roy-management` requires `ROY_JWT_SECRET` (≥32 ASCII bytes) at startup; without it, the service fails fast. On first startup with an empty `users` table, a bootstrap user is created with username from `ROY_BOOTSTRAP_USERNAME` (default `root`) and password from `ROY_BOOTSTRAP_PASSWORD` (or a generated 32-char hex value printed to stderr exactly once).
@@ -134,10 +143,6 @@ roy auth reset <username>   # direct DB password override (recovery)
 ```
 
 `roy-gateway`'s WebSocket handshake authenticates via `Sec-WebSocket-Protocol: roy-jwt,<JWT>` — same JWT cookie issued by `/auth/login`. The old shared-token file is gone; `[websocket].token_path` is no longer read (silently ignored on parse) and existing token files have no effect.
-
-### Manual smoke checklist
-
-After deploying the multi-user feature, the manual smoke checklist lives in `docs/superpowers/plans/2026-05-25-user-auth-commands.md` (Phase H1).
 
 ## Architecture
 
