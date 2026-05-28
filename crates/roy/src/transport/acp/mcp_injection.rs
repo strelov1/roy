@@ -25,6 +25,11 @@ pub enum McpInjectionStyle {
     /// Identical to Claude's `.mcp.json` shape but nested under
     /// `.gemini/` subdirectory and reading scope is project-local.
     GeminiSettings,
+    /// codex-acp: passes `-c mcp_servers.roy-connections.command=...` and
+    /// `-c mcp_servers.roy-connections.args=[...]` on the spawn command line.
+    /// No file system writes — codex parses these as TOML overrides into its
+    /// in-memory Config without touching ~/.codex/config.toml.
+    CodexCliOverrides,
 }
 
 /// Path under cwd where Claude Code looks for project-level MCP config.
@@ -78,6 +83,25 @@ pub fn build_opencode_config(roy_binary: &str, bundle_path: &Path) -> Value {
     })
 }
 
+/// Build the `-c` flags codex-acp consumes. Each `-c key=value` pair is two
+/// argv slots. `value` is parsed by codex's CliConfigOverrides as TOML; if
+/// parsing fails, codex falls back to the raw string. We emit explicit TOML
+/// syntax so command/args land as the right types.
+pub fn build_codex_args(roy_binary: &str, bundle_path: &Path) -> Vec<String> {
+    let bundle = bundle_path.to_string_lossy();
+    let cmd_toml = format!(r#""{}""#, roy_binary.replace('"', r#"\""#));
+    let args_toml = format!(
+        r#"["mcp","serve-connections","--specs","{}"]"#,
+        bundle.replace('"', r#"\""#)
+    );
+    vec![
+        "-c".into(),
+        format!("mcp_servers.roy-connections.command={cmd_toml}"),
+        "-c".into(),
+        format!("mcp_servers.roy-connections.args={args_toml}"),
+    ]
+}
+
 /// Build the bundle JSON consumed by `roy mcp serve-connections --specs`.
 pub fn build_bundle(session_id: &str, connections: &[ConnectionSpec]) -> Value {
     json!({
@@ -126,6 +150,21 @@ mod tests {
         assert_eq!(cmd[2], "serve-connections");
         assert_eq!(cmd[3], "--specs");
         assert_eq!(cmd[4], "/tmp/b.json");
+    }
+
+    #[test]
+    fn codex_args_shape() {
+        let v = build_codex_args("/usr/local/bin/roy", &PathBuf::from("/tmp/b.json"));
+        assert_eq!(v[0], "-c");
+        assert_eq!(
+            v[1],
+            r#"mcp_servers.roy-connections.command="/usr/local/bin/roy""#
+        );
+        assert_eq!(v[2], "-c");
+        assert_eq!(
+            v[3],
+            r#"mcp_servers.roy-connections.args=["mcp","serve-connections","--specs","/tmp/b.json"]"#
+        );
     }
 
     #[test]
