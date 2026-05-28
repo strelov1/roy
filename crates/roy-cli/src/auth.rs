@@ -47,7 +47,7 @@ fn resolve_password(
 /// `create_user` and `reset_password` need this pool — without the helper
 /// the boilerplate copies drift.
 async fn open_agents_pool() -> anyhow::Result<sqlx::SqlitePool> {
-    let db = roy_agents::default_db_path();
+    let db = roy_management::db::default_db_path();
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(

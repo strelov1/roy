@@ -130,6 +130,7 @@ impl SessionManager {
             resume_cursor: row.resume_cursor,
             fixed_session_id: Some(session_id.to_string()),
             system_prompt: row.system_prompt,
+            extra_env: Default::default(),
         };
         let transport =
             self.factory
@@ -374,6 +375,7 @@ mod tests {
             resume_cursor: None,
             fixed_session_id: None,
             system_prompt: None,
+            extra_env: Default::default(),
         }
     }
 

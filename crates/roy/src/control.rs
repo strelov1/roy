@@ -145,6 +145,12 @@ pub enum ClientCommand {
         /// journaled turn) and snapshots it into `SessionMetadata`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
+        /// Extra environment variables to set on the spawned ACP child.
+        /// Used to expose per-user / per-team agent directories to the chat
+        /// session (`ROY_AGENTS_DIR_USER`, `ROY_AGENTS_DIR_TEAM_<slug>`,
+        /// `ROY_TEAMS`). Empty/absent map is equivalent.
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        extra_env: std::collections::HashMap<String, String>,
     },
     /// Subscribe to a session's `JournalEntry` stream. Optional `from_seq` for
     /// replay-from-N (default: from the start).
@@ -409,6 +415,7 @@ mod tests {
             permission: Some("allow".into()),
             resume: None,
             system_prompt: None,
+            extra_env: Default::default(),
         });
         // Orphan spawn (no cwd)
         roundtrip(&ClientCommand::Spawn {
@@ -418,6 +425,23 @@ mod tests {
             permission: None,
             resume: None,
             system_prompt: None,
+            extra_env: Default::default(),
+        });
+    }
+
+    #[test]
+    fn spawn_with_extra_env_roundtrips() {
+        roundtrip(&ClientCommand::Spawn {
+            agent: "claude".to_string(),
+            cwd: None,
+            model: None,
+            permission: None,
+            resume: None,
+            system_prompt: None,
+            extra_env: std::collections::HashMap::from([(
+                "ROY_AGENTS_DIR_USER".to_string(),
+                "/home/roy/.roy/workspace/users/abc/.roy/agents".to_string(),
+            )]),
         });
     }
 
@@ -627,6 +651,7 @@ mod tests {
             permission: None,
             resume: None,
             system_prompt: Some("You are terse.".into()),
+            extra_env: Default::default(),
         });
     }
 
@@ -639,6 +664,7 @@ mod tests {
             permission: None,
             resume: None,
             system_prompt: None,
+            extra_env: Default::default(),
         })
         .unwrap();
         assert!(!s.contains("system_prompt"), "None must be skipped: {s}");

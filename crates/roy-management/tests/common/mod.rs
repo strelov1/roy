@@ -23,12 +23,8 @@ use tower::ServiceExt;
 /// kept alive on disk so per-scope cwd creation succeeds.
 pub async fn test_app() -> (axum::Router, SqlitePool, PathBuf) {
     std::env::set_var("ROY_JWT_SECRET", TEST_JWT_SECRET);
-    // Use `roy_agents::open` so the shared `agents.db` gets the full migration
-    // stack (roy-agents v1-v3 + roy-management v4+) before roy-auth's
-    // migrations layer on top. `roy_auth::test_support::temp_pool` skips the
-    // roy-agents step, which leaves the `agents` table absent.
     let dir = tempfile::tempdir().expect("tempdir");
-    let pool = roy_agents::open(&dir.path().join("agents.db"))
+    let pool = roy_management::db::open(&dir.path().join("agents.db"))
         .await
         .unwrap();
     roy_management::meta_store::MetaStore::apply_migrations(&pool)
@@ -46,7 +42,6 @@ pub async fn test_app() -> (axum::Router, SqlitePool, PathBuf) {
         roy_management::roy_client::mock::MockDaemonClient::new().with_spawn("sess-1"),
     );
     let state = AppState {
-        store: roy_agents::Store::new(pool.clone()),
         meta,
         daemon,
         socket_path: std::path::PathBuf::from("/tmp/fake.sock"),
@@ -55,6 +50,7 @@ pub async fn test_app() -> (axum::Router, SqlitePool, PathBuf) {
         workspace_dir: workspace_dir.clone(),
         login_limiter: std::sync::Arc::new(roy_management::rate_limit::LoginLimiter::default()),
         commands_cache: std::sync::Arc::new(roy_management::commands::CommandsCache::default()),
+        agents_cache: std::sync::Arc::new(roy_management::agents::AgentsCache::default()),
     };
     (router_for_tests(state), pool, workspace_dir)
 }

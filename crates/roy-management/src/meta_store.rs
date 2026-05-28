@@ -6,7 +6,7 @@
 //! at v4 (`migrations/sqlite/0004_*`). Each crate's `Migrator` runs with
 //! `set_ignore_missing(true)` so it tolerates rows owned by the other
 //! crate. Apply with
-//! `MetaStore::apply_migrations(pool)` after `roy_agents::open` has applied
+//! `MetaStore::apply_migrations(pool)` after `crate::db::open` has applied
 //! its own migrations.
 
 use std::collections::BTreeMap;
@@ -528,7 +528,7 @@ mod tests {
     /// `session_meta.created_by` are NOT NULL FKs into `users(id)`.
     async fn fresh_store() -> (MetaStore, String) {
         let dir = tempdir().unwrap();
-        let pool = roy_agents::open(&dir.path().join("agents.db"))
+        let pool = crate::db::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
@@ -643,17 +643,17 @@ mod tests {
     async fn shared_migrations_table_idempotent_across_crates() {
         let dir = tempdir().unwrap();
         let db = dir.path().join("agents.db");
-        let pool = roy_agents::open(&db).await.unwrap();
+        let pool = crate::db::open(&db).await.unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
         pool.close().await;
-        let pool = roy_agents::open(&db).await.unwrap();
+        let pool = crate::db::open(&db).await.unwrap();
         MetaStore::apply_migrations(&pool).await.unwrap();
         let versions: Vec<(i64,)> =
             sqlx::query_as("SELECT version FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![(1,), (2,), (3,), (4,), (5,)]);
+        assert_eq!(versions, vec![(1,), (2,), (3,), (4,), (5,), (6,)]);
     }
 
     fn meta_with(session_id: &str, created_by: &str, tags: &[(&str, &str)]) -> SessionMeta {
