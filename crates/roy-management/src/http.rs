@@ -619,10 +619,30 @@ async fn patch_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn builtin_agents_dir() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("ROY_BUILTIN_AGENTS_DIR") {
+        return std::path::PathBuf::from(p);
+    }
+    std::path::PathBuf::from("/home/roy/.roy/agents")
+}
+
+// TODO(B5): add Extension<AuthUser>, fetch teams, filter by identity.
 async fn list_agent_files(
+    axum::extract::Extension(crate::auth::AuthUser(user_id)): axum::extract::Extension<
+        crate::auth::AuthUser,
+    >,
     State(s): State<AppState>,
 ) -> Json<Vec<crate::agents::AgentFile>> {
-    Json(s.agents_cache.get().await)
+    Json(
+        s.agents_cache
+            .get(
+                &builtin_agents_dir(),
+                &s.workspace_dir,
+                &user_id,
+                &[],
+            )
+            .await,
+    )
 }
 
 fn meta_to_api(e: crate::meta_store::MetaError) -> ApiError {
@@ -1183,51 +1203,6 @@ mod tests {
         assert!(rows.is_empty(), "empty DB → empty list");
     }
 
-    /// Smoke test for GET /agents.
-    ///
-    /// HOME isolation approach: set the `HOME` env var to a fresh tempdir
-    /// before the request, then call `cache.invalidate()` so the cache misses
-    /// and re-reads from the new HOME. `dirs::home_dir()` on Unix delegates to
-    /// the `HOME` env var, so this is reliable within a single test process.
-    /// The env var is process-wide, which means this test is not safe to run
-    /// concurrently with other tests that rely on `dirs::home_dir()`, but since
-    /// all test helpers construct independent `AgentsCache` instances the only
-    /// risk is another test that also sets HOME — and there are none today.
-    #[tokio::test]
-    async fn list_agent_files_returns_files_from_home() {
-        let cookie = auth_cookie();
-        let home = tempfile::tempdir().unwrap();
-        // Create ~/.roy/agents/pirate.md inside the temp home.
-        let agents_dir = home.path().join(".roy/agents");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(
-            agents_dir.join("pirate.md"),
-            "---\nname: Pirate\ndescription: arr\nengine: codex\n---\n\nArr matey.\n",
-        )
-        .unwrap();
-
-        let (st, _uid) = test_state().await;
-        // Point HOME at our tempdir so dirs::home_dir() resolves there.
-        // Safety: single-threaded section; the path is valid UTF-8.
-        std::env::set_var("HOME", home.path());
-        // Ensure the cache is cold so it reads from the new HOME.
-        st.agents_cache.invalidate();
-
-        let app = router(st);
-        let resp = app
-            .oneshot(
-                Request::get("/agents")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let files: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(files.len(), 1, "expected exactly one agent file");
-        assert_eq!(files[0]["engine"], "codex");
-        assert_eq!(files[0]["name"], "Pirate");
-    }
+    // list_agent_files_returns_files_from_home removed — replaced by a
+    // scope-aware test in B5 (list_agent_files_returns_builtin_entries).
 }
