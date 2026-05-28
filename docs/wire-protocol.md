@@ -109,7 +109,7 @@ tool result body). The JSON shapes are identical across all transports.
 
 | op                | fields                                                                                          |
 |-------------------|-------------------------------------------------------------------------------------------------|
-| `spawn`           | `agent`, optional `cwd`, `model`, `permission`, `resume`, `system_prompt`                       |
+| `spawn`           | `harness`, optional `cwd`, `model`, `permission`, `resume`, `system_prompt`, `extra_env`        |
 | `attach`          | `session`, optional `from_seq`                                                                  |
 | `acquire_input`   | `session`                                                                                       |
 | `send`            | `session`, `text`                                                                               |
@@ -121,17 +121,17 @@ tool result body). The JSON shapes are identical across all transports.
 | `resume`          | `session`                                                                                       |
 | `read_journal`    | `session`, optional `from_seq`, optional `max_entries`                                          |
 | `inject`          | `session`, `text`, optional `source_session`                                                    |
-| `list_agents`     | —                                                                                               |
+| `list_harnesses`  | —                                                                                               |
 
-`permission` is `"allow"` or `"deny"`. `agent` is one of `claude`,
-`gemini`, `opencode`, `codex` (with the default `TransportFactory`).
+`permission` is `"allow"` or `"deny"`. `harness` is one of `claude`,
+`gemini`, `opencode`, `codex`, `pi` (with the default `TransportFactory`).
 
 `spawn.system_prompt` (also accepted on a `fire` command's `spawn` target) is
 an optional inline persona/system prompt. The daemon injects it via ACP
-`_meta.systemPrompt = { append }` for presets that support it (`claude`,
+`_meta.systemPrompt = { append }` for harnesses that support it (`claude`,
 `opencode`) and as a first journaled `System` turn otherwise (`gemini`,
-`codex`), and snapshots it into the boot-kit row so it is re-applied on
-`resume`.
+`codex`, `pi`), and snapshots it into the boot-kit row so it is re-applied
+on `resume`.
 
 `spawn.cwd` is an optional working directory for the session. When omitted,
 the daemon uses the current working directory or the value of `ROY_CWD` env.
@@ -154,7 +154,7 @@ archived one first). Used by the `roy inject` CLI for agent self-reporting.
 | kind                | fields                                                                                                  |
 |---------------------|---------------------------------------------------------------------------------------------------------|
 | `spawned`           | `session`, optional `resume_cursor`                                                                     |
-| `spawning`          | `agent` — ack emitted at start of `spawn` before agent process launch                                   |
+| `spawning`          | `harness` — ack emitted at start of `spawn` before harness process launch                               |
 | `attached`          | `session`, `seq_at_attach`                                                                              |
 | `frame`             | `session`, `entry` (the `JournalEntry` shape above)                                                     |
 | `input_acquired`    | `session`, `acquired: bool`                                                                             |
@@ -167,7 +167,7 @@ archived one first). Used by the `roy inject` CLI for agent self-reporting.
 | `resumed`           | `session`, optional `resume_cursor`                                                                     |
 | `resuming`          | `session` — ack emitted at start of `resume` before agent process re-launch                             |
 | `journal_read`      | `session`, `entries: [JournalEntry]`, `next_seq`, `has_more: bool`                                       |
-| `agents_list`       | `agents: [AgentInfo]`, `config_path: string`, `status: AgentsConfigStatus`                              |
+| `harnesses_list`    | `harnesses: [HarnessInfo]`, `config_path: string`, `status: HarnessesConfigStatus`                       |
 | `error`             | optional `session`, typed `code` (see below), `message`                                                 |
 
 `SessionInfo` shape (used in `listed` / `listed_archived`):
@@ -190,11 +190,11 @@ clear the loading state on any terminal event for that command.
 `journal_read.next_seq` is the seq the client should pass to its next
 `read_journal` to continue polling.
 
-`AgentInfo` and `ModelInfo` shapes (used in `agents_list.agents[]`):
+`HarnessInfo` and `ModelInfo` shapes (used in `harnesses_list.harnesses[]`):
 
 ```json
 {
-  "preset": "claude",
+  "name": "claude",
   "models": [
     {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "default": true},
     {"id": "claude-opus-4-7",   "label": "Claude Opus 4.7",   "default": false}
@@ -203,15 +203,16 @@ clear the loading state on any terminal event for that command.
 ```
 
 `label` is always populated by the daemon (defaults to `id` if the user
-omitted it in `agents.toml`). `default` is `true` for exactly one model
-per agent: the explicitly-marked one, or the first if none was marked.
+omitted it in `harnesses.toml`). `default` is `true` for exactly one
+model per harness: the explicitly-marked one, or the first if none was
+marked.
 
-`AgentsConfigStatus` is a tagged union (`{"kind": "<variant>", …}`):
+`HarnessesConfigStatus` is a tagged union (`{"kind": "<variant>", …}`):
 
-| kind      | extra fields    | meaning                                                |
-|-----------|-----------------|--------------------------------------------------------|
-| `ok`      | —               | File parsed and validated; `agents` may still be empty |
-| `created` | —               | File was missing; sample was just written              |
+| kind      | extra fields    | meaning                                                   |
+|-----------|-----------------|-----------------------------------------------------------|
+| `ok`      | —               | File parsed and validated; `harnesses` may still be empty |
+| `created` | —               | File was missing; sample was just written                 |
 | `invalid` | `reason: string`| Parse or validation failure; `agents` is `[]`          |
 
 See [agents-config.md](./agents-config.md) for the user-facing reference.

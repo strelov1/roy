@@ -75,7 +75,7 @@ session's `resume_cursor` changes:
 | column          | type        | source                                                         |
 |-----------------|-------------|------------------------------------------------------------------------|
 | `session_id`    | text PK     | roy-side UUID minted at first spawn; stable across restarts     |
-| `agent`         | text        | the preset name (`claude`, `gemini`, `opencode`, `codex`)       |
+| `harness`       | text        | the harness name (`claude`, `gemini`, `opencode`, `codex`, `pi`) |
 | `cwd`           | text        | the working directory for this session                          |
 | `model`         | text        | the `--model` flag, if applicable (claude only); null if unset  |
 | `permission`    | text        | the requested `PermissionPolicy` (`allow` / `deny`)             |

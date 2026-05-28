@@ -62,7 +62,7 @@ Two patterns sit on top of existing primitives, no new wire variants:
 - **Agent asks agent.** A background agent runs
   `roy ask <target> "<prompt>" [--context "..."] [--timeout 10m]`.
   `<target>` resolves to a live roy session id (→ `Fire { Resume }`) or
-  an agent slug/id from roy-management (→ `Fire { Spawn { preset,
+  an agent slug/id from roy-management (→ `Fire { Spawn { harness,
   system_prompt: agent.prompt } }`). The CLI blocks on `Fire`, prints
   `{"type":"answer","session":..,"text":..}` on `FireDone`, and exits
   0 / 1 / 2 just like `roy fire`.
@@ -70,19 +70,26 @@ Two patterns sit on top of existing primitives, no new wire variants:
 Both flows are sync from the agent's perspective. Neither introduces a
 pending-question store, a new `TurnEvent`, or a new `ClientCommand`.
 
-Each preset maps to a specific binary that must be on `PATH` and pre-authenticated:
+Each harness maps to a specific binary that must be on `PATH` and pre-authenticated:
 
-| Preset | Binary | Notes |
-|--------|--------|-------|
+| Harness | Binary | Notes |
+|---------|--------|-------|
 | `claude` | `claude-code-acp` | ACP adapter for Claude Code (not the plain `claude` CLI) |
 | `gemini` | `gemini` | Launched with `--acp --skip-trust`; uses `yolo` mode |
 | `opencode` | `opencode` | Launched with `acp`; no ACP modes |
 | `codex` | `codex-acp` | ACP adapter for Codex; uses `full-access` mode |
 | `pi` | `pi-acp` | ACP adapter for `pi` coding agent (spawns `pi --mode rpc` under the hood); install via `npm i -g pi-acp` |
 
-Which presets and models are *surfaced* to clients is controlled by
-`~/.config/roy/agents.toml` (see `docs/agents-config.md`). The preset
-binaries above must still be installed and authenticated.
+Which harnesses and models are *surfaced* to clients is controlled by
+`~/.config/roy/harnesses.toml` (see `docs/harnesses-config.md`). The
+harness binaries above must still be installed and authenticated.
+
+> **Terminology:** *harness* = the ACP-adapter binary (one of the five
+> above). *Agent* = a persona, defined in `.roy/agents/<slug>.md` with
+> YAML frontmatter (`name`, `description`, `harness`, optional `model`)
+> and a body that becomes the session's system prompt. The word
+> "preset" (in old wire/TOML/DB) and "engine" (in old YAML frontmatter)
+> was unified into "harness" — see `git log` for the rename commit.
 
 ## Commands
 
@@ -146,7 +153,7 @@ roy auth reset <username>   # direct DB password override (recovery)
 
 ## Architecture
 
-A short pipeline. Triggers (CLI, MCP) talk to a single `Daemon`; `Daemon` owns a `SessionManager`; `SessionManager` owns `SessionEngine` actors; each engine drives one ACP `Transport`. Bytes only cross trait boundaries at `Transport`, so adding a new agent is a new `AcpConfig` preset, not new session/journal/protocol code.
+A short pipeline. Triggers (CLI, MCP) talk to a single `Daemon`; `Daemon` owns a `SessionManager`; `SessionManager` owns `SessionEngine` actors; each engine drives one ACP `Transport`. Bytes only cross trait boundaries at `Transport`, so adding a new harness is a new `AcpConfig` variant + a new `Harness` enum variant, not new session/journal/protocol code.
 
 1. **`Daemon`** (`src/daemon.rs`) — accepts Unix-socket connections only, parses `ClientCommand`s, dispatches to per-command `handle_*` methods, and pumps `ServerEvent`s back. Single-instance guard via `PidLock` (`src/pid_lock.rs`): the lock at `<socket>.pid` is the source of truth; a second `roy serve` on the same socket bails with `daemon already running (pid N)`, but a dead PID is detected and taken over (handles `kill -9`). Optional idle-GC + resume-all on startup via `ServeOpts`. WebSocket clients are served by `roy-gateway`'s WS relay (token-authenticated via `Sec-WebSocket-Protocol`, loopback by default at `127.0.0.1:8787`), which bridges each connection to a dedicated Unix-socket connection to this daemon.
 
@@ -160,8 +167,8 @@ A short pipeline. Triggers (CLI, MCP) talk to a single `Daemon`; `Daemon` owns a
 
 6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `status`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `set-tags`, `wait`, `fire`, `mcp`, `projects`, `engines`, `agents`, `gateway`, `scheduler`, `management`. `status` is a non-side-effecting health probe (exit 0 if the daemon socket accepts a connection, 2 otherwise) — prefer it over `pgrep`-ing the binary in scripts and skills. The `mcp` subcommand delegates to `roy-mcp` (`crates/roy-mcp/src/lib.rs`), an MCP server (JSON-RPC 2.0 over stdio) that exposes daemon control operations as MCP tools.
 
-   - `roy engines` — lists the daemon's preset+model catalog from `agents.toml` (the preset binaries like `claude-code-acp`, `gemini`, etc.).
-   - `roy agents` — full CRUD over user-defined personas in `roy-management` (`list`/`get`/`create`/`update`/`delete`/`run`); each agent binds a persona prompt to a preset+model pair and spawns a session on demand.
+   - `roy harnesses` — lists the daemon's harness+model catalog from `harnesses.toml` (the harness binaries like `claude-code-acp`, `gemini`, etc.).
+   - `roy agents` — file-based persona discovery via `roy-management`; each agent `.md` file binds a persona prompt + body to a harness+model pair.
    - `roy gateway` — Telegram chat-platform and WebSocket relay bridge to the daemon (dispatches to `roy-gateway` crate).
    - `roy scheduler` — cron + one-shot fire dispatcher (dispatches to `roy-scheduler` crate).
    - `roy management` — axum HTTP service for agent CRUD and session launch (dispatches to `roy-management` crate).
@@ -187,7 +194,7 @@ The opaque token to resume an agent-side session on the next `Transport::open`. 
 
 ### ACP details (`acp/mod.rs`)
 
-We own the child process directly (not `AcpAgent::from_args`) so we can detect mid-turn process exit and emit a terminal `Result { stop_reason: Error }`. A `watch` channel propagates "child died" into `run_session` / `run_turn`, which would otherwise hang on a never-resolved `send_request`. `update_to_event` maps `session/update` variants to `TurnEvent`; everything we don't model goes through `Raw(Value)`. Per-agent setup is centralized in `AcpConfig::{gemini, opencode, codex, claude}`.
+We own the child process directly (not `AcpAgent::from_args`) so we can detect mid-turn process exit and emit a terminal `Result { stop_reason: Error }`. A `watch` channel propagates "child died" into `run_session` / `run_turn`, which would otherwise hang on a never-resolved `send_request`. `update_to_event` maps `session/update` variants to `TurnEvent`; everything we don't model goes through `Raw(Value)`. Per-harness setup is centralized in `AcpConfig::{gemini, opencode, codex, claude, pi}`.
 
 ### Testing approach
 
