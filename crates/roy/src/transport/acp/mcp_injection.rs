@@ -78,24 +78,6 @@ pub fn build_opencode_config(roy_binary: &str, bundle_path: &Path) -> Value {
     })
 }
 
-/// Build the `<cwd>/.gemini/settings.json` body. Same `mcpServers` shape as
-/// Claude — gemini-cli's MCP config schema is intentionally Claude-compatible.
-pub fn build_gemini_config(roy_binary: &str, bundle_path: &Path) -> Value {
-    json!({
-        "mcpServers": {
-            "roy-connections": {
-                "command": roy_binary,
-                "args": [
-                    "mcp",
-                    "serve-connections",
-                    "--specs",
-                    bundle_path.to_string_lossy(),
-                ],
-            }
-        }
-    })
-}
-
 /// Build the bundle JSON consumed by `roy mcp serve-connections --specs`.
 pub fn build_bundle(session_id: &str, connections: &[ConnectionSpec]) -> Value {
     json!({
@@ -144,22 +126,6 @@ mod tests {
         assert_eq!(cmd[2], "serve-connections");
         assert_eq!(cmd[3], "--specs");
         assert_eq!(cmd[4], "/tmp/b.json");
-    }
-
-    #[test]
-    fn gemini_config_shape() {
-        let v = build_gemini_config("/usr/local/bin/roy", &PathBuf::from("/tmp/b.json"));
-        assert_eq!(
-            v["mcpServers"]["roy-connections"]["command"],
-            "/usr/local/bin/roy"
-        );
-        let args = v["mcpServers"]["roy-connections"]["args"]
-            .as_array()
-            .unwrap();
-        assert_eq!(args[0], "mcp");
-        assert_eq!(args[1], "serve-connections");
-        assert_eq!(args[2], "--specs");
-        assert_eq!(args[3], "/tmp/b.json");
     }
 
     #[test]
