@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use roy::{ClientCommand, FireTarget, ServerEvent, TurnEvent};
+use roy_protocol::{ClientCommand, FireTarget, ServerEvent, TurnEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -47,9 +47,8 @@ pub async fn fire_with_hook(
         .with_context(|| format!("connecting to daemon at {}", socket_path.display()))?;
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
-    wr.write_all(serde_json::to_string(&cmd)?.as_bytes())
+    wr.write_all(&roy_protocol::wire::encode_line(&cmd)?)
         .await?;
-    wr.write_all(b"\n").await?;
     wr.flush().await?;
 
     loop {
@@ -57,7 +56,7 @@ pub async fn fire_with_hook(
             .next_line()
             .await?
             .ok_or_else(|| anyhow!("daemon hung up before terminal Fire event"))?;
-        let evt: ServerEvent = serde_json::from_str(raw.trim())?;
+        let evt: ServerEvent = roy_protocol::wire::decode_line(&raw)?;
         match evt {
             ServerEvent::Frame { entry, .. } => {
                 hook.on_turn_event(&entry.event).await?;
@@ -79,7 +78,7 @@ pub async fn fire_with_hook(
                     FireOutcome::Ok {
                         assistant_text,
                         cost_usd,
-                        stop_reason: format!("{stop_reason:?}"),
+                        stop_reason: stop_reason.as_wire().to_string(),
                     },
                     reply,
                 )
@@ -124,7 +123,7 @@ pub async fn fire_with_hook(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roy::{ErrorCode, StopReason};
+    use roy_protocol::{ErrorCode, StopReason};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tokio::net::UnixListener;
@@ -202,7 +201,16 @@ mod tests {
         assert_eq!(result.session_id.as_deref(), Some("sid"));
         let outcome = captured.lock().unwrap().clone().unwrap();
         match outcome {
-            FireOutcome::Ok { assistant_text, .. } => assert_eq!(assistant_text, "hi"),
+            FireOutcome::Ok {
+                assistant_text,
+                stop_reason,
+                ..
+            } => {
+                assert_eq!(assistant_text, "hi");
+                // Regression guard: stop_reason must use the snake_case wire
+                // vocabulary (`StopReason::as_wire`), not the Rust Debug form.
+                assert_eq!(stop_reason, "end_turn");
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }

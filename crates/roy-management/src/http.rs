@@ -462,7 +462,7 @@ async fn create_session(
     // Resolve connection_ids → ConnectionSpec list. The store filters by
     // owner_id, so unknown ids OR ids owned by another user both return
     // StoreError::NotFound — mapped to 400 to avoid leaking existence.
-    let connection_specs: Vec<roy::ConnectionSpec> = if req.connection_ids.is_empty() {
+    let connection_specs: Vec<roy_protocol::ConnectionSpec> = if req.connection_ids.is_empty() {
         Vec::new()
     } else {
         let conns = s
@@ -483,7 +483,7 @@ async fn create_session(
             })?;
         conns
             .into_iter()
-            .map(|c| roy::ConnectionSpec {
+            .map(|c| roy_protocol::ConnectionSpec {
                 id: c.id,
                 slug: c.slug,
                 kind: c.kind,

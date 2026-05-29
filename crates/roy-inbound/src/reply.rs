@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use roy::event::TurnEvent;
-use roy::ErrorCode;
+use roy_protocol::event::TurnEvent;
+use roy_protocol::ErrorCode;
 
 use crate::bus::{EventRef, ReplyHandle};
 

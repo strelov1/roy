@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use roy::ConnectionSpec;
+pub use roy_protocol::ConnectionSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bundle {

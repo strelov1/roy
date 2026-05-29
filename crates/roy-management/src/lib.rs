@@ -51,7 +51,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let pool = crate::db::open(&db_path).await?;
     roy_auth::apply_migrations(&pool).await?;
     bootstrap::ensure_root(&pool).await?;
-    let socket = args.socket.unwrap_or_else(default_socket);
+    let socket = args
+        .socket
+        .unwrap_or_else(roy_protocol::wire::default_socket_path);
     let workspace_dir = meta_store::default_workspace_dir();
     std::fs::create_dir_all(&workspace_dir)?;
     let meta = meta_store::MetaStore::new(pool.clone(), workspace_dir.clone());
@@ -126,12 +128,4 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
-}
-
-fn default_socket() -> PathBuf {
-    if let Ok(s) = std::env::var("ROY_SOCKET") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".roy/daemon.sock")
 }

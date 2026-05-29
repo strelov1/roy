@@ -6,9 +6,9 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use roy::control::{ClientCommand, ServerEvent};
-use roy::event::TurnEvent;
-use roy::journal::JournalEntry;
+use roy_protocol::control::{ClientCommand, ServerEvent};
+use roy_protocol::event::TurnEvent;
+use roy_protocol::journal::JournalEntry;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -87,9 +87,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TurnConn<S> {
     }
 
     async fn send_cmd(&mut self, cmd: &ClientCommand) -> Result<()> {
-        let line = serde_json::to_string(cmd).context("serializing ClientCommand")?;
-        self.write_half.write_all(line.as_bytes()).await?;
-        self.write_half.write_all(b"\n").await?;
+        self.write_half
+            .write_all(&roy_protocol::wire::encode_line(cmd)?)
+            .await?;
         self.write_half.flush().await?;
         Ok(())
     }
@@ -98,7 +98,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TurnConn<S> {
         let Some(raw) = self.lines.next_line().await? else {
             return Err(anyhow!("daemon closed connection"));
         };
-        serde_json::from_str(&raw).with_context(|| format!("parsing daemon line: {raw}"))
+        roy_protocol::wire::decode_line(&raw).with_context(|| format!("parsing daemon line: {raw}"))
     }
 }
 
@@ -216,10 +216,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Conn for TurnConn<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roy::event::{StopReason, TurnEvent};
+    use roy_protocol::event::{StopReason, TurnEvent};
     use tokio::io::AsyncWriteExt;
 
-    use roy::journal::JournalEntry as JE;
+    use roy_protocol::journal::JournalEntry as JE;
 
     /// Scripted-daemon fixture: reads N lines, returns the i-th canned
     /// response for each. Caller's closure asserts on the parsed command.
