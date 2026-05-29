@@ -44,6 +44,12 @@ fn default_strategy() -> String {
     "per_sender_sticky".to_string()
 }
 
+/// Request body for `PATCH /channel-bindings/{id}`. Enable/disable only.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateChannelBinding {
+    pub enabled: bool,
+}
+
 #[derive(sqlx::FromRow)]
 struct BindingRow {
     id: String,
@@ -193,6 +199,31 @@ impl Store {
         Ok(())
     }
 
+    /// Flip the `enabled` flag for one binding. Bumps `updated_at`.
+    /// `NotFound` if the binding doesn't exist for this owner.
+    pub async fn set_enabled(
+        &self,
+        owner_id: &str,
+        id: &str,
+        enabled: bool,
+    ) -> Result<ChannelBinding, StoreError> {
+        let now = Utc::now().timestamp();
+        let res = sqlx::query(
+            "UPDATE channel_bindings SET enabled = ?, updated_at = ? \
+             WHERE owner_id = ? AND id = ?",
+        )
+        .bind(enabled as i64)
+        .bind(now)
+        .bind(owner_id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(StoreError::NotFound(id.to_string()));
+        }
+        self.get(owner_id, id).await
+    }
+
     /// All enabled Telegram bindings across every owner. Used by the internal
     /// endpoint to build the source list for `roy-inbound`.
     pub async fn list_enabled_telegram(&self) -> Result<Vec<ChannelBinding>, StoreError> {
@@ -320,6 +351,40 @@ mod tests {
         let err = store.create(&user.id, &new).await.unwrap_err();
         assert!(matches!(err, StoreError::Invalid(_)));
     }
+
+    #[tokio::test]
+    async fn toggle_enabled() {
+        let pool = setup_pool().await;
+        let user = make_user(&pool, "alice").await;
+        let conn_id = make_conn(&pool, &user.id).await;
+        let store = Store::new(pool.clone());
+        let b = store
+            .create(
+                &user.id,
+                &NewChannelBinding {
+                    connection_id: conn_id,
+                    agent_slug: "support-l1".into(),
+                    agent_scope: "user".into(),
+                    session_strategy: "per_sender_sticky".into(),
+                    idle_timeout_secs: Some(3600),
+                    allowed_user_ids: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.list_enabled_telegram().await.unwrap().len(), 1);
+
+        let off = store.set_enabled(&user.id, &b.id, false).await.unwrap();
+        assert!(!off.enabled);
+        assert!(store.list_enabled_telegram().await.unwrap().is_empty());
+
+        let on = store.set_enabled(&user.id, &b.id, true).await.unwrap();
+        assert!(on.enabled);
+        assert_eq!(store.list_enabled_telegram().await.unwrap().len(), 1);
+
+        let missing = store.set_enabled(&user.id, "nope", true).await.unwrap_err();
+        assert!(matches!(missing, StoreError::NotFound(_)));
+    }
 }
 
 // ---------------- HTTP ----------------
@@ -356,7 +421,9 @@ pub fn router() -> Router<AppState> {
         .route("/channel-bindings", get(list_handler).post(create_handler))
         .route(
             "/channel-bindings/{id}",
-            get(get_handler).delete(delete_handler),
+            get(get_handler)
+                .delete(delete_handler)
+                .patch(update_handler),
         )
 }
 
@@ -387,6 +454,19 @@ async fn delete_handler(
 ) -> Result<StatusCode, ApiError> {
     s.channel_bindings.delete(&uid, &id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_handler(
+    Extension(AuthUser(uid)): Extension<AuthUser>,
+    State(s): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Json(body): Json<UpdateChannelBinding>,
+) -> Result<Json<ChannelBinding>, ApiError> {
+    Ok(Json(
+        s.channel_bindings
+            .set_enabled(&uid, &id, body.enabled)
+            .await?,
+    ))
 }
 
 async fn create_handler(
