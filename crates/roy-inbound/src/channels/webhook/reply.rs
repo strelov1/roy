@@ -93,7 +93,7 @@ mod tests {
             FireOutcome::Ok {
                 assistant_text: "hi".into(),
                 cost_usd: Some(0.01),
-                stop_reason: "EndTurn".into(),
+                stop_reason: "end_turn".into(),
             },
             ReplyHandle::HttpSync(tx),
         )
@@ -122,7 +122,7 @@ mod tests {
             FireOutcome::Ok {
                 assistant_text: "hi".into(),
                 cost_usd: None,
-                stop_reason: "EndTurn".into(),
+                stop_reason: "end_turn".into(),
             },
             ReplyHandle::Noop,
         )

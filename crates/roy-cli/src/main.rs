@@ -992,7 +992,7 @@ async fn cmd_wait(args: WaitArgs) -> anyhow::Result<ExitCode> {
                 "type": "result_ready",
                 "session": session,
                 "seq": seq,
-                "stop_reason": format!("{stop_reason:?}"),
+                "stop_reason": stop_reason.as_wire().to_string(),
                 "cost_usd": cost_usd,
                 "assistant_text": assistant_text,
             });
@@ -1064,7 +1064,7 @@ async fn cmd_fire(args: FireArgs) -> anyhow::Result<ExitCode> {
                 "type": "fire_done",
                 "session": session,
                 "seq_range": seq_range,
-                "stop_reason": format!("{stop_reason:?}"),
+                "stop_reason": stop_reason.as_wire().to_string(),
                 "cost_usd": cost_usd,
                 "assistant_text": assistant_text,
             });
