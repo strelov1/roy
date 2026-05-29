@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct TelegramSource {
     /// Stable per-bot id: `"tg:<connection_id>"`.
     pub source_id: String,
+    /// Plain Telegram Bot API token, e.g. `"123456:ABC-DEF..."`.
     pub bot_token: String,
     /// Agent slug (record-keeping; stored in the runtime binding).
     pub agent_slug: String,
@@ -26,6 +27,13 @@ pub struct TelegramSource {
 
 /// Wire form of the per-source session strategy (mirrors
 /// `roy_inbound::session::SessionStrategyConfig`).
+///
+/// `roy-management` and `roy-inbound` are deployed in lockstep from the same
+/// workspace, so an unknown strategy is a hard deserialize error by design —
+/// no `Other`/catch-all variant is needed.
+///
+/// Conversion points: `roy-management`'s `strategy_to_wire` (producer) and
+/// `roy-inbound`'s `ResolvedSource::from` (consumer → runtime `SessionStrategy`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionStrategyWire {
@@ -65,5 +73,13 @@ mod tests {
     fn strategy_short_variants_use_kind_tag() {
         let j = serde_json::to_string(&SessionStrategyWire::Ephemeral).unwrap();
         assert_eq!(j, r#"{"kind":"ephemeral"}"#);
+    }
+
+    #[test]
+    fn persistent_one_round_trips() {
+        let j = serde_json::to_string(&SessionStrategyWire::PersistentOne).unwrap();
+        assert_eq!(j, r#"{"kind":"persistent_one"}"#);
+        let back: SessionStrategyWire = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, SessionStrategyWire::PersistentOne);
     }
 }
