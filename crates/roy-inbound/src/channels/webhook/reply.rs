@@ -5,7 +5,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::http::StatusCode;
-use roy::event::TurnEvent;
+use roy_protocol::event::TurnEvent;
 use serde_json::json;
 
 use crate::bus::{HttpReply, ReplyHandle};

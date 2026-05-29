@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use roy::{ServerEvent, StopReason, TurnEvent};
+use roy_protocol::{ServerEvent, StopReason, TurnEvent};
 use roy_inbound::{
     bus::{self, EventRef},
     channels::webhook::config::WebhookConfig,

@@ -75,7 +75,7 @@ impl InboundDispatcher {
             .ok_or_else(|| anyhow::anyhow!("no reply hook for kind '{kind}'"))?;
 
         // Fire.
-        let was_resume = !matches!(target, roy::FireTarget::Spawn { .. });
+        let was_resume = !matches!(target, roy_protocol::FireTarget::Spawn { .. });
         let result = fire_with_hook(
             &self.socket_path,
             target,
