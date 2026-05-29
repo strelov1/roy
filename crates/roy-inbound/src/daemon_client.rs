@@ -47,9 +47,8 @@ pub async fn fire_with_hook(
         .with_context(|| format!("connecting to daemon at {}", socket_path.display()))?;
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
-    wr.write_all(serde_json::to_string(&cmd)?.as_bytes())
+    wr.write_all(&roy_protocol::wire::encode_line(&cmd)?)
         .await?;
-    wr.write_all(b"\n").await?;
     wr.flush().await?;
 
     loop {
@@ -57,7 +56,7 @@ pub async fn fire_with_hook(
             .next_line()
             .await?
             .ok_or_else(|| anyhow!("daemon hung up before terminal Fire event"))?;
-        let evt: ServerEvent = serde_json::from_str(raw.trim())?;
+        let evt: ServerEvent = roy_protocol::wire::decode_line(&raw)?;
         match evt {
             ServerEvent::Frame { entry, .. } => {
                 hook.on_turn_event(&entry.event).await?;

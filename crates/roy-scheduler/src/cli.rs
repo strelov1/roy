@@ -244,14 +244,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
 }
 
-fn default_socket() -> PathBuf {
-    if let Ok(s) = std::env::var("ROY_SOCKET") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".roy/daemon.sock")
-}
-
 fn default_pid_file() -> PathBuf {
     let home = std::env::var_os("HOME").unwrap_or_default();
     PathBuf::from(home).join(".local/state/roy-scheduler/serve.pid")
@@ -286,7 +278,9 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
 
     let mut opts = ServeOpts {
         db_path: args.db.unwrap_or_else(crate::default_db_path),
-        socket_path: args.socket.unwrap_or_else(default_socket),
+        socket_path: args
+            .socket
+            .unwrap_or_else(roy_protocol::wire::default_socket_path),
         ..ServeOpts::default()
     };
     if let Some(ms) = args.poll_ms {
@@ -559,7 +553,7 @@ async fn cmd_fire_now(args: FireNowArgs) -> anyhow::Result<ExitCode> {
     use crate::driver;
 
     let pool = open_pool().await?;
-    let socket = default_socket();
+    let socket = roy_protocol::wire::default_socket_path();
     let timeout = Duration::from_secs(args.fire_timeout.unwrap_or(600));
 
     let fire =

@@ -98,21 +98,13 @@ impl Default for ServeOpts {
     fn default() -> Self {
         Self {
             db_path: crate::default_db_path(),
-            socket_path: default_socket_path(),
+            socket_path: roy_protocol::wire::default_socket_path(),
             poll_interval: Duration::from_millis(1500),
             batch_limit: 50,
             max_fires: 8,
             fire_timeout: Duration::from_secs(600),
         }
     }
-}
-
-fn default_socket_path() -> PathBuf {
-    if let Ok(s) = std::env::var("ROY_SOCKET") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".roy/daemon.sock")
 }
 
 /// Top-level entry. Opens the DB, runs the crash-recovery sweep, then

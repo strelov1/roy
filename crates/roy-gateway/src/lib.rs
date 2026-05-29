@@ -56,7 +56,7 @@ pub async fn run(args: Args) -> Result<()> {
         .socket
         .clone()
         .map(PathBuf::from)
-        .unwrap_or_else(default_socket);
+        .unwrap_or_else(roy_protocol::wire::default_socket_path);
     tracing::info!(socket = %socket_path.display(), "daemon socket");
 
     let telegram_task = build_telegram_task(&cfg, &socket_path).await?;
@@ -74,14 +74,6 @@ pub async fn run(args: Args) -> Result<()> {
         (None, Some(ws)) => ws.await.context("ws task")?,
         (None, None) => unreachable!("validate() guarantees at least one adapter"),
     }
-}
-
-fn default_socket() -> PathBuf {
-    if let Ok(s) = std::env::var("ROY_SOCKET") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".roy/daemon.sock")
 }
 
 async fn build_telegram_task(

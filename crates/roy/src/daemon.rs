@@ -277,7 +277,7 @@ impl Daemon {
         subs: &mut SubsMap,
         leases: &mut LeasesMap,
     ) {
-        let cmd: ClientCommand = match serde_json::from_str(text) {
+        let cmd: ClientCommand = match roy_protocol::wire::decode_line(text) {
             Ok(c) => c,
             Err(e) => {
                 send_error(event_tx, None, ErrorCode::BadRequest, e.to_string());
@@ -1081,14 +1081,11 @@ where
     W: AsyncWrite + Unpin,
 {
     while let Some(event) = rx.recv().await {
-        let json = match serde_json::to_string(&event) {
-            Ok(j) => j,
+        let frame = match roy_protocol::wire::encode_line(&event) {
+            Ok(f) => f,
             Err(_) => continue,
         };
-        if writer.write_all(json.as_bytes()).await.is_err() {
-            break;
-        }
-        if writer.write_all(b"\n").await.is_err() {
+        if writer.write_all(&frame).await.is_err() {
             break;
         }
         if writer.flush().await.is_err() {

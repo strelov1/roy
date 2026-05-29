@@ -280,9 +280,9 @@ async fn send_cmd(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     cmd: &ClientCommand,
 ) -> anyhow::Result<()> {
-    let line = serde_json::to_string(cmd)?;
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
+    writer
+        .write_all(&roy_protocol::wire::encode_line(cmd)?)
+        .await?;
     writer.flush().await?;
     Ok(())
 }
@@ -326,7 +326,7 @@ async fn next_event(
         .next_line()
         .await?
         .ok_or_else(|| anyhow!("daemon hung up"))?;
-    Ok(serde_json::from_str(line.trim())?)
+    Ok(roy_protocol::wire::decode_line(&line)?)
 }
 
 async fn tool_list(socket_path: &Path, archived: bool) -> anyhow::Result<String> {

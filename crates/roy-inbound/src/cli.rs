@@ -42,7 +42,9 @@ pub async fn run(args: Args) -> Result<()> {
     let pool = db::open(&db_path).await?;
     let bindings = Arc::new(BindingStore::new(pool));
 
-    let socket_path = args.socket.unwrap_or_else(default_socket_path);
+    let socket_path = args
+        .socket
+        .unwrap_or_else(roy_protocol::wire::default_socket_path);
 
     let (bus_tx, bus_rx) = bus::channel(cfg.bus.capacity);
 
@@ -115,12 +117,4 @@ pub async fn run(args: Args) -> Result<()> {
 fn default_db_path() -> PathBuf {
     let home = std::env::var_os("HOME").unwrap_or_default();
     PathBuf::from(home).join(".local/state/roy-inbound/state.db")
-}
-
-fn default_socket_path() -> PathBuf {
-    if let Ok(s) = std::env::var("ROY_SOCKET") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".roy/daemon.sock")
 }
