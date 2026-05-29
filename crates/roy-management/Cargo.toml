@@ -15,7 +15,7 @@ default = []
 test-support = []
 
 [dependencies]
-roy = { path = "../roy" }
+roy-protocol = { path = "../roy-protocol" }
 roy-auth = { path = "../roy-auth" }
 roy-scheduler = { path = "../roy-scheduler" }
 
