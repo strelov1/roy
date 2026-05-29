@@ -11,8 +11,17 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::Result;
+use async_trait::async_trait;
+use chrono::Utc;
 use roy_protocol::channel::{SessionStrategyWire, TelegramSource};
+use serde_json::json;
+use teloxide::prelude::*;
+use teloxide::types::Message;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
+use crate::bus::{BusSender, InboundEvent, ReplyHandle};
+use crate::channels::Publisher;
 use crate::session::SessionStrategy;
 use reply::TgSender;
 
@@ -132,6 +141,150 @@ impl ManagementClient {
     }
 }
 
+/// Pure mapping from a Telegram message to an `InboundEvent` (unit-tested).
+pub(crate) fn build_event(source_id: &str, chat_id: i64, user_id: i64, text: &str) -> InboundEvent {
+    InboundEvent {
+        id: Uuid::new_v4(),
+        source_id: source_id.to_string(),
+        source_kind: "telegram".into(),
+        sender_id: chat_id.to_string(),
+        payload: json!({ "text": text, "user_id": user_id }),
+        received_at: Utc::now(),
+        reply: ReplyHandle::Noop,
+    }
+}
+
+/// Allowlist check: empty list = public.
+pub(crate) fn allowed(allowed_ids: &[i64], user_id: i64) -> bool {
+    allowed_ids.is_empty() || allowed_ids.contains(&user_id)
+}
+
+/// teloxide `Bot` wrapped as a `TgSender` for replies.
+pub(crate) struct BotSender(pub teloxide::Bot);
+
+#[async_trait]
+impl reply::TgSender for BotSender {
+    async fn send(&self, chat_id: i64, text: &str) -> anyhow::Result<()> {
+        self.0
+            .send_message(teloxide::types::ChatId(chat_id), text)
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct TgDeps {
+    source_id: Arc<str>,
+    allowed: Arc<Vec<i64>>,
+    bus: BusSender,
+}
+
+async fn on_message(msg: &Message, deps: &TgDeps) -> anyhow::Result<()> {
+    let Some(text) = msg.text() else {
+        return Ok(());
+    };
+    let Some(from) = msg.from.as_ref() else {
+        return Ok(());
+    };
+    let user_id = from.id.0 as i64;
+    if !allowed(&deps.allowed, user_id) {
+        return Ok(());
+    }
+    let chat_id = msg.chat.id.0;
+    let ev = build_event(&deps.source_id, chat_id, user_id, text);
+    deps.bus
+        .send(ev)
+        .await
+        .map_err(|_| anyhow::anyhow!("bus closed"))?;
+    Ok(())
+}
+
+fn spawn_bot_task(
+    bot: teloxide::Bot,
+    source_id: Arc<str>,
+    allowed_ids: Arc<Vec<i64>>,
+    bus: BusSender,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let deps = TgDeps {
+            source_id,
+            allowed: allowed_ids,
+            bus,
+        };
+        let handler = Update::filter_message().endpoint(
+            |_bot: teloxide::Bot, msg: Message, deps: TgDeps| async move {
+                if let Err(e) = on_message(&msg, &deps).await {
+                    tracing::warn!(?e, "telegram on_message failed");
+                }
+                respond(())
+            },
+        );
+        Dispatcher::builder(bot, handler)
+            .dependencies(dptree::deps![deps])
+            .build()
+            .dispatch()
+            .await;
+    })
+}
+
+/// Publisher for the Telegram channel: fetches sources from `roy-management`,
+/// runs one teloxide dispatcher per bot, and keeps the shared registry current.
+pub struct TelegramPublisher {
+    registry: Arc<TelegramRegistry>,
+    client: Arc<ManagementClient>,
+}
+
+impl TelegramPublisher {
+    pub fn new(registry: Arc<TelegramRegistry>, client: Arc<ManagementClient>) -> Self {
+        Self { registry, client }
+    }
+
+    /// Build a bot, spawn its dispatcher, and insert it into the registry.
+    fn start_source(&self, src: TelegramSource, bus: &BusSender) {
+        let token = src.bot_token.clone();
+        let resolved: ResolvedSource = src.into();
+        let source_id: Arc<str> = Arc::from(resolved.source_id.as_str());
+        let bot = teloxide::Bot::new(&token);
+        let sender: Arc<dyn TgSender> = Arc::new(BotSender(bot.clone()));
+        let task = spawn_bot_task(
+            bot,
+            source_id.clone(),
+            resolved.allowed_user_ids.clone(),
+            bus.clone(),
+        );
+        self.registry.insert(
+            resolved.source_id.clone(),
+            SourceRuntime {
+                resolved: Arc::new(resolved),
+                sender,
+                token,
+                task,
+            },
+        );
+    }
+}
+
+#[async_trait]
+impl Publisher for TelegramPublisher {
+    async fn run(self: Arc<Self>, bus: BusSender, cancel: CancellationToken) -> Result<()> {
+        // Initial load (slice 2: fetch once; slice 3 adds the poll loop).
+        match self.client.fetch_telegram_sources().await {
+            Ok(sources) => {
+                tracing::info!(count = sources.len(), "telegram: starting bots");
+                for src in sources {
+                    self.start_source(src, &bus);
+                }
+            }
+            Err(e) => tracing::error!(error = ?e, "telegram: initial source fetch failed"),
+        }
+        cancel.cancelled().await;
+        for id in self.registry.source_ids() {
+            self.registry.remove(&id);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
@@ -178,5 +331,23 @@ mod tests {
             SessionStrategy::PerSenderSticky { idle_timeout } if idle_timeout == Duration::from_secs(60)
         ));
         assert_eq!(*r.allowed_user_ids, vec![7]);
+    }
+
+    #[test]
+    fn build_event_shapes_payload() {
+        let ev = build_event("tg:c1", 555, 999, "hi there");
+        assert_eq!(ev.source_kind, "telegram");
+        assert_eq!(ev.source_id, "tg:c1");
+        assert_eq!(ev.sender_id, "555");
+        assert_eq!(ev.payload["text"], "hi there");
+        assert_eq!(ev.payload["user_id"], 999);
+        assert!(matches!(ev.reply, crate::bus::ReplyHandle::Noop));
+    }
+
+    #[test]
+    fn allowlist_logic() {
+        assert!(allowed(&[], 5)); // empty = public
+        assert!(allowed(&[5, 6], 5));
+        assert!(!allowed(&[5, 6], 7));
     }
 }
