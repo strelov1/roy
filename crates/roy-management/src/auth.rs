@@ -416,3 +416,34 @@ pub async fn accept_invite(
             .into_response(),
     }
 }
+
+/// Middleware gating internal, service-to-service endpoints with a bearer token
+/// matched against `AppState::internal_token`. 503 if the server has no token
+/// configured; 401 if the header is missing or wrong.
+pub async fn require_internal_token(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(expected) = state.internal_token.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "internal endpoint disabled"})),
+        )
+            .into_response();
+    };
+    let provided = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if provided == Some(expected) {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "bad internal token"})),
+        )
+            .into_response()
+    }
+}

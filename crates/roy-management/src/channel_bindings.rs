@@ -306,3 +306,244 @@ mod tests {
         assert!(matches!(err, StoreError::Invalid(_)));
     }
 }
+
+// ---------------- HTTP ----------------
+
+use axum::{
+    extract::{Path as AxPath, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+    Extension, Json, Router,
+};
+use std::path::{Path, PathBuf};
+
+use crate::auth::AuthUser;
+use crate::state::AppState;
+use roy_protocol::channel::{SessionStrategyWire, TelegramSource};
+
+pub struct ApiError(StatusCode, String);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(serde_json::json!({"error": self.1}))).into_response()
+    }
+}
+
+impl From<StoreError> for ApiError {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::NotFound(id) => ApiError(StatusCode::NOT_FOUND, format!("not found: {id}")),
+            StoreError::Invalid(m) => ApiError(StatusCode::BAD_REQUEST, m),
+            StoreError::Db(e) => {
+                tracing::error!(error = %e, "channel_bindings db error");
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+            }
+        }
+    }
+}
+
+/// Authenticated CRUD, mounted behind `require_user`.
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/channel-bindings", get(list_handler).post(create_handler))
+        .route(
+            "/channel-bindings/{id}",
+            get(get_handler).delete(delete_handler),
+        )
+}
+
+/// Internal source list, mounted behind `require_internal_token`.
+pub fn internal_router() -> Router<AppState> {
+    Router::new().route("/internal/telegram-sources", get(internal_telegram_sources))
+}
+
+async fn list_handler(
+    Extension(AuthUser(uid)): Extension<AuthUser>,
+    State(s): State<AppState>,
+) -> Result<Json<Vec<ChannelBinding>>, ApiError> {
+    Ok(Json(s.channel_bindings.list_by_owner(&uid).await?))
+}
+
+async fn get_handler(
+    Extension(AuthUser(uid)): Extension<AuthUser>,
+    State(s): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Result<Json<ChannelBinding>, ApiError> {
+    Ok(Json(s.channel_bindings.get(&uid, &id).await?))
+}
+
+async fn delete_handler(
+    Extension(AuthUser(uid)): Extension<AuthUser>,
+    State(s): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Result<StatusCode, ApiError> {
+    s.channel_bindings.delete(&uid, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn create_handler(
+    Extension(AuthUser(uid)): Extension<AuthUser>,
+    State(s): State<AppState>,
+    Json(new): Json<NewChannelBinding>,
+) -> Result<(StatusCode, Json<ChannelBinding>), ApiError> {
+    // Validate strategy.
+    match new.session_strategy.as_str() {
+        "ephemeral" | "persistent_one" => {}
+        "per_sender_sticky" => {
+            if new.idle_timeout_secs.is_none() {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "per_sender_sticky requires idle_timeout_secs".into(),
+                ));
+            }
+        }
+        other => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("unknown session_strategy '{other}'"),
+            ))
+        }
+    }
+    // Validate the connection: owned, telegram_bot, has a non-empty bot_token.
+    let conn = s
+        .connections
+        .get(&uid, &new.connection_id)
+        .await
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "unknown connection".into()))?;
+    if conn.kind != crate::connections::KIND_TELEGRAM_BOT {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "connection is not a telegram_bot".into(),
+        ));
+    }
+    let has_token = conn
+        .secrets
+        .as_ref()
+        .and_then(|v| v.get("bot_token"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| !t.is_empty());
+    if !has_token {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "connection has no bot_token secret".into(),
+        ));
+    }
+    // Validate the agent resolves in the requested scope.
+    let dir = scope_dir(&s.workspace_dir, &uid, &new.agent_scope)
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "invalid agent_scope".into()))?;
+    if crate::agents::read_agent_persona(&dir, &new.agent_slug)
+        .await
+        .is_none()
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("agent '{}' not found in scope", new.agent_slug),
+        ));
+    }
+    let b = s.channel_bindings.create(&uid, &new).await?;
+    Ok((StatusCode::CREATED, Json(b)))
+}
+
+/// `<workspace>/users/<owner>/.roy/agents` for `"user"`, or
+/// `<workspace>/teams/<tid>/.roy/agents` for `"team:<tid>"`.
+fn scope_dir(workspace_dir: &Path, owner_id: &str, scope: &str) -> Option<PathBuf> {
+    if scope == "user" {
+        Some(
+            workspace_dir
+                .join("users")
+                .join(owner_id)
+                .join(".roy/agents"),
+        )
+    } else if let Some(tid) = scope.strip_prefix("team:") {
+        if tid.is_empty() {
+            None
+        } else {
+            Some(workspace_dir.join("teams").join(tid).join(".roy/agents"))
+        }
+    } else {
+        None
+    }
+}
+
+async fn internal_telegram_sources(State(s): State<AppState>) -> Json<Vec<TelegramSource>> {
+    Json(resolve_telegram_sources(&s.channel_bindings, &s.connections, &s.workspace_dir).await)
+}
+
+/// Resolve all enabled Telegram bindings to self-contained sources. Bindings
+/// whose connection or agent fails to resolve are skipped with a warning.
+pub(crate) async fn resolve_telegram_sources(
+    bindings: &Store,
+    connections: &crate::connections::Store,
+    workspace_dir: &Path,
+) -> Vec<TelegramSource> {
+    let rows = match bindings.list_enabled_telegram().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "listing telegram bindings");
+            return vec![];
+        }
+    };
+    let mut out = Vec::new();
+    for b in rows {
+        let conn = match connections.get(&b.owner_id, &b.connection_id).await {
+            Ok(c) => c,
+            Err(_) => {
+                tracing::warn!(
+                    binding = b.id,
+                    "telegram binding: connection gone; skipping"
+                );
+                continue;
+            }
+        };
+        let token = conn
+            .secrets
+            .as_ref()
+            .and_then(|v| v.get("bot_token"))
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty());
+        let Some(token) = token else {
+            tracing::warn!(binding = b.id, "telegram binding: no bot_token; skipping");
+            continue;
+        };
+        let Some(dir) = scope_dir(workspace_dir, &b.owner_id, &b.agent_scope) else {
+            tracing::warn!(
+                binding = b.id,
+                scope = b.agent_scope,
+                "bad agent_scope; skipping"
+            );
+            continue;
+        };
+        let Some((harness, model, body)) =
+            crate::agents::read_agent_persona(&dir, &b.agent_slug).await
+        else {
+            tracing::warn!(
+                binding = b.id,
+                slug = b.agent_slug,
+                "agent unresolved; skipping"
+            );
+            continue;
+        };
+        out.push(TelegramSource {
+            source_id: format!("tg:{}", b.connection_id),
+            bot_token: token.to_string(),
+            agent_slug: b.agent_slug,
+            harness,
+            system_prompt: Some(body),
+            model,
+            session_strategy: strategy_to_wire(&b.session_strategy, b.idle_timeout_secs),
+            allowed_user_ids: b.allowed_user_ids,
+        });
+    }
+    out
+}
+
+fn strategy_to_wire(name: &str, idle: Option<i64>) -> SessionStrategyWire {
+    match name {
+        "persistent_one" => SessionStrategyWire::PersistentOne,
+        "per_sender_sticky" => SessionStrategyWire::PerSenderSticky {
+            idle_timeout_secs: idle.unwrap_or(3600).max(0) as u64,
+        },
+        _ => SessionStrategyWire::Ephemeral,
+    }
+}
