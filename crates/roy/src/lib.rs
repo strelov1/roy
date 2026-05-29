@@ -8,8 +8,7 @@ pub mod transport;
 
 // Wire surface lives in roy-protocol; re-export at the historical paths so
 // roy-cli, examples, and core tests keep using `roy::...` unchanged.
-// NOTE: `wire` is intentionally absent here — a later task adds it.
-pub use roy_protocol::{control, error, event, pid_lock};
+pub use roy_protocol::{control, error, event, pid_lock, wire};
 
 pub use roy_protocol::control::{
     ClientCommand, ConnectionSpec, ErrorCode, FireTarget, ServerEvent,
