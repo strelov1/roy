@@ -3,7 +3,7 @@
 //! `AssistantText` (or `AssistantThought`) deltas extend the same block,
 //! and any other event finalizes the active block.
 
-use roy::event::TurnEvent;
+use roy_protocol::event::TurnEvent;
 use serde_json::Value;
 use teloxide::utils::html::escape;
 
@@ -149,7 +149,7 @@ fn render_tool_args(args: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roy::event::{StopReason, TurnEvent};
+    use roy_protocol::event::{StopReason, TurnEvent};
     use serde_json::json;
 
     #[test]

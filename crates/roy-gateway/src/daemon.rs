@@ -6,9 +6,9 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use roy::control::{ClientCommand, ServerEvent};
-use roy::event::TurnEvent;
-use roy::journal::JournalEntry;
+use roy_protocol::control::{ClientCommand, ServerEvent};
+use roy_protocol::event::TurnEvent;
+use roy_protocol::journal::JournalEntry;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -216,10 +216,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Conn for TurnConn<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roy::event::{StopReason, TurnEvent};
+    use roy_protocol::event::{StopReason, TurnEvent};
     use tokio::io::AsyncWriteExt;
 
-    use roy::journal::JournalEntry as JE;
+    use roy_protocol::journal::JournalEntry as JE;
 
     /// Scripted-daemon fixture: reads N lines, returns the i-th canned
     /// response for each. Caller's closure asserts on the parsed command.

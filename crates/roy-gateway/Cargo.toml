@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-roy = { path = "../roy" }
+roy-protocol = { path = "../roy-protocol" }
 roy-auth = { path = "../roy-auth" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "sync", "time", "fs", "signal"] }
 tokio-util = "0.7"
