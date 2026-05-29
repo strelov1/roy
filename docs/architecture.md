@@ -406,16 +406,23 @@ perspective every WS client is just another Unix-socket connection.
 ## `roy-inbound`
 
 A small bus that turns external events into roy `Fire` calls.
-Publishers (HTTP webhook today; IMAP / WhatsApp / Telegram support are
-planned) normalise events into `InboundEvent`s onto a `tokio::mpsc`
-channel. A single `InboundDispatcher` resolves a per-source session
-strategy (`ephemeral` / `persistent_one` / `per_sender_sticky`),
-asks `SessionResolver` to translate the strategy into a `FireTarget`,
-runs the fire over the daemon Unix socket, and hands the outcome to a
-per-channel `ReplyHook` carried on the event. State (`bindings`
-table in `~/.local/state/roy-inbound/state.db`) preserves sticky
-mappings across restarts. Configuration is TOML
+Publishers (HTTP webhook and Telegram customer-support today; IMAP /
+WhatsApp are planned) normalise events into `InboundEvent`s onto a
+`tokio::mpsc` channel. A single `InboundDispatcher` resolves a
+per-source session strategy (`ephemeral` / `persistent_one` /
+`per_sender_sticky`), asks `SessionResolver` to translate the strategy
+into a `FireTarget`, runs the fire over the daemon Unix socket, and
+hands the outcome to a per-channel `ReplyHook` carried on the event.
+State (`bindings` table in `~/.local/state/roy-inbound/state.db`)
+preserves sticky mappings across restarts. Configuration is TOML
 (`~/.config/roy/inbound.toml`; see `docs/examples/inbound.example.toml`).
+
+For the Telegram channel `roy-inbound` has a read-only control-plane
+HTTP dependency on `roy-management`: at startup and every 30 s it calls
+`GET /internal/telegram-sources` (bearer `ROY_INTERNAL_TOKEN`) to
+obtain the list of enabled bot tokens and their bound agent personas.
+This is config-only and read-only; the daemon is still reached
+exclusively via the Unix socket (`ClientCommand::Fire`).
 
 ## Connections — user-owned MCP servers
 
