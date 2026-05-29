@@ -33,6 +33,10 @@ mv ~/.config/roy/agents.toml ~/.config/roy/harnesses.toml
 
 # sessions.db and the scheduler agents.db migrate themselves
 # (ALTER COLUMN runs automatically on first start).
+# The scheduler binary owns its state.db (creation + migrations);
+# roy-management only READS it, via roy-scheduler's read facade
+# (roy_scheduler::read::SchedulerRead / db::open_read_only), and never
+# migrates it.
 
 # After the earlier split-store refactor, clear obsolete files once:
 rm -rf ~/.roy/journals/*.meta.json

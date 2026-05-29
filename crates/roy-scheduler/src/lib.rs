@@ -11,6 +11,7 @@ pub mod cli;
 pub mod db;
 pub mod driver;
 pub mod plan;
+pub mod read;
 pub mod roy_client;
 pub mod store;
 pub mod subscribers;

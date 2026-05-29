@@ -11,7 +11,7 @@ crates.
 |-------------------------------------------------|----------------------------------------|---------------------------------------------------------------------|
 | `~/.local/state/roy/sessions.db`                | `roy::SessionStore`                    | `sessions`                                                          |
 | `~/.local/state/roy/agents.db`                  | `roy-management` + `roy-auth`          | `projects`, `session_meta`, `session_tags`, `connections`, `users`, `teams`, `team_members`, `team_invites` |
-| `~/.local/state/roy-scheduler/state.db`         | `roy-scheduler`                        | `agents`, `triggers`, `fires`, `fire_subscribers`, `fire_subscriber_runs` |
+| `~/.local/state/roy-scheduler/state.db`         | `roy-scheduler` (writer); `roy-management` reads only | `agents`, `triggers`, `fires`, `fire_subscribers`, `fire_subscriber_runs` |
 | `~/.local/state/roy-inbound/state.db`           | `roy-inbound`                          | `bindings`                                                          |
 | `<journal_dir>/<session_id>.jsonl`              | `roy::Journal`                         | append-only JSONL event log (defaults to `~/.roy/journals/`)        |
 
@@ -121,6 +121,13 @@ Project- and session-level enrichment, joined with `sessions.db` on
 
 The Postgres dialect of the same schema lives in
 `crates/roy-scheduler/migrations/postgres/`.
+
+The roy-scheduler binary owns this file: it creates it and runs the
+migrations. `roy-management` opens it **read-only via the scheduler's read
+facade (`roy_scheduler::read::SchedulerRead` over `db::open_read_only`) and
+never migrates it** — it only surfaces `agents`/`triggers`/`fires` on its HTTP
+read endpoints. The shared WAL file is fine because exactly one process (the
+scheduler) ever writes or migrates.
 
 ## Inbound bindings (`roy-inbound/state.db`)
 
