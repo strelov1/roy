@@ -136,7 +136,22 @@ impl Store {
         .execute(&self.pool)
         .await;
         match res {
-            Ok(_) => self.get(owner_id, &id).await,
+            // Everything inserted is already in scope; no DB-side defaults or
+            // triggers mutate the row, so build it directly instead of re-SELECTing.
+            Ok(_) => Ok(ChannelBinding {
+                id,
+                owner_id: owner_id.to_string(),
+                channel_kind: CHANNEL_TELEGRAM.to_string(),
+                connection_id: new.connection_id.clone(),
+                agent_slug: new.agent_slug.clone(),
+                agent_scope: new.agent_scope.clone(),
+                session_strategy: new.session_strategy.clone(),
+                idle_timeout_secs: new.idle_timeout_secs,
+                allowed_user_ids: new.allowed_user_ids.clone(),
+                enabled: true,
+                created_at: now,
+                updated_at: now,
+            }),
             Err(sqlx::Error::Database(d)) if d.is_unique_violation() => Err(StoreError::Invalid(
                 "this bot is already bound to an agent".to_string(),
             )),
@@ -312,23 +327,15 @@ mod tests {
 use axum::{
     extract::{Path as AxPath, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
     routing::get,
     Extension, Json, Router,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::auth::AuthUser;
+use crate::http::ApiError;
 use crate::state::AppState;
 use roy_protocol::channel::{SessionStrategyWire, TelegramSource};
-
-pub struct ApiError(StatusCode, String);
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (self.0, Json(serde_json::json!({"error": self.1}))).into_response()
-    }
-}
 
 impl From<StoreError> for ApiError {
     fn from(e: StoreError) -> Self {
@@ -441,7 +448,7 @@ async fn create_handler(
         ));
     }
     // Validate the agent resolves in the requested scope.
-    let dir = scope_dir(&s.workspace_dir, &uid, &new.agent_scope)
+    let dir = crate::agents::agent_scope_dir(&s.workspace_dir, &uid, &new.agent_scope)
         .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "invalid agent_scope".into()))?;
     if crate::agents::read_agent_persona(&dir, &new.agent_slug)
         .await
@@ -454,27 +461,6 @@ async fn create_handler(
     }
     let b = s.channel_bindings.create(&uid, &new).await?;
     Ok((StatusCode::CREATED, Json(b)))
-}
-
-/// `<workspace>/users/<owner>/.roy/agents` for `"user"`, or
-/// `<workspace>/teams/<tid>/.roy/agents` for `"team:<tid>"`.
-fn scope_dir(workspace_dir: &Path, owner_id: &str, scope: &str) -> Option<PathBuf> {
-    if scope == "user" {
-        Some(
-            workspace_dir
-                .join("users")
-                .join(owner_id)
-                .join(".roy/agents"),
-        )
-    } else if let Some(tid) = scope.strip_prefix("team:") {
-        if tid.is_empty() {
-            None
-        } else {
-            Some(workspace_dir.join("teams").join(tid).join(".roy/agents"))
-        }
-    } else {
-        None
-    }
 }
 
 async fn internal_telegram_sources(State(s): State<AppState>) -> Json<Vec<TelegramSource>> {
@@ -517,7 +503,8 @@ pub(crate) async fn resolve_telegram_sources(
             tracing::warn!(binding = b.id, "telegram binding: no bot_token; skipping");
             continue;
         };
-        let Some(dir) = scope_dir(workspace_dir, &b.owner_id, &b.agent_scope) else {
+        let Some(dir) = crate::agents::agent_scope_dir(workspace_dir, &b.owner_id, &b.agent_scope)
+        else {
             tracing::warn!(
                 binding = b.id,
                 scope = b.agent_scope,
@@ -525,7 +512,7 @@ pub(crate) async fn resolve_telegram_sources(
             );
             continue;
         };
-        let Some((harness, model, body)) =
+        let Some((harness, _model, body)) =
             crate::agents::read_agent_persona(&dir, &b.agent_slug).await
         else {
             tracing::warn!(
@@ -541,7 +528,6 @@ pub(crate) async fn resolve_telegram_sources(
             agent_slug: b.agent_slug,
             harness,
             system_prompt: Some(body),
-            model,
             session_strategy: strategy_to_wire(&b.session_strategy, b.idle_timeout_secs),
             allowed_user_ids: b.allowed_user_ids,
         });

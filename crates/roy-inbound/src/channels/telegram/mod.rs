@@ -395,7 +395,6 @@ mod tests {
             agent_slug: "a".into(),
             harness: "claude".into(),
             system_prompt: Some("p".into()),
-            model: None,
             session_strategy: SessionStrategyWire::PerSenderSticky {
                 idle_timeout_secs: 60,
             },

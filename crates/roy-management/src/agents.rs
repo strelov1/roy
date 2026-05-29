@@ -12,7 +12,7 @@
 //! an agent file from a stray markdown note in the same directory.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -211,6 +211,30 @@ pub async fn read_agent_persona(
     let parsed = parse_agent_md(&contents)?;
     let harness = parsed.harness?;
     Some((harness, parsed.model, parsed.body))
+}
+
+/// Resolve the agent directory a channel binding's `agent_scope` points at:
+/// `"user"` → `<workspace>/users/<owner_id>/.roy/agents`, `"team:<team_id>"` →
+/// `<workspace>/teams/<team_id>/.roy/agents`. `None` for an unrecognized scope.
+/// Mirrors the directory layout in `list_all_agents`, so both live in one file.
+pub fn agent_scope_dir(workspace_dir: &Path, owner_id: &str, scope: &str) -> Option<PathBuf> {
+    if scope == "user" {
+        Some(
+            workspace_dir
+                .join("users")
+                .join(owner_id)
+                .join(".roy/agents"),
+        )
+    } else if let Some(team_id) = scope.strip_prefix("team:") {
+        (!team_id.is_empty()).then(|| {
+            workspace_dir
+                .join("teams")
+                .join(team_id)
+                .join(".roy/agents")
+        })
+    } else {
+        None
+    }
 }
 
 struct ParsedAgent {

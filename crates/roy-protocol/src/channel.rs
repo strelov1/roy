@@ -17,8 +17,6 @@ pub struct TelegramSource {
     pub harness: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
     pub session_strategy: SessionStrategyWire,
     /// Empty = public (any Telegram user may message the bot).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -54,7 +52,6 @@ mod tests {
             agent_slug: "support-l1".into(),
             harness: "claude".into(),
             system_prompt: Some("You are support.".into()),
-            model: None,
             session_strategy: SessionStrategyWire::PerSenderSticky {
                 idle_timeout_secs: 3600,
             },
@@ -63,7 +60,6 @@ mod tests {
         let json = serde_json::to_string(&src).unwrap();
         // empty + None fields omitted
         assert!(!json.contains("allowed_user_ids"));
-        assert!(!json.contains("model"));
         assert!(json.contains(r#""kind":"per_sender_sticky""#));
         let back: TelegramSource = serde_json::from_str(&json).unwrap();
         assert_eq!(src, back);
