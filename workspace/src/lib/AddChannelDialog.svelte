@@ -4,7 +4,7 @@
   import { Label } from '$lib/components/ui/label';
   import * as Dialog from '$lib/components/ui/dialog';
   import * as Select from '$lib/components/ui/select';
-  import { channelsStore } from './channels.svelte';
+  import { channelsStore, type ChannelType } from './channels.svelte';
   import { agents as agentsApi, type WireAgent, type SessionStrategy } from './management-client';
   import { errMsg } from './utils';
 
@@ -16,7 +16,14 @@
     onAdded?: () => void;
   } = $props();
 
-  let botName = $state('');
+  // Channel types the picker offers. Only Telegram has a backend today; new
+  // kinds become a row here plus a credential block below — nothing else moves.
+  const CHANNEL_TYPES: { value: ChannelType; label: string }[] = [
+    { value: 'telegram', label: 'Telegram' },
+  ];
+
+  let channelType = $state<ChannelType>('telegram');
+  let name = $state('');
   let botToken = $state('');
   // Encoded "agentScope::slug" so the value carries both the slug and the
   // scope the binding needs (two agents could share a slug across scopes).
@@ -41,6 +48,9 @@
     { value: 'ephemeral', label: 'Ephemeral (fresh each message)' },
   ];
 
+  const channelTypeLabel = $derived(
+    CHANNEL_TYPES.find((c) => c.value === channelType)?.label ?? '',
+  );
   const selectedAgentLabel = $derived(
     agentList.find((a) => encode(a) === agentValue)?.name ?? 'Select an agent',
   );
@@ -51,7 +61,8 @@
   // Fresh form + agent fetch on each open.
   $effect(() => {
     if (open) {
-      botName = '';
+      channelType = 'telegram';
+      name = '';
       botToken = '';
       agentValue = '';
       strategy = 'per_sender_sticky';
@@ -76,14 +87,14 @@
 
   async function submit() {
     if (submitting) return;
-    if (!botName.trim()) return (error = 'Bot name is required');
-    if (!botToken.trim()) return (error = 'Bot token is required');
+    if (!name.trim()) return (error = 'Name is required');
+    if (channelType === 'telegram' && !botToken.trim()) return (error = 'Bot token is required');
     if (!agentValue) return (error = 'Pick an agent');
     if (strategy === 'per_sender_sticky' && (!idleMinutes || idleMinutes <= 0)) {
       return (error = 'Idle timeout must be a positive number of minutes');
     }
     const allowed = parseAllowlist(allowlistRaw);
-    if (allowed === null) return (error = 'Allowlist must be space/comma-separated numeric user IDs');
+    if (allowed === null) return (error = 'Allowlist must be space/comma-separated numeric sender IDs');
 
     const sep = agentValue.indexOf('::');
     const agentScope = agentValue.slice(0, sep);
@@ -92,14 +103,15 @@
     submitting = true;
     error = null;
     try {
-      await channelsStore.addBot({
-        botName: botName.trim(),
-        botToken: botToken.trim(),
+      await channelsStore.addChannel({
+        channelType,
+        name: name.trim(),
         agentSlug,
         agentScope,
         sessionStrategy: strategy,
         idleTimeoutSecs: strategy === 'per_sender_sticky' ? idleMinutes * 60 : undefined,
-        allowedUserIds: allowed,
+        allowedSenderIds: allowed,
+        telegram: channelType === 'telegram' ? { botToken: botToken.trim() } : undefined,
       });
       open = false;
       onAdded?.();
@@ -114,30 +126,44 @@
 <Dialog.Root bind:open>
   <Dialog.Content class="max-w-md">
     <Dialog.Header>
-      <Dialog.Title>Add Telegram bot</Dialog.Title>
+      <Dialog.Title>Add channel</Dialog.Title>
       <Dialog.Description>
-        Connect a bot token to an agent. The agent answers messages sent to the bot.
+        Connect a channel to an agent. The agent answers messages that arrive on it.
       </Dialog.Description>
     </Dialog.Header>
 
     <div class="space-y-4 py-2">
       <div class="space-y-1.5">
-        <Label for="bot-name">Name</Label>
-        <Input id="bot-name" bind:value={botName} placeholder="Support bot" autocomplete="off" />
-        <p class="text-xs text-muted-foreground">A label to recognise this bot.</p>
+        <Label>Channel type</Label>
+        <Select.Root type="single" bind:value={channelType}>
+          <Select.Trigger class="w-full">{channelTypeLabel}</Select.Trigger>
+          <Select.Content>
+            {#each CHANNEL_TYPES as c (c.value)}
+              <Select.Item value={c.value}>{c.label}</Select.Item>
+            {/each}
+          </Select.Content>
+        </Select.Root>
       </div>
 
       <div class="space-y-1.5">
-        <Label for="bot-token">Bot token</Label>
-        <Input
-          id="bot-token"
-          type="password"
-          bind:value={botToken}
-          placeholder="123456:ABC-DEF…"
-          autocomplete="off"
-        />
-        <p class="text-xs text-muted-foreground">From @BotFather. Stored as a secret.</p>
+        <Label for="channel-name">Name</Label>
+        <Input id="channel-name" bind:value={name} placeholder="Support bot" autocomplete="off" />
+        <p class="text-xs text-muted-foreground">A label to recognise this channel.</p>
       </div>
+
+      {#if channelType === 'telegram'}
+        <div class="space-y-1.5">
+          <Label for="bot-token">Bot token</Label>
+          <Input
+            id="bot-token"
+            type="password"
+            bind:value={botToken}
+            placeholder="123456:ABC-DEF…"
+            autocomplete="off"
+          />
+          <p class="text-xs text-muted-foreground">From @BotFather. Stored as a secret.</p>
+        </div>
+      {/if}
 
       <div class="space-y-1.5">
         <Label>Agent</Label>
@@ -182,7 +208,7 @@
           autocomplete="off"
         />
         <p class="text-xs text-muted-foreground">
-          Telegram user IDs allowed to use the bot. Empty = public.
+          Sender IDs allowed to use the channel. Empty = open to everyone.
         </p>
       </div>
 
@@ -194,7 +220,7 @@
     <Dialog.Footer>
       <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
       <Button onclick={submit} disabled={submitting}>
-        {submitting ? 'Adding…' : 'Add bot'}
+        {submitting ? 'Adding…' : 'Add channel'}
       </Button>
     </Dialog.Footer>
   </Dialog.Content>
