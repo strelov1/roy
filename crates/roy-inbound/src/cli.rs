@@ -8,12 +8,14 @@ use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
 use crate::bus::{self, EventRef};
+use crate::channels::telegram::reply::{NoopSender, TelegramReplyHook};
+use crate::channels::telegram::{ManagementClient, TelegramPublisher, TelegramRegistry};
 use crate::channels::webhook::{WebhookPublisher, WebhookSourceSpec};
 use crate::channels::Publisher;
 use crate::config::InboundConfig;
 use crate::dispatcher::InboundDispatcher;
 use crate::reply::{ReplyHook, ReplyHookRegistry};
-use crate::router::ConfigRouter;
+use crate::router::{CompositeRouter, ConfigRouter, TelegramRouter};
 use crate::session::SessionResolver;
 use crate::store::{bindings::BindingStore, db};
 
@@ -32,6 +34,13 @@ pub struct Args {
     /// Default harness used when resolving Spawn targets.
     #[arg(long, default_value = "claude")]
     pub harness: String,
+    /// roy-management base URL for resolving telegram bot→agent bindings.
+    #[arg(
+        long,
+        env = "ROY_MANAGEMENT_URL",
+        default_value = "http://127.0.0.1:8088"
+    )]
+    pub management_url: String,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -48,7 +57,10 @@ pub async fn run(args: Args) -> Result<()> {
 
     let (bus_tx, bus_rx) = bus::channel(cfg.bus.capacity);
 
-    // Reply-hook registry: register webhook for now.
+    // Registry for Telegram bots.
+    let tg_registry = TelegramRegistry::new();
+
+    // Reply-hook registry: register both webhook and telegram.
     let mut hooks = ReplyHookRegistry::new();
     hooks.register(
         "webhook",
@@ -58,6 +70,19 @@ pub async fn run(args: Args) -> Result<()> {
             ))
         }),
     );
+    {
+        let reg = tg_registry.clone();
+        hooks.register(
+            "telegram",
+            Box::new(move |ev: &EventRef| -> Box<dyn ReplyHook> {
+                let chat_id = ev.sender_id.parse::<i64>().unwrap_or(0);
+                match reg.sender_for(&ev.source_id) {
+                    Some(sender) => Box::new(TelegramReplyHook::new(sender, chat_id)),
+                    None => Box::new(TelegramReplyHook::new(Arc::new(NoopSender), chat_id)),
+                }
+            }),
+        );
+    }
     let hooks = Arc::new(hooks);
 
     // Build the webhook publisher from config (one source per webhook).
@@ -77,7 +102,25 @@ pub async fn run(args: Args) -> Result<()> {
         .with_context(|| format!("parsing server.bind '{}'", cfg.server.bind))?;
     let webhook = Arc::new(WebhookPublisher::new(bind, webhook_sources)?);
 
-    let router: Arc<dyn crate::router::Router> = Arc::new(ConfigRouter::from_config(&cfg));
+    // Build the Telegram publisher (only when ROY_INTERNAL_TOKEN is set).
+    let mgmt_token = std::env::var("ROY_INTERNAL_TOKEN").ok();
+    let tg_publisher = mgmt_token.as_ref().map(|tok| {
+        Arc::new(TelegramPublisher::new(
+            tg_registry.clone(),
+            Arc::new(ManagementClient::new(
+                args.management_url.clone(),
+                tok.clone(),
+            )),
+        ))
+    });
+    if tg_publisher.is_none() {
+        tracing::info!("ROY_INTERNAL_TOKEN not set; Telegram publisher disabled");
+    }
+
+    let router: Arc<dyn crate::router::Router> = Arc::new(CompositeRouter {
+        telegram: TelegramRouter::new(tg_registry.clone()),
+        config: ConfigRouter::from_config(&cfg),
+    });
     let resolver = SessionResolver::new(bindings.clone(), args.harness);
 
     let dispatcher = InboundDispatcher {
@@ -99,10 +142,23 @@ pub async fn run(args: Args) -> Result<()> {
         }
     });
 
+    // Clone bus_tx before moving it into the webhook task.
+    let bus_tx_tg = bus_tx.clone();
+
     let pub_handle = tokio::spawn(async move {
         if let Err(e) = webhook.run(bus_tx, cancel_pub).await {
             tracing::error!(error = ?e, "webhook publisher exited with error");
         }
+    });
+
+    let cancel_tg = cancel.clone();
+    let tg_handle = tg_publisher.map(|pubr| {
+        let cancel = cancel_tg;
+        tokio::spawn(async move {
+            if let Err(e) = pubr.run(bus_tx_tg, cancel).await {
+                tracing::error!(error = ?e, "telegram publisher exited with error");
+            }
+        })
     });
 
     tokio::signal::ctrl_c()
@@ -111,6 +167,9 @@ pub async fn run(args: Args) -> Result<()> {
     tracing::info!("ctrl-c received; shutting down");
     cancel.cancel();
     let _ = tokio::join!(dispatcher_handle, pub_handle);
+    if let Some(h) = tg_handle {
+        let _ = h.await;
+    }
     Ok(())
 }
 
