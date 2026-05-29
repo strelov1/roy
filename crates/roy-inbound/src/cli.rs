@@ -38,7 +38,7 @@ pub struct Args {
     #[arg(
         long,
         env = "ROY_MANAGEMENT_URL",
-        default_value = "http://127.0.0.1:8088"
+        default_value = "http://127.0.0.1:8079"
     )]
     pub management_url: String,
 }
