@@ -69,7 +69,13 @@
       idleMinutes = 60;
       allowlistRaw = '';
       error = null;
-      void agentsApi.list().then((a) => (agentList = a)).catch((e) => (error = errMsg(e)));
+      // Builtin agents can't be bound — channel bindings resolve agents under
+      // the user's / team's scope dir, and there is no builtin scope there.
+      // Offering them would guarantee a 400, so drop them from the picker.
+      void agentsApi
+        .list()
+        .then((a) => (agentList = a.filter((x) => x.scope.kind !== 'builtin')))
+        .catch((e) => (error = errMsg(e)));
     }
   });
 
