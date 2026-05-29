@@ -9,6 +9,7 @@
   import ScheduledTasksView from './lib/ScheduledTasksView.svelte';
   import SkillsView from './lib/SkillsView.svelte';
   import ConnectionsView from './lib/ConnectionsView.svelte';
+  import ChannelsView from './lib/ChannelsView.svelte';
   import AcceptInviteView from './lib/AcceptInviteView.svelte';
   import { authState } from './lib/auth.svelte';
   import { royClient } from './lib/client';
@@ -44,6 +45,7 @@
     | { kind: 'scheduled' }
     | { kind: 'skills' }
     | { kind: 'connections' }
+    | { kind: 'channels' }
     | { kind: 'accept_invite'; token: string };
 
   function parseRoute(): Route {
@@ -55,6 +57,7 @@
     if (window.location.pathname === '/scheduled') return { kind: 'scheduled' };
     if (window.location.pathname === '/skills') return { kind: 'skills' };
     if (window.location.pathname === '/connections') return { kind: 'connections' };
+    if (window.location.pathname === '/channels') return { kind: 'channels' };
     if (window.location.pathname === '/accept-invite') {
       const token = new URLSearchParams(window.location.search).get('token') ?? '';
       return { kind: 'accept_invite', token };
@@ -69,6 +72,7 @@
     if (r.kind === 'scheduled') return '/scheduled';
     if (r.kind === 'skills') return '/skills';
     if (r.kind === 'connections') return '/connections';
+    if (r.kind === 'channels') return '/channels';
     if (r.kind === 'accept_invite') return `/accept-invite?token=${encodeURIComponent(r.token)}`;
     return '/';
   }
@@ -78,7 +82,7 @@
   let route = $state<Route>(parseRoute());
 
   // Sidebar nav highlight: only these route kinds map to a sidebar item.
-  const navKinds = ['agents', 'scheduled', 'skills', 'connections'] as const;
+  const navKinds = ['agents', 'scheduled', 'skills', 'connections', 'channels'] as const;
   const activeNav = $derived(
     (navKinds as readonly Route['kind'][]).includes(route.kind)
       ? (route.kind as (typeof navKinds)[number])
@@ -133,6 +137,7 @@
   const openScheduled = () => navigate({ kind: 'scheduled' });
   const openSkills = () => navigate({ kind: 'skills' });
   const openConnections = () => navigate({ kind: 'connections' });
+  const openChannels = () => navigate({ kind: 'channels' });
 
   function goHome() {
     history.pushState({}, '', '/');
@@ -323,6 +328,7 @@ cargo run -p roy-gateway -- --config ~/.config/roy-gateway/telegram.toml</pre>
       onOpenScheduled={openScheduled}
       onOpenSkills={openSkills}
       onOpenConnections={openConnections}
+      onOpenChannels={openChannels}
       {activeNav}
       open={sidebarOpen}
       onClose={() => (sidebarOpen = false)}
@@ -370,6 +376,8 @@ cargo run -p roy-gateway -- --config ~/.config/roy-gateway/telegram.toml</pre>
         />
       {:else if route.kind === 'connections'}
         <ConnectionsView />
+      {:else if route.kind === 'channels'}
+        <ChannelsView onOpenSidebar={() => (sidebarOpen = true)} />
       {:else if route.kind === 'accept_invite'}
         <AcceptInviteView
           token={route.token}

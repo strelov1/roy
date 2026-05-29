@@ -15,6 +15,7 @@
     Plug,
     LogOut,
     Users,
+    MessageCircle,
   } from '@lucide/svelte';
   import { authState } from './auth.svelte';
   import { royClient } from './client';
@@ -51,6 +52,7 @@
     onOpenScheduled,
     onOpenSkills,
     onOpenConnections,
+    onOpenChannels,
     activeNav = null,
     open = true,
     onClose,
@@ -62,9 +64,10 @@
     onOpenScheduled?: () => void;
     onOpenSkills?: () => void;
     onOpenConnections?: () => void;
+    onOpenChannels?: () => void;
     /** Highlights the matching footer pill so the user can see which top-level
      *  page they are on. `null` when the main area shows a session/project/home. */
-    activeNav?: 'agents' | 'scheduled' | 'skills' | 'connections' | null;
+    activeNav?: 'agents' | 'scheduled' | 'skills' | 'connections' | 'channels' | null;
     open?: boolean;
     onClose?: () => void;
     onOpen?: () => void;
@@ -256,6 +259,18 @@
           class="text-muted-foreground hover:bg-sidebar-accent/60"
         >
           <Plug />
+        </Button>
+      {/if}
+      {#if onOpenChannels}
+        <Button
+          variant="ghost"
+          size="icon"
+          onclick={onOpenChannels}
+          aria-label="Channels"
+          title="Channels — Telegram bots"
+          class="text-muted-foreground hover:bg-sidebar-accent/60"
+        >
+          <MessageCircle />
         </Button>
       {/if}
       <div class="flex-1"></div>
@@ -554,7 +569,7 @@
       </ScrollArea>
 
       {#snippet navPill(
-        key: 'agents' | 'scheduled' | 'skills' | 'connections',
+        key: 'agents' | 'scheduled' | 'skills' | 'connections' | 'channels',
         label: string,
         title: string,
         Icon: typeof Bot,
@@ -603,6 +618,9 @@
           {/if}
           {#if onOpenConnections}
             {@render navPill('connections', 'Connections', 'Connections — MCP servers', Plug, onOpenConnections)}
+          {/if}
+          {#if onOpenChannels}
+            {@render navPill('channels', 'Channels', 'Channels — Telegram bots', MessageCircle, onOpenChannels)}
           {/if}
         </div>
       </div>
