@@ -258,6 +258,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allowed_user_ids_round_trip() {
+        let pool = setup_pool().await;
+        let user = make_user(&pool, "alice").await;
+        let conn_id = make_conn(&pool, &user.id).await;
+        let store = Store::new(pool.clone());
+
+        let b = store
+            .create(
+                &user.id,
+                &NewChannelBinding {
+                    connection_id: conn_id,
+                    agent_slug: "support-l1".into(),
+                    agent_scope: "user".into(),
+                    session_strategy: "per_sender_sticky".into(),
+                    idle_timeout_secs: None,
+                    allowed_user_ids: vec![123, 456],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(b.allowed_user_ids, vec![123, 456]);
+
+        let via_get = store.get(&user.id, &b.id).await.unwrap();
+        assert_eq!(via_get.allowed_user_ids, vec![123, 456]);
+
+        let via_list = store.list_by_owner(&user.id).await.unwrap();
+        assert_eq!(via_list[0].allowed_user_ids, vec![123, 456]);
+    }
+
+    #[tokio::test]
     async fn one_bot_one_binding() {
         let pool = setup_pool().await;
         let user = make_user(&pool, "alice").await;
