@@ -66,13 +66,21 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/invites", post(auth::create_invite))
         .route("/auth/accept-invite", post(auth::accept_invite))
         .merge(crate::connections::router())
+        .merge(crate::channel_bindings::router())
         .merge(auth::protected_router())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_user,
         ));
 
-    auth::router().merge(protected).with_state(state)
+    let internal = crate::channel_bindings::internal_router().route_layer(
+        axum::middleware::from_fn_with_state(state.clone(), auth::require_internal_token),
+    );
+
+    auth::router()
+        .merge(protected)
+        .merge(internal)
+        .with_state(state)
 }
 
 /// Test-only wrapper around `router` so integration tests don't have to
