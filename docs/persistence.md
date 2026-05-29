@@ -90,6 +90,17 @@ Project- and session-level enrichment, joined with `sessions.db` on
   `(owner_id, provider_id, name)` when `provider_id IS NOT NULL`,
   so each user can have one labelled instance per catalog provider.
   Secrets live inline in `secrets_json` (`agents.db` is `0600`).
+- **channel_bindings**: bot→agent bindings for inbound channels.
+  Columns: `id`, `owner_id` (FK `users`), `channel_kind` (e.g.
+  `telegram`), `connection_id` (FK `connections` ON DELETE CASCADE),
+  `agent_slug`, `agent_scope` (`"user"` or `"team:<id>"`),
+  `session_strategy` (`ephemeral` / `persistent_one` /
+  `per_sender_sticky`), `idle_timeout_secs` (nullable), `allowed_user_ids`
+  (JSON array, nullable), `enabled`, `created_at`, `updated_at`.
+  `UNIQUE(connection_id)` — one binding per bot.
+  Owned by `roy-management` (CRUD via the HTTP API); read by
+  `roy-inbound` through the internal HTTP endpoint
+  `GET /internal/telegram-sources` (not direct DB access).
 
 ## Auth tables (`agents.db`)
 
