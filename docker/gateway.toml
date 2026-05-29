@@ -1,0 +1,5 @@
+# Minimal gateway config for the Docker bundle: WS relay only, no Telegram.
+# The daemon Unix socket is read from $ROY_SOCKET (set in Dockerfile.roy).
+
+[websocket]
+bind = "0.0.0.0:8788"

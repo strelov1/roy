@@ -1,0 +1,100 @@
+# Prod overlay for agent.telagon.io (root@hydra, x86_64).
+#
+# Differences vs docker-compose.yml:
+#   • pulls pre-built amd64 images from GHCR instead of building locally
+#   • binds host ports to 127.0.0.1 only — nginx terminates TLS in front
+#   • no bind-mounts for ~/.claude, ~/.gemini, ~/.codex, ~/.config/opencode,
+#     ~/.pi, ~/.roy/skills — those paths don't exist on the server. Agent
+#     credentials must arrive via env (CLAUDE_CODE_OAUTH_TOKEN, …).
+#   • harnesses.toml / connections.yaml are read from /opt/roy/ on the host
+#     (not ${HOME}/.config/roy/…), so the deploy step scp's them next to
+#     this file.
+#
+# Usage on the server:
+#   cd /opt/roy
+#   docker compose -f docker-compose.yml pull
+#   docker compose -f docker-compose.yml up -d
+
+services:
+  roy-daemon:
+    image: ${ROY_IMAGE:-ghcr.io/strelov1/roy:latest}
+    pull_policy: always
+    container_name: roy-daemon
+    command: ["sh", "-c", "rm -f \"$$ROY_SOCKET\" \"$${ROY_SOCKET}.pid\" && exec roy serve"]
+    environment:
+      - ANTHROPIC_API_KEY
+      - CLAUDE_CODE_OAUTH_TOKEN
+      - GEMINI_API_KEY
+      - GOOGLE_API_KEY
+      - OPENAI_API_KEY
+      - OPENROUTER_API_KEY
+    volumes:
+      - roy-home:/home/roy/.roy
+      - roy-state:/home/roy/.local/state/roy
+      - roy-config:/home/roy/.config/roy
+      - ./harnesses.toml:/home/roy/.config/roy/harnesses.toml:ro
+      - ./connections.yaml:/home/roy/.roy/connections.yaml:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "roy", "status"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  roy-management:
+    image: ${ROY_IMAGE:-ghcr.io/strelov1/roy:latest}
+    pull_policy: always
+    container_name: roy-management
+    depends_on:
+      roy-daemon:
+        condition: service_healthy
+    command: ["roy", "management", "--addr", "0.0.0.0:8079"]
+    environment:
+      - ROY_JWT_SECRET=${ROY_JWT_SECRET:?ROY_JWT_SECRET must be set in .env}
+      - ROY_BOOTSTRAP_USERNAME
+      - ROY_BOOTSTRAP_PASSWORD
+    ports:
+      - "127.0.0.1:18079:8079"
+    volumes:
+      - roy-home:/home/roy/.roy
+      - roy-state:/home/roy/.local/state/roy
+      - roy-config:/home/roy/.config/roy
+      - ./harnesses.toml:/home/roy/.config/roy/harnesses.toml:ro
+      - ./connections.yaml:/home/roy/.roy/connections.yaml:ro
+    restart: unless-stopped
+
+  roy-gateway:
+    image: ${ROY_IMAGE:-ghcr.io/strelov1/roy:latest}
+    pull_policy: always
+    container_name: roy-gateway
+    depends_on:
+      roy-daemon:
+        condition: service_healthy
+    command: ["roy", "gateway", "--config", "/etc/roy/gateway.toml"]
+    environment:
+      - ROY_JWT_SECRET=${ROY_JWT_SECRET:?ROY_JWT_SECRET must be set in .env}
+    ports:
+      - "127.0.0.1:18788:8788"
+    volumes:
+      - roy-home:/home/roy/.roy
+      - roy-state:/home/roy/.local/state/roy
+      - roy-config:/home/roy/.config/roy
+      - ./harnesses.toml:/home/roy/.config/roy/harnesses.toml:ro
+    restart: unless-stopped
+
+  roy-web:
+    image: ${ROY_WEB_IMAGE:-ghcr.io/strelov1/roy-web:latest}
+    pull_policy: always
+    container_name: roy-web
+    depends_on:
+      - roy-management
+      - roy-gateway
+    ports:
+      - "127.0.0.1:18080:80"
+    restart: unless-stopped
+
+volumes:
+  roy-home:
+  roy-state:
+  roy-config:

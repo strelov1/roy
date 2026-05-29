@@ -1,0 +1,19 @@
+# Build context is the monorepo root (roy/), so ignore heavy/stale artefacts
+# from the Rust workspace and the SPA under workspace/.
+
+target/
+.git/
+.idea/
+.claude/
+.worktrees/
+.playwright-mcp/
+*.png
+
+workspace/node_modules/
+workspace/dist/
+workspace/.svelte-kit/
+workspace/.claude/
+workspace/.playwright-mcp/
+workspace/*.png
+
+docker/.env

@@ -1,0 +1,135 @@
+# Docker bundle for `roy` (Rust daemon + management API + WS gateway) and
+# `roy-web` (Svelte SPA served by nginx).
+#
+# Three `roy:local` containers share state through named volumes:
+#   roy-home   → /home/roy/.roy/               (Unix socket + workspace)
+#   roy-state  → /home/roy/.local/state/roy/   (sessions.db, agents.db, …)
+#   roy-config → /home/roy/.config/roy/        (harnesses.toml, optional gateway.toml override, …)
+#
+# Before first start: cp .env.example .env, set ROY_JWT_SECRET.
+
+services:
+  roy-daemon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.roy
+    image: roy:local
+    container_name: roy-daemon
+    # Drop stale socket + pid-lock from the previous container before binding.
+    # Safe: only roy-daemon owns the roy-home volume at start, and the daemon's
+    # PidLock would otherwise see PID 8 in the new PID namespace as "alive".
+    # NB: `$$` escapes the Compose variable interpolation so the shell inside
+    # the container expands $ROY_SOCKET (set in Dockerfile.roy ENV).
+    command: ["sh", "-c", "rm -f \"$$ROY_SOCKET\" \"$${ROY_SOCKET}.pid\" && exec roy serve"]
+    environment:
+      # Keys / tokens for ACP agents. List form (no `=`) means Compose only
+      # forwards the var when it's actually set in the host env / .env —
+      # uncommented-but-empty .env lines won't leak as empty-string env.
+      - ANTHROPIC_API_KEY
+      - CLAUDE_CODE_OAUTH_TOKEN
+      - GEMINI_API_KEY
+      - GOOGLE_API_KEY
+      - OPENAI_API_KEY
+      - OPENROUTER_API_KEY
+    volumes:
+      - roy-home:/home/roy/.roy
+      - roy-state:/home/roy/.local/state/roy
+      - roy-config:/home/roy/.config/roy
+      # --- Optional: bind-mount host ACP agent creds so the daemon can
+      # spawn CLIs you've already logged in on the host. Comment out
+      # the lines you don't need (otherwise the bind fails if the dir
+      # is missing).
+      # NB: NOT read-only. claude-code-acp writes debug logs to
+      # ~/.claude/debug/*.txt (EROFS → "agent process exited during
+      # initialize"); claude / gemini / codex also refresh OAuth tokens
+      # in their config dirs. The container shares your host uid:gid
+      # (1001:1001 inside, mapped to the bind owner), so writes land
+      # back on the host as you. If that worries you, supply credentials
+      # via env (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN / …) and
+      # delete the relevant bind line.
+      - ${HOME}/.claude:/home/roy/.claude
+      - ${HOME}/.gemini:/home/roy/.gemini
+      - ${HOME}/.codex:/home/roy/.codex
+      - ${HOME}/.config/opencode:/home/roy/.config/opencode
+      - ${HOME}/.pi:/home/roy/.pi
+      # Harness catalog stays read-only — roy only reads it, no need to
+      # let the daemon corrupt the host file.
+      - ${HOME}/.config/roy/harnesses.toml:/home/roy/.config/roy/harnesses.toml:ro
+      # Roy's own skills catalog: ~/.roy/skills/<name>/SKILL.md. Not part
+      # of the named roy-home volume because roy-management lists/creates
+      # entries here and the user expects host-side sync.
+      - ${HOME}/.roy/skills:/home/roy/.roy/skills
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "roy", "status"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  roy-management:
+    image: roy:local
+    container_name: roy-management
+    depends_on:
+      roy-daemon:
+        condition: service_healthy
+    command: ["roy", "management", "--addr", "0.0.0.0:8079"]
+    environment:
+      # ROY_JWT_SECRET stays required (Compose will refuse to start without it).
+      # ROY_BOOTSTRAP_* in list form: only forwarded when set, so an empty
+      # ROY_BOOTSTRAP_PASSWORD doesn't trip roy-management's min-8 validator —
+      # the daemon generates a fresh password on the first launch instead.
+      - ROY_JWT_SECRET=${ROY_JWT_SECRET:?ROY_JWT_SECRET must be set in .env}
+      - ROY_BOOTSTRAP_USERNAME
+      - ROY_BOOTSTRAP_PASSWORD
+    ports:
+      - "8079:8079"
+    volumes:
+      - roy-home:/home/roy/.roy
+      - roy-state:/home/roy/.local/state/roy
+      - roy-config:/home/roy/.config/roy
+      - ${HOME}/.config/roy/harnesses.toml:/home/roy/.config/roy/harnesses.toml:ro
+      # Connection-catalog: provider definitions live on the host so users
+      # can edit yaml without re-entering the container.
+      - ${HOME}/.roy/connections.yaml:/home/roy/.roy/connections.yaml:ro
+      # /commands endpoint scans ~/.roy/skills/<name>/SKILL.md.
+      - ${HOME}/.roy/skills:/home/roy/.roy/skills
+    restart: unless-stopped
+
+  roy-gateway:
+    image: roy:local
+    container_name: roy-gateway
+    depends_on:
+      roy-daemon:
+        condition: service_healthy
+    command: ["roy", "gateway", "--config", "/etc/roy/gateway.toml"]
+    environment:
+      - ROY_JWT_SECRET=${ROY_JWT_SECRET:?ROY_JWT_SECRET must be set in .env}
+    ports:
+      - "8788:8788"
+    volumes:
+      - roy-home:/home/roy/.roy
+      - roy-state:/home/roy/.local/state/roy
+      - roy-config:/home/roy/.config/roy
+      - ${HOME}/.config/roy/harnesses.toml:/home/roy/.config/roy/harnesses.toml:ro
+    restart: unless-stopped
+
+  roy-web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+      args:
+        VITE_ROY_WS_URL: ${VITE_ROY_WS_URL:-ws://localhost:8788}
+    image: roy-web:local
+    container_name: roy-web
+    depends_on:
+      - roy-management
+      - roy-gateway
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  roy-home:
+  roy-state:
+  roy-config:

@@ -1,0 +1,89 @@
+# Multi-stage build for the `roy` Rust workspace.
+# Produces a single image used by three docker-compose services:
+#   roy-daemon       → `roy serve`
+#   roy-management   → `roy management`
+#   roy-gateway      → `roy gateway --config /etc/roy/gateway.toml`
+
+# ---------- Stage 1: build the roy binary ----------
+# Rust 1.93+ is required: roy-gateway uses the now-stable `floor_char_boundary`.
+# (edition2024, darling 0.23, serde_with 3.20 also need 1.85+/1.88+.)
+FROM rust:1.95-bookworm AS builder
+
+# Native deps for cargo. roy-cli pulls reqwest with rustls-tls (no openssl),
+# so libssl-dev is not needed.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends pkg-config ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+# docker-compose sets context to the monorepo root (roy/) so the Rust
+# workspace and ./workspace (the SPA) are reachable from this build context.
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY rustfmt.toml ./
+
+# Single-binary release build. roy-cli transitively pulls every server
+# crate (roy, roy-management, roy-gateway, …), so one invocation is enough.
+RUN cargo build --release --bin roy
+
+# ---------- Stage 2: runtime with Node.js for ACP agent adapters ----------
+FROM node:24-bookworm-slim AS runtime
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates curl python3 sqlite3 tini \
+ && rm -rf /var/lib/apt/lists/*
+
+# ACP adapters for all five harnesses the daemon knows about. Package names
+# match what roy spawns by binary basename:
+#   @zed-industries/claude-code-acp  → /usr/local/bin/claude-code-acp
+#   @zed-industries/codex-acp        → /usr/local/bin/codex-acp
+#   @google/gemini-cli               → /usr/local/bin/gemini
+#   opencode-ai                      → /usr/local/bin/opencode
+#   pi-acp                           → /usr/local/bin/pi-acp
+# No `|| true` here: a missing/renamed package must fail the build loudly
+# rather than ship a daemon that spawn-fails with ENOENT at runtime.
+RUN npm install -g --omit=optional \
+        @zed-industries/claude-code-acp \
+        @zed-industries/codex-acp \
+        @google/gemini-cli \
+        opencode-ai \
+        pi-acp \
+        @earendil-works/pi-coding-agent
+
+# Copy roy binary from the Rust stage.
+COPY --from=builder /build/target/release/roy /usr/local/bin/roy
+
+# Unprivileged user + state directories. docker-compose named volumes land
+# on top of these paths; pre-creating them with the correct ownership
+# means a fresh volume inherits roy:roy on first start.
+# uid 1001: node:bookworm-slim already ships uid 1000 (`node` user).
+RUN useradd -m -u 1001 -s /bin/bash roy \
+ && mkdir -p /home/roy/.local/state/roy \
+            /home/roy/.config/roy \
+            /home/roy/.roy/workspace \
+            /etc/roy \
+ && chown -R roy:roy /home/roy /etc/roy
+
+# Default gateway config: WS-only, bound to all interfaces on 8788 so other
+# containers (and the web frontend) can reach it. Override by mounting your
+# own file at /etc/roy/gateway.toml.
+COPY docker/gateway.toml /etc/roy/gateway.toml
+RUN chown roy:roy /etc/roy/gateway.toml
+
+# Built-in agent personas. Read-only for end users — updates go through
+# image rebuild. Lives outside the workspace so user/team agent dirs
+# (under workspace/users|teams/.../.roy/agents) don't collide.
+COPY docker/builtin-agents/ /home/roy/.roy/agents/
+RUN chown -R roy:roy /home/roy/.roy/agents
+
+USER roy
+ENV HOME=/home/roy \
+    ROY_SOCKET=/home/roy/.roy/daemon.sock \
+    ROY_WORKSPACE=/home/roy/.roy/workspace \
+    RUST_LOG=warn,roy=info,roy_cli=info,roy_management=info,roy_gateway=info
+WORKDIR /home/roy
+
+# tini reaps zombies from spawned ACP agent children cleanly.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["roy", "serve"]
