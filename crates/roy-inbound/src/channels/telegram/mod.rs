@@ -133,6 +133,26 @@ impl ManagementClient {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use reply::NoopSender;
+
+    /// Insert a resolved source with no live bot/task — for router/unit tests.
+    pub fn insert_resolved(reg: &Arc<TelegramRegistry>, resolved: ResolvedSource) {
+        let source_id = resolved.source_id.clone();
+        reg.inner.write().unwrap().insert(
+            source_id,
+            SourceRuntime {
+                resolved: Arc::new(resolved),
+                sender: Arc::new(NoopSender),
+                token: String::new(),
+                task: tokio::spawn(async {}),
+            },
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
