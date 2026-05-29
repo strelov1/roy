@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bus::BusSender;
 
+pub mod telegram;
 pub mod webhook;
 
 #[async_trait]

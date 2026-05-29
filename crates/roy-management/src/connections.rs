@@ -77,13 +77,14 @@ pub struct ConnectionUpdate {
 }
 
 pub const KIND_MCP_STDIO: &str = "mcp_stdio";
+pub const KIND_TELEGRAM_BOT: &str = "telegram_bot";
 
-/// Reject unsupported kinds. MVP supports only `mcp_stdio`.
+/// Reject unsupported kinds.
 pub fn validate_kind(kind: &str) -> Result<(), String> {
     match kind {
-        KIND_MCP_STDIO => Ok(()),
+        KIND_MCP_STDIO | KIND_TELEGRAM_BOT => Ok(()),
         other => Err(format!(
-            "unsupported connection kind '{other}'; MVP supports only 'mcp_stdio'"
+            "unsupported connection kind '{other}'; supported: 'mcp_stdio', 'telegram_bot'"
         )),
     }
 }
@@ -122,6 +123,13 @@ pub fn validate_config(kind: &str, config: &Value) -> Result<(), String> {
                         return Err(format!("config.env[{k}] must be a string"));
                     }
                 }
+            }
+            Ok(())
+        }
+        KIND_TELEGRAM_BOT => {
+            // The bot token is a secret, not config. Only require an object.
+            if !config.is_object() {
+                return Err("config must be an object".to_string());
             }
             Ok(())
         }
@@ -648,6 +656,13 @@ mod tests {
         assert!(validate_kind("nango").is_err());
         assert!(validate_kind("mcp_http").is_err());
         assert!(validate_kind(KIND_MCP_STDIO).is_ok());
+    }
+
+    #[test]
+    fn accepts_telegram_bot_kind() {
+        assert!(validate_kind(KIND_TELEGRAM_BOT).is_ok());
+        // token lives in secrets, so an empty config object is valid
+        validate_config(KIND_TELEGRAM_BOT, &json!({})).unwrap();
     }
 
     #[test]
