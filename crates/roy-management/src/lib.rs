@@ -5,6 +5,7 @@
 pub mod agents;
 pub mod auth;
 pub mod bootstrap;
+pub mod channel_bindings;
 pub mod commands;
 pub mod connections;
 pub mod cwd;
@@ -97,6 +98,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         }
     };
 
+    let internal_token = std::env::var("ROY_INTERNAL_TOKEN")
+        .ok()
+        .filter(|s| s.len() >= 32);
+    if internal_token.is_none() {
+        tracing::info!(
+            "ROY_INTERNAL_TOKEN unset or <32 bytes; /internal/telegram-sources disabled"
+        );
+    }
+
     let state = AppState {
         meta,
         daemon,
@@ -104,6 +114,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         scheduler_pool,
         connections: crate::connections::Store::new(pool.clone()),
         catalog,
+        channel_bindings: crate::channel_bindings::Store::new(pool.clone()),
+        internal_token,
         pool,
         workspace_dir,
         login_limiter: Arc::new(crate::rate_limit::LoginLimiter::default()),

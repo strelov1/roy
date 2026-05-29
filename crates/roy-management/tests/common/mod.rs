@@ -50,6 +50,8 @@ pub async fn test_app() -> (axum::Router, SqlitePool, PathBuf) {
         agents_cache: std::sync::Arc::new(roy_management::agents::AgentsCache::default()),
         connections: roy_management::connections::Store::new(pool.clone()),
         catalog: std::sync::Arc::new(roy_management::provider_catalog::Catalog::empty()),
+        channel_bindings: roy_management::channel_bindings::Store::new(pool.clone()),
+        internal_token: Some("test-internal-token-0123456789abcdef".to_string()),
     };
     (router_for_tests(state), pool, workspace_dir)
 }
@@ -91,6 +93,8 @@ pub async fn test_app_with_mock_daemon() -> (
         agents_cache: std::sync::Arc::new(roy_management::agents::AgentsCache::default()),
         connections: roy_management::connections::Store::new(pool.clone()),
         catalog: std::sync::Arc::new(roy_management::provider_catalog::Catalog::empty()),
+        channel_bindings: roy_management::channel_bindings::Store::new(pool.clone()),
+        internal_token: Some("test-internal-token-0123456789abcdef".to_string()),
     };
     (router_for_tests(state), pool, workspace_dir, mock)
 }
@@ -142,6 +146,8 @@ pub async fn test_app_with_catalog() -> (axum::Router, sqlx::SqlitePool, std::pa
         agents_cache: std::sync::Arc::new(roy_management::agents::AgentsCache::default()),
         connections: roy_management::connections::Store::new(pool.clone()),
         catalog,
+        channel_bindings: roy_management::channel_bindings::Store::new(pool.clone()),
+        internal_token: Some("test-internal-token-0123456789abcdef".to_string()),
     };
     (router_for_tests(state), pool, workspace_dir)
 }

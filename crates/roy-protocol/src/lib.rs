@@ -1,6 +1,7 @@
 //! Wire-protocol surface shared by the roy daemon and every trigger.
 //! Sync, leaf crate: no tokio, no ACP SDK, no rusqlite.
 
+pub mod channel;
 pub mod control;
 pub mod error;
 pub mod event;
@@ -9,6 +10,7 @@ pub mod journal;
 pub mod pid_lock;
 pub mod wire;
 
+pub use channel::{SessionStrategyWire, TelegramSource};
 pub use control::{ClientCommand, ConnectionSpec, ErrorCode, FireTarget, ServerEvent};
 pub use error::{Result, RoyError};
 pub use event::{event_from_json, event_to_json, StopReason, TurnEvent};

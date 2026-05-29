@@ -50,6 +50,9 @@ sha2 = "0.10"
 subtle = "2"
 hex = "0.4"
 
+# Telegram
+teloxide = { version = "0.13", default-features = false, features = ["macros", "ctrlc_handler", "rustls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 [dev-dependencies]
 tempfile = "3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

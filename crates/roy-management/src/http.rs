@@ -66,13 +66,21 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/invites", post(auth::create_invite))
         .route("/auth/accept-invite", post(auth::accept_invite))
         .merge(crate::connections::router())
+        .merge(crate::channel_bindings::router())
         .merge(auth::protected_router())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_user,
         ));
 
-    auth::router().merge(protected).with_state(state)
+    let internal = crate::channel_bindings::internal_router().route_layer(
+        axum::middleware::from_fn_with_state(state.clone(), auth::require_internal_token),
+    );
+
+    auth::router()
+        .merge(protected)
+        .merge(internal)
+        .with_state(state)
 }
 
 /// Test-only wrapper around `router` so integration tests don't have to
@@ -803,6 +811,8 @@ mod tests {
             scheduler_pool: None,
             connections: crate::connections::Store::new(pool.clone()),
             catalog: std::sync::Arc::new(crate::provider_catalog::Catalog::empty()),
+            channel_bindings: crate::channel_bindings::Store::new(pool.clone()),
+            internal_token: Some("test-internal-token-0123456789abcdef".to_string()),
             pool,
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
@@ -1181,6 +1191,8 @@ mod tests {
             scheduler_pool: Some(sched_pool),
             connections: crate::connections::Store::new(agents_pool.clone()),
             catalog: std::sync::Arc::new(crate::provider_catalog::Catalog::empty()),
+            channel_bindings: crate::channel_bindings::Store::new(agents_pool.clone()),
+            internal_token: Some("test-internal-token-0123456789abcdef".to_string()),
             pool: agents_pool,
             workspace_dir: workspace,
             login_limiter: std::sync::Arc::new(crate::rate_limit::LoginLimiter::default()),
