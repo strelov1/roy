@@ -28,6 +28,8 @@ pub enum AgentScope {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentFile {
+    /// File stem (`<slug>.md`). Stable id used by channel bindings.
+    pub slug: String,
     pub name: String,
     pub description: String,
     pub harness: String,
@@ -157,6 +159,7 @@ async fn list_dir(dir: &Path, scope: AgentScope) -> Vec<AgentFile> {
             continue;
         };
         out.push(AgentFile {
+            slug: stem.clone(),
             name: parsed.name.unwrap_or(stem),
             description: parsed.description.unwrap_or_default(),
             harness,
@@ -461,6 +464,28 @@ mod tests {
         assert_eq!(p.body.trim(), "hello");
         assert!(p.description.is_none());
         assert!(p.model.is_none());
+    }
+
+    #[tokio::test]
+    async fn exposes_file_stem_as_slug() {
+        let home = TempDir::new().unwrap();
+        let dir = home.path().join("workspace/users/u1/.roy/agents");
+        // Frontmatter name deliberately differs from the file stem.
+        write(
+            &dir,
+            "support-l1.md",
+            "---\nname: Support L1\ndescription: d\nharness: claude\n---\nbody\n",
+        );
+        let list = list_all_agents(
+            &home.path().join("builtin"),
+            &home.path().join("workspace"),
+            "u1",
+            &[],
+        )
+        .await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].slug, "support-l1");
+        assert_eq!(list[0].name, "Support L1");
     }
 
     #[tokio::test]
