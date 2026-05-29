@@ -1,6 +1,6 @@
 //! Control protocol shared by every trigger (CLI Unix socket, WebSocket, MCP,
 //! ...) when talking to a `roy serve` daemon. Framing is transport-specific
-//! (length-prefixed bytes on Unix socket, ws::Message::Text on WebSocket); the
+//! (newline-delimited JSON on Unix socket, ws::Message::Text on WebSocket); the
 //! payload — these enums — is the same.
 //!
 //! See `docs/architecture.md`.

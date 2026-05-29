@@ -1,11 +1,20 @@
 # Architecture
 
-`roy` is a Cargo workspace of eight crates that together expose a single
+`roy` is a Cargo workspace of nine crates that together expose a single
 HTTP/WebSocket/Telegram/MCP/CLI surface over an ACP-driven coding-agent
 daemon. The workspace splits work along a single rule: **everything outside
 the `roy` core talks to the daemon only through its Unix-socket control
 protocol** — no crate reaches into `SessionManager`, `SessionEngine`,
 `Journal`, or `Transport` directly.
+
+That rule is now compiler-enforced. The wire surface lives in a separate
+leaf crate, `roy-protocol`, which `roy` core and every spoke crate
+(`roy-mcp`, `roy-scheduler`, `roy-gateway`, `roy-management`,
+`roy-inbound`) depend on. The spokes depend on `roy-protocol` rather than
+on `roy` core, so they physically cannot name `SessionManager`,
+`SessionEngine`, `Journal`, or `Transport` — those types are not in their
+dependency graph. `roy-cli` is the one exception: it depends on `roy` core
+because it hosts the daemon.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -46,7 +55,8 @@ Crates and responsibilities:
 
 | crate                  | role                                                                                                            |
 |------------------------|-----------------------------------------------------------------------------------------------------------------|
-| `roy`                  | session lifecycle, journal, Unix-socket daemon, ACP transport, `harnesses.toml` parser                          |
+| `roy-protocol`         | leaf wire crate: `control` / `event` / `journal`-types / harness wire-types / `pid_lock` / `wire` framing codec; no tokio/ACP/SQLite deps; depended on by `roy` core and every spoke |
+| `roy`                  | session lifecycle, journal, Unix-socket daemon, ACP transport, `harnesses.toml` parser; depends on `roy-protocol`, re-exports it at `roy::...` |
 | `roy-cli`              | the `roy` binary; thin trigger that dispatches subcommands to local code or to the daemon socket                |
 | `roy-mcp`              | two MCP servers: daemon-control (`roy mcp serve`) and stdio connections-proxy (`roy mcp serve-connections`)     |
 | `roy-management`       | axum HTTP service for projects, session metadata, agent personas, connections; owns `agents.db` SQLite          |
