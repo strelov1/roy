@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use roy::{ClientCommand, ServerEvent};
+use roy_protocol::{ClientCommand, ServerEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -21,7 +21,7 @@ pub struct SpawnRequest {
     pub permission: Option<String>,
     pub system_prompt: Option<String>,
     pub extra_env: std::collections::HashMap<String, String>,
-    pub connections: Vec<roy::ConnectionSpec>,
+    pub connections: Vec<roy_protocol::ConnectionSpec>,
 }
 
 #[async_trait]
