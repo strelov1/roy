@@ -11,7 +11,7 @@ name = "roy-scheduler"
 path = "src/main.rs"
 
 [dependencies]
-roy = { path = "../roy" }
+roy-protocol = { path = "../roy-protocol" }
 
 # DB (sqlite default; postgres feature deferred per spec §6.1)
 sqlx = { version = "0.8", default-features = false, features = [

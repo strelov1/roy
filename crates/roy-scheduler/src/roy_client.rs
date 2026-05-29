@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use roy::{ClientCommand, FireTarget, ServerEvent, TurnEvent};
+use roy_protocol::{ClientCommand, FireTarget, ServerEvent, TurnEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -147,7 +147,7 @@ mod tests {
                 seq_range: (1, 5),
                 result: TurnEvent::Result {
                     cost_usd: Some(0.01),
-                    stop_reason: roy::StopReason::EndTurn,
+                    stop_reason: roy_protocol::StopReason::EndTurn,
                 },
                 assistant_text: "hi".into(),
             },
@@ -214,7 +214,7 @@ mod tests {
             path.clone(),
             ServerEvent::FireError {
                 session: None,
-                code: roy::ErrorCode::SpawnFailed,
+                code: roy_protocol::ErrorCode::SpawnFailed,
                 message: "boom".into(),
             },
         )
