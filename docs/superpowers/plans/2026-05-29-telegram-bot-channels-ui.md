@@ -761,7 +761,7 @@ Create `workspace/src/lib/ChannelsView.svelte`:
   import { Button } from '$lib/components/ui/button';
   import { channelsStore } from './channels.svelte';
   import { connectionsStore } from './connections.svelte';
-  import AddBotDialog from './AddBotDialog.svelte';
+  import AddChannelDialog from './AddChannelDialog.svelte';
   import { app } from './state.svelte';
   import { errMsg } from './utils';
   import type { ChannelBinding } from './channels.svelte';
@@ -800,7 +800,7 @@ Create `workspace/src/lib/ChannelsView.svelte`:
 
   async function remove(b: ChannelBinding) {
     try {
-      await channelsStore.removeBot(b);
+      await channelsStore.removeChannel(b);
     } catch (e) {
       app.lastError = errMsg(e);
     }
@@ -887,7 +887,7 @@ Create `workspace/src/lib/ChannelsView.svelte`:
   </div>
 </div>
 
-<AddBotDialog bind:open={dialogOpen} />
+<AddChannelDialog bind:open={dialogOpen} />
 ```
 
 - [ ] **Step 2: Typecheck**
@@ -899,7 +899,7 @@ Expected: no errors.
 
 ```bash
 git add workspace/src/lib/ChannelsView.svelte
-git commit -m "feat(web): ChannelsView — list bots with enable toggle and delete"
+git commit -m "feat(web): ChannelsView — list channels with enable toggle and delete"
 ```
 
 ---
