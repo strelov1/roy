@@ -10,4 +10,5 @@ files here go deeper.
 | [`wire-protocol.md`](./wire-protocol.md)       | the single JSON shape used on CLI stdout, in the journal, and across every trigger                                   |
 | [`persistence.md`](./persistence.md)           | every SQLite file roy writes, every table, the two ids (roy-side vs agent-side), resume flow, idle GC                |
 | [`harnesses-config.md`](./harnesses-config.md) | `~/.config/roy/harnesses.toml` — which ACP harnesses and models are surfaced to clients                              |
+| [`accounts.md`](./accounts.md)                 | creating user accounts (bootstrap, `roy auth create`), signing in, teams & invites                                  |
 | [`examples/inbound.example.toml`](./examples/inbound.example.toml) | sample `roy-inbound` configuration                                                                |
