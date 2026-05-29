@@ -114,15 +114,16 @@ async function request<T>(
   return (await res.json()) as T;
 }
 
-/** Mirrors `roy_management::connections::Connection`. `kind` is reserved for
- *  future transports; MVP accepts only 'mcp_stdio'. */
+/** Mirrors `roy_management::connections::Connection`. `config` is
+ *  kind-specific (mcp_stdio → command/args/env; telegram_bot → {}). No UI
+ *  reads `config` off a fetched connection, so it's left as an open record. */
 export type Connection = {
   id: string;
   owner_id: string;
   name: string;
   slug: string;
-  kind: 'mcp_stdio';
-  config: McpStdioConfig;
+  kind: 'mcp_stdio' | 'telegram_bot';
+  config: Record<string, unknown>;
   secrets: Record<string, string> | null;
   description: string | null;
   created_at: number;
@@ -163,12 +164,12 @@ export type NewConnectionFromProvider = {
   secrets: Record<string, string>;
 };
 
-/** Free-form POST body — legacy/custom path. UI no longer exposes this in
- *  the catalog UI; kept so the CLI and the integration tests still work. */
+/** Free-form POST body — used by the custom-MCP dialog and the Telegram
+ *  bot create flow. */
 export type NewConnectionCustom = {
   name: string;
-  kind: 'mcp_stdio';
-  config: McpStdioConfig;
+  kind: 'mcp_stdio' | 'telegram_bot';
+  config: Record<string, unknown>;
   secrets?: Record<string, string> | null;
   description?: string | null;
 };
@@ -207,6 +208,54 @@ export const connections = {
     }),
 };
 
+export type SessionStrategy = 'ephemeral' | 'persistent_one' | 'per_sender_sticky';
+
+/** Mirrors `roy_management::channel_bindings::ChannelBinding`. */
+export type ChannelBinding = {
+  id: string;
+  owner_id: string;
+  channel_kind: string; // "telegram"
+  connection_id: string;
+  agent_slug: string;
+  agent_scope: string; // "user" | "team:<team_id>"
+  session_strategy: SessionStrategy;
+  idle_timeout_secs: number | null;
+  allowed_user_ids: number[];
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+};
+
+/** Body for `POST /channel-bindings`. */
+export type NewChannelBinding = {
+  connection_id: string;
+  agent_slug: string;
+  agent_scope: string;
+  session_strategy: SessionStrategy;
+  idle_timeout_secs?: number;
+  allowed_user_ids?: number[];
+};
+
+export const channelBindings = {
+  list: () => request<ChannelBinding[]>('/channel-bindings'),
+  create: (body: NewChannelBinding) =>
+    request<ChannelBinding>('/channel-bindings', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      expectStatus: 201,
+    }),
+  remove: (id: string) =>
+    request<void>(`/channel-bindings/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      expectStatus: 204,
+    }),
+  setEnabled: (id: string, enabled: boolean) =>
+    request<ChannelBinding>(`/channel-bindings/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    }),
+};
+
 export const providers = {
   list: () => request<Provider[]>('/providers'),
 };
@@ -240,9 +289,10 @@ export const commands = {
     request<void>('/commands', { method: 'POST', body: JSON.stringify(req) }),
 };
 
-/** Raw `/management/agents` row — `harness`/`scope` are unvalidated strings
- *  the agents store narrows into its own union before exposing them. */
+/** Raw `/management/agents` row. `slug` is the `.md` file stem (stable id
+ *  used by channel bindings); `name` is the frontmatter display name. */
 export type WireAgent = {
+  slug: string;
   name: string;
   description: string;
   harness: string;
