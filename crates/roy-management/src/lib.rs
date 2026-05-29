@@ -5,6 +5,7 @@
 pub mod agents;
 pub mod auth;
 pub mod bootstrap;
+pub mod channel_bindings;
 pub mod commands;
 pub mod connections;
 pub mod cwd;
