@@ -112,6 +112,21 @@ impl TelegramRegistry {
     pub fn source_ids(&self) -> Vec<String> {
         self.inner.read().unwrap().keys().cloned().collect()
     }
+
+    pub(crate) fn token_for(&self, source_id: &str) -> Option<String> {
+        self.inner
+            .read()
+            .unwrap()
+            .get(source_id)
+            .map(|r| r.token.clone())
+    }
+
+    /// Replace the resolved view of a live source without restarting its bot.
+    pub(crate) fn update_resolved(&self, source_id: &str, resolved: Arc<ResolvedSource>) {
+        if let Some(r) = self.inner.write().unwrap().get_mut(source_id) {
+            r.resolved = resolved;
+        }
+    }
 }
 
 /// Thin HTTP client for `roy-management`'s internal source endpoint.
@@ -227,6 +242,36 @@ fn spawn_bot_task(
     })
 }
 
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct SourceDiff {
+    pub to_add: Vec<String>,
+    pub to_remove: Vec<String>,
+    pub to_keep: Vec<String>,
+}
+
+/// Partition next-source-ids against the currently-live ones.
+pub(crate) fn diff_sources(current: &[String], next: &[String]) -> SourceDiff {
+    let cur: std::collections::HashSet<&String> = current.iter().collect();
+    let nxt: std::collections::HashSet<&String> = next.iter().collect();
+    SourceDiff {
+        to_add: next
+            .iter()
+            .filter(|id| !cur.contains(*id))
+            .cloned()
+            .collect(),
+        to_remove: current
+            .iter()
+            .filter(|id| !nxt.contains(*id))
+            .cloned()
+            .collect(),
+        to_keep: next
+            .iter()
+            .filter(|id| cur.contains(*id))
+            .cloned()
+            .collect(),
+    }
+}
+
 /// Publisher for the Telegram channel: fetches sources from `roy-management`,
 /// runs one teloxide dispatcher per bot, and keeps the shared registry current.
 pub struct TelegramPublisher {
@@ -262,22 +307,55 @@ impl TelegramPublisher {
             },
         );
     }
+
+    fn reconcile(&self, sources: Vec<TelegramSource>, bus: &BusSender) {
+        let by_id: std::collections::HashMap<String, TelegramSource> = sources
+            .into_iter()
+            .map(|s| (s.source_id.clone(), s))
+            .collect();
+        let next_ids: Vec<String> = by_id.keys().cloned().collect();
+        let diff = diff_sources(&self.registry.source_ids(), &next_ids);
+
+        for id in diff.to_remove {
+            tracing::info!(source = id, "telegram: stopping bot");
+            self.registry.remove(&id);
+        }
+        for id in diff.to_add {
+            if let Some(src) = by_id.get(&id) {
+                tracing::info!(source = id, "telegram: starting bot");
+                self.start_source(src.clone(), bus);
+            }
+        }
+        for id in diff.to_keep {
+            let Some(src) = by_id.get(&id) else { continue };
+            if self.registry.token_for(&id).as_deref() != Some(src.bot_token.as_str()) {
+                tracing::info!(source = id, "telegram: token changed; restarting bot");
+                self.registry.remove(&id);
+                self.start_source(src.clone(), bus);
+            } else {
+                self.registry
+                    .update_resolved(&id, Arc::new(src.clone().into()));
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl Publisher for TelegramPublisher {
     async fn run(self: Arc<Self>, bus: BusSender, cancel: CancellationToken) -> Result<()> {
-        // Initial load (slice 2: fetch once; slice 3 adds the poll loop).
-        match self.client.fetch_telegram_sources().await {
-            Ok(sources) => {
-                tracing::info!(count = sources.len(), "telegram: starting bots");
-                for src in sources {
-                    self.start_source(src, &bus);
+        const POLL: Duration = Duration::from_secs(30);
+        loop {
+            match self.client.fetch_telegram_sources().await {
+                Ok(sources) => self.reconcile(sources, &bus),
+                Err(e) => {
+                    tracing::warn!(error = ?e, "telegram: source refresh failed; keeping current bots")
                 }
             }
-            Err(e) => tracing::error!(error = ?e, "telegram: initial source fetch failed"),
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(POLL) => {}
+            }
         }
-        cancel.cancelled().await;
         for id in self.registry.source_ids() {
             self.registry.remove(&id);
         }
@@ -349,5 +427,15 @@ mod tests {
         assert!(allowed(&[], 5)); // empty = public
         assert!(allowed(&[5, 6], 5));
         assert!(!allowed(&[5, 6], 7));
+    }
+
+    #[test]
+    fn diff_sources_partitions_add_remove_keep() {
+        let current = vec!["tg:a".to_string(), "tg:b".to_string()];
+        let next = vec!["tg:b".to_string(), "tg:c".to_string()];
+        let d = diff_sources(&current, &next);
+        assert_eq!(d.to_add, vec!["tg:c".to_string()]);
+        assert_eq!(d.to_remove, vec!["tg:a".to_string()]);
+        assert_eq!(d.to_keep, vec!["tg:b".to_string()]);
     }
 }
