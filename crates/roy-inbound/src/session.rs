@@ -65,7 +65,7 @@ impl SessionStrategyConfig {
 }
 
 use anyhow::Result;
-use roy::FireTarget;
+use roy_protocol::FireTarget;
 use std::sync::Arc;
 
 use crate::store::bindings::BindingStore;

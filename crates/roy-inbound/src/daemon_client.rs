@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use roy::{ClientCommand, FireTarget, ServerEvent, TurnEvent};
+use roy_protocol::{ClientCommand, FireTarget, ServerEvent, TurnEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -124,7 +124,7 @@ pub async fn fire_with_hook(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roy::{ErrorCode, StopReason};
+    use roy_protocol::{ErrorCode, StopReason};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tokio::net::UnixListener;
