@@ -151,9 +151,8 @@ pub async fn run(args: Args) -> Result<()> {
         }
     });
 
-    let cancel_tg = cancel.clone();
     let tg_handle = tg_publisher.map(|pubr| {
-        let cancel = cancel_tg;
+        let cancel = cancel.clone();
         tokio::spawn(async move {
             if let Err(e) = pubr.run(bus_tx_tg, cancel).await {
                 tracing::error!(error = ?e, "telegram publisher exited with error");
@@ -166,10 +165,12 @@ pub async fn run(args: Args) -> Result<()> {
         .context("waiting for ctrl-c")?;
     tracing::info!("ctrl-c received; shutting down");
     cancel.cancel();
-    let _ = tokio::join!(dispatcher_handle, pub_handle);
-    if let Some(h) = tg_handle {
-        let _ = h.await;
-    }
+    let tg_join = async {
+        if let Some(h) = tg_handle {
+            let _ = h.await;
+        }
+    };
+    let _ = tokio::join!(dispatcher_handle, pub_handle, tg_join);
     Ok(())
 }
 
