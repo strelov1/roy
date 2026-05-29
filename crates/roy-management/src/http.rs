@@ -316,12 +316,13 @@ async fn update_project(
     Json(req): Json<ProjectUpdate>,
 ) -> Result<Json<crate::meta_store::Project>, ApiError> {
     let acl = roy_auth::Acl::new(&s.pool, &user_id);
-    acl.can_access_project(&id).await.map_err(|e| match e {
-        roy_auth::AclError::NotFound => {
+    let project = s.meta.get_project(&id).await.map_err(|e| match e {
+        crate::meta_store::MetaError::NotFound(_) => {
             ApiError(StatusCode::NOT_FOUND, format!("no such project: {id}"))
         }
-        _ => ApiError(StatusCode::FORBIDDEN, "forbidden".into()),
+        other => meta_to_api(other),
     })?;
+    project_access(&acl, &project, &user_id).await?;
 
     if req.name.is_none() && req.team_id.is_none() {
         return Err(ApiError(
@@ -419,12 +420,13 @@ async fn create_session(
         .await
         .map_err(|_| ApiError(StatusCode::FORBIDDEN, "forbidden".into()))?;
     if let Some(pid) = &req.project_id {
-        acl.can_access_project(pid).await.map_err(|e| match e {
-            roy_auth::AclError::NotFound => {
+        let project = s.meta.get_project(pid).await.map_err(|e| match e {
+            crate::meta_store::MetaError::NotFound(_) => {
                 ApiError(StatusCode::BAD_REQUEST, format!("invalid project: {pid}"))
             }
-            _ => ApiError(StatusCode::FORBIDDEN, "forbidden".into()),
+            other => meta_to_api(other),
         })?;
+        project_access(&acl, &project, &user_id).await?;
     }
 
     // Resolve and materialize the per-scope cwd. The session_id used in the
@@ -696,6 +698,32 @@ async fn list_agent_files(
             .get(&builtin_agents_dir(), &s.workspace_dir, &user_id, &team_ids)
             .await,
     ))
+}
+
+/// Project access: team projects require membership; personal projects
+/// (team_id NULL) require the caller to be the creator. Mirrors the rule in
+/// `MetaStore::list_projects_for_user`. `project` was already fetched by the
+/// caller (so 404-vs-400 on a missing project is the caller's choice).
+async fn project_access(
+    acl: &roy_auth::Acl<'_>,
+    project: &crate::meta_store::Project,
+    user_id: &str,
+) -> Result<(), ApiError> {
+    match &project.team_id {
+        Some(team_id) => acl
+            .can_access_scope(&Scope::Team {
+                team_id: team_id.clone(),
+            })
+            .await
+            .map_err(|_| ApiError(StatusCode::FORBIDDEN, "forbidden".into())),
+        None => {
+            if project.created_by == user_id {
+                Ok(())
+            } else {
+                Err(ApiError(StatusCode::FORBIDDEN, "forbidden".into()))
+            }
+        }
+    }
 }
 
 fn meta_to_api(e: crate::meta_store::MetaError) -> ApiError {

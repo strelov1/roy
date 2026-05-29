@@ -130,6 +130,18 @@ impl MetaStore {
         }
     }
 
+    /// Fetch one project by id. `NotFound` if it doesn't exist.
+    pub async fn get_project(&self, id: &str) -> Result<Project, MetaError> {
+        let row = sqlx::query_as::<_, (String, String, String, String, Option<String>, i64)>(
+            "SELECT id, name, path, created_by, team_id, created_at FROM projects WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(Project::from_row)
+            .ok_or(MetaError::NotFound(id.into()))
+    }
+
     pub async fn list_projects(&self) -> Result<Vec<Project>, MetaError> {
         let rows: Vec<(String, String, String, String, Option<String>, i64)> = sqlx::query_as(
             "SELECT id, name, path, created_by, team_id, created_at \
