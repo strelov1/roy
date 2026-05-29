@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use roy::event::TurnEvent;
+use roy_protocol::event::TurnEvent;
 use tokio_util::sync::CancellationToken;
 
 use crate::binder::SessionBinder;
@@ -196,7 +196,7 @@ mod tests {
     use super::*;
     use crate::draft_stream::DraftReplier;
     use crate::typing::TypingReplier;
-    use roy::event::StopReason;
+    use roy_protocol::event::StopReason;
     use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
     use tokio::sync::Mutex as TokioMutex;
