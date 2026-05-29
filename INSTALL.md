@@ -123,6 +123,11 @@ On the first run with an empty user table it creates a bootstrap user
 (`root` by default) and prints a generated password to stderr **once** —
 copy it. Override with `ROY_BOOTSTRAP_USERNAME` / `ROY_BOOTSTRAP_PASSWORD`.
 
+To add more users, reset passwords, or manage teams, see
+[`docs/accounts.md`](docs/accounts.md). The short version:
+`roy auth create <username>` (interactive password prompt), or in Docker
+`docker compose exec roy-management roy auth create <username>`.
+
 ### 5. WS gateway — terminal 3
 
 The gateway needs a config file. Create one that binds `:8788` (the port the
