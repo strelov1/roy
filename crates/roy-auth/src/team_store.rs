@@ -8,8 +8,6 @@ use crate::types::{NewTeam, Role, Team, TeamMembership};
 pub enum TeamStoreError {
     #[error("team not found: {0}")]
     NotFound(String),
-    #[error("forbidden")]
-    Forbidden,
     #[error("db: {0}")]
     Db(#[from] sqlx::Error),
 }

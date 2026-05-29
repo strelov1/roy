@@ -55,23 +55,4 @@ impl<'a> Acl<'a> {
             Err(AclError::Forbidden)
         }
     }
-
-    /// A project is accessible by the user when it belongs to a team the user
-    /// is a member of, or when the user is the personal owner (team_id NULL).
-    /// Returns NotFound if the project id doesn't exist.
-    pub async fn can_access_project(&self, project_id: &str) -> Result<(), AclError> {
-        let row: Option<(String, Option<String>)> =
-            sqlx::query_as("SELECT created_by, team_id FROM projects WHERE id = ?")
-                .bind(project_id)
-                .fetch_optional(self.pool)
-                .await?;
-        let (created_by, team_id) = row.ok_or(AclError::NotFound)?;
-        if let Some(team_id) = team_id {
-            self.can_access_scope(&Scope::Team { team_id }).await
-        } else if created_by == self.user_id {
-            Ok(())
-        } else {
-            Err(AclError::Forbidden)
-        }
-    }
 }
