@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
-use roy::{ClientCommand, Harness, ServerEvent, TurnEvent};
+use roy_protocol::{ClientCommand, Harness, ServerEvent, TurnEvent};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -280,9 +280,9 @@ async fn send_cmd(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     cmd: &ClientCommand,
 ) -> anyhow::Result<()> {
-    let line = serde_json::to_string(cmd)?;
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
+    writer
+        .write_all(&roy_protocol::wire::encode_line(cmd)?)
+        .await?;
     writer.flush().await?;
     Ok(())
 }
@@ -326,7 +326,7 @@ async fn next_event(
         .next_line()
         .await?
         .ok_or_else(|| anyhow!("daemon hung up"))?;
-    Ok(serde_json::from_str(line.trim())?)
+    Ok(roy_protocol::wire::decode_line(&line)?)
 }
 
 async fn tool_list(socket_path: &Path, archived: bool) -> anyhow::Result<String> {
@@ -411,7 +411,7 @@ async fn tool_wait_for_result(socket_path: &Path, args: Value) -> anyhow::Result
                 "type": "result_ready",
                 "session": session,
                 "seq": seq,
-                "stop_reason": format!("{stop_reason:?}"),
+                "stop_reason": stop_reason.as_wire().to_string(),
                 "cost_usd": cost_usd,
                 "assistant_text": assistant_text,
             }))?)
@@ -428,7 +428,7 @@ async fn tool_wait_for_result(socket_path: &Path, args: Value) -> anyhow::Result
 }
 
 async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
-    use roy::FireTarget;
+    use roy_protocol::FireTarget;
 
     let prompt = args
         .get("prompt")
@@ -502,7 +502,7 @@ async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
                 "type": "fire_done",
                 "session": session,
                 "seq_range": seq_range,
-                "stop_reason": format!("{stop_reason:?}"),
+                "stop_reason": stop_reason.as_wire().to_string(),
                 "cost_usd": cost_usd,
                 "assistant_text": assistant_text,
             }))?)

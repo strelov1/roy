@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use roy::{ServerEvent, StopReason, TurnEvent};
 use roy_inbound::{
     bus::{self, EventRef},
     channels::webhook::config::WebhookConfig,
@@ -17,6 +16,7 @@ use roy_inbound::{
     session::SessionResolver,
     store::{bindings::BindingStore, db},
 };
+use roy_protocol::{ServerEvent, StopReason, TurnEvent};
 use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;

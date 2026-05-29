@@ -98,21 +98,13 @@ impl Default for ServeOpts {
     fn default() -> Self {
         Self {
             db_path: crate::default_db_path(),
-            socket_path: default_socket_path(),
+            socket_path: roy_protocol::wire::default_socket_path(),
             poll_interval: Duration::from_millis(1500),
             batch_limit: 50,
             max_fires: 8,
             fire_timeout: Duration::from_secs(600),
         }
     }
-}
-
-fn default_socket_path() -> PathBuf {
-    if let Ok(s) = std::env::var("ROY_SOCKET") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".roy/daemon.sock")
 }
 
 /// Top-level entry. Opens the DB, runs the crash-recovery sweep, then
@@ -259,7 +251,7 @@ async fn run_fire_for_agent(
             );
             agents::update_persistent_session_id(pool, &agent.id, None).await?;
             did_fallback_spawn = true;
-            let retry_target = roy::FireTarget::Spawn {
+            let retry_target = roy_protocol::FireTarget::Spawn {
                 harness: agent.harness.clone(),
                 system_prompt: None,
             };
@@ -374,15 +366,15 @@ fn effective_prompt(agent: &Agent) -> String {
     }
 }
 
-fn build_target(agent: &Agent) -> roy::FireTarget {
+fn build_target(agent: &Agent) -> roy_protocol::FireTarget {
     if agent.is_persistent() {
         if let Some(sid) = agent.persistent_session_id.as_ref() {
-            return roy::FireTarget::Resume {
+            return roy_protocol::FireTarget::Resume {
                 session_id: sid.clone(),
             };
         }
     }
-    roy::FireTarget::Spawn {
+    roy_protocol::FireTarget::Spawn {
         harness: agent.harness.clone(),
         system_prompt: None,
     }
@@ -513,7 +505,7 @@ mod tests {
     /// Spawn a mock roy daemon at `path` that replies to one ClientCommand
     /// with the given ServerEvent. Mirrors roy_client::tests::spawn_mock —
     /// kept inline (rather than exported) so the test stays self-contained.
-    async fn spawn_mock_daemon(path: std::path::PathBuf, reply: roy::ServerEvent) {
+    async fn spawn_mock_daemon(path: std::path::PathBuf, reply: roy_protocol::ServerEvent) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
         let listener = UnixListener::bind(&path).unwrap();
@@ -533,8 +525,8 @@ mod tests {
     /// fallback retry path.
     async fn spawn_mock_daemon_seq(
         path: std::path::PathBuf,
-        first: roy::ServerEvent,
-        second: roy::ServerEvent,
+        first: roy_protocol::ServerEvent,
+        second: roy_protocol::ServerEvent,
     ) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
@@ -557,7 +549,7 @@ mod tests {
     /// given event. Used to assert on the wire-level tag map.
     async fn spawn_mock_daemon_capturing(
         path: std::path::PathBuf,
-        reply: roy::ServerEvent,
+        reply: roy_protocol::ServerEvent,
         captured: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -579,7 +571,7 @@ mod tests {
     async fn fire_agent_ad_hoc_dispatches_subscribers() {
         use crate::store::subscribers as substore;
         use crate::types::SubscriberKind;
-        use roy::{ServerEvent, StopReason, TurnEvent};
+        use roy_protocol::{ServerEvent, StopReason, TurnEvent};
         use wiremock::matchers::{method, path as wpath};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -661,7 +653,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_agent_ad_hoc_captures_persistent_session_id() {
-        use roy::{ServerEvent, StopReason, TurnEvent};
+        use roy_protocol::{ServerEvent, StopReason, TurnEvent};
 
         let dir = tempdir().unwrap();
         let sock_path = dir.path().join("roy.sock");
@@ -706,7 +698,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_agent_ad_hoc_records_initiated_by_when_parent_provided() {
-        use roy::{ClientCommand, ServerEvent, StopReason, TurnEvent};
+        use roy_protocol::{ClientCommand, ServerEvent, StopReason, TurnEvent};
 
         let dir = tempdir().unwrap();
         let sock_path = dir.path().join("roy.sock");
@@ -775,7 +767,7 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_fire_retries_as_spawn_when_session_is_gone() {
-        use roy::{ErrorCode, ServerEvent, StopReason, TurnEvent};
+        use roy_protocol::{ErrorCode, ServerEvent, StopReason, TurnEvent};
 
         // Daemon replies NoSession on the first connection (the Resume
         // attempt) and FireDone with a fresh session id on the second

@@ -1,22 +1,27 @@
-pub mod control;
 pub mod daemon;
 pub mod engine;
-pub mod error;
-pub mod event;
 pub mod harnesses_config;
 pub mod journal;
 pub mod manager;
-pub mod pid_lock;
 pub mod session_store;
 pub mod transport;
 
-pub use control::{ClientCommand, ConnectionSpec, ErrorCode, FireTarget, ServerEvent};
-pub use daemon::{Daemon, DefaultTransportFactory, ServeOpts, TransportFactory};
-pub use engine::{Attach, EngineOpts, InputLease, SessionEngine, SessionSpawnConfig};
-pub use error::{Result, RoyError};
-pub use event::{event_from_json, event_to_json, StopReason, TurnEvent};
+// Wire surface lives in roy-protocol; re-export at the historical paths so
+// roy-cli, examples, and core tests keep using `roy::...` unchanged.
+pub use roy_protocol::{control, error, event, pid_lock, wire};
+
+pub use roy_protocol::control::{
+    ClientCommand, ConnectionSpec, ErrorCode, FireTarget, ServerEvent,
+};
+pub use roy_protocol::error::{Result, RoyError};
+pub use roy_protocol::event::{event_from_json, event_to_json, StopReason, TurnEvent};
+pub use roy_protocol::pid_lock::{peek_pid, pid_alive, PidLock};
+
+// Types from roy-protocol, actor/loader from core, surfaced via the wrapper modules.
 pub use harnesses_config::{Harness, HarnessInfo, HarnessesConfigStatus, ModelInfo};
 pub use journal::{ArchivedJournal, Journal, JournalEntry, Seq};
+
+pub use daemon::{Daemon, DefaultTransportFactory, ServeOpts, TransportFactory};
+pub use engine::{Attach, EngineOpts, InputLease, SessionEngine, SessionSpawnConfig};
 pub use manager::SessionManager;
-pub use pid_lock::{peek_pid, pid_alive, PidLock};
 pub use transport::{AcpConfig, AcpTransport, Handle, PermissionPolicy, Transport};

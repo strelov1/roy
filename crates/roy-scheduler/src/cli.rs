@@ -244,14 +244,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
 }
 
-fn default_socket() -> PathBuf {
-    if let Ok(s) = std::env::var("ROY_SOCKET") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".roy/daemon.sock")
-}
-
 fn default_pid_file() -> PathBuf {
     let home = std::env::var_os("HOME").unwrap_or_default();
     PathBuf::from(home).join(".local/state/roy-scheduler/serve.pid")
@@ -281,12 +273,14 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
     // exits (currently only on a panic propagated out of driver::serve)
     // Drop releases the pid file. A SIGINT here lets tokio cancel the
     // future, dropping the lock the same way.
-    let _lock = roy::PidLock::acquire(&pid_path)
+    let _lock = roy_protocol::PidLock::acquire(&pid_path)
         .with_context(|| format!("acquiring pid lock at {}", pid_path.display()))?;
 
     let mut opts = ServeOpts {
         db_path: args.db.unwrap_or_else(crate::default_db_path),
-        socket_path: args.socket.unwrap_or_else(default_socket),
+        socket_path: args
+            .socket
+            .unwrap_or_else(roy_protocol::wire::default_socket_path),
         ..ServeOpts::default()
     };
     if let Some(ms) = args.poll_ms {
@@ -321,8 +315,8 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
 fn cmd_status(args: StatusArgs) -> ExitCode {
     let pid_path = args.pid_file.unwrap_or_else(default_pid_file);
     let db_path = crate::default_db_path();
-    let pid = roy::pid_lock::peek_pid(&pid_path);
-    let alive = pid.map(roy::pid_lock::pid_alive).unwrap_or(false);
+    let pid = roy_protocol::pid_lock::peek_pid(&pid_path);
+    let alive = pid.map(roy_protocol::pid_lock::pid_alive).unwrap_or(false);
     let payload = serde_json::json!({
         "status": if alive { "up" } else { "down" },
         "pid_file": pid_path.display().to_string(),
@@ -559,7 +553,7 @@ async fn cmd_fire_now(args: FireNowArgs) -> anyhow::Result<ExitCode> {
     use crate::driver;
 
     let pool = open_pool().await?;
-    let socket = default_socket();
+    let socket = roy_protocol::wire::default_socket_path();
     let timeout = Duration::from_secs(args.fire_timeout.unwrap_or(600));
 
     let fire =

@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use roy::{ClientCommand, FireTarget, ServerEvent, TurnEvent};
+use roy_protocol::{ClientCommand, FireTarget, ServerEvent, TurnEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -55,9 +55,9 @@ pub async fn fire(
         .with_context(|| format!("connecting to roy daemon at {}", socket_path.display()))?;
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
-    let line = serde_json::to_string(&cmd)?;
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
+    writer
+        .write_all(&roy_protocol::wire::encode_line(&cmd)?)
+        .await?;
     writer.flush().await?;
 
     loop {
@@ -65,7 +65,7 @@ pub async fn fire(
             .next_line()
             .await?
             .ok_or_else(|| anyhow!("daemon hung up before terminal Fire event"))?;
-        let evt: ServerEvent = serde_json::from_str(raw.trim())?;
+        let evt: ServerEvent = roy_protocol::wire::decode_line(&raw)?;
         match evt {
             ServerEvent::FireDone {
                 session,
@@ -84,7 +84,7 @@ pub async fn fire(
                     session_id: session,
                     seq_range,
                     cost_usd,
-                    stop_reason: format!("{stop_reason:?}"),
+                    stop_reason: stop_reason.as_wire().to_string(),
                     assistant_text,
                 }));
             }
@@ -147,7 +147,7 @@ mod tests {
                 seq_range: (1, 5),
                 result: TurnEvent::Result {
                     cost_usd: Some(0.01),
-                    stop_reason: roy::StopReason::EndTurn,
+                    stop_reason: roy_protocol::StopReason::EndTurn,
                 },
                 assistant_text: "hi".into(),
             },
@@ -172,6 +172,10 @@ mod tests {
                 assert_eq!(s.session_id, "sid");
                 assert_eq!(s.assistant_text, "hi");
                 assert_eq!(s.seq_range, (1, 5));
+                // Regression guard: stop_reason must use the snake_case wire
+                // vocabulary (`StopReason::as_wire`), not the Rust Debug form.
+                // This column lands in the `fires` DB and the webhook fire body.
+                assert_eq!(s.stop_reason, "end_turn");
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -214,7 +218,7 @@ mod tests {
             path.clone(),
             ServerEvent::FireError {
                 session: None,
-                code: roy::ErrorCode::SpawnFailed,
+                code: roy_protocol::ErrorCode::SpawnFailed,
                 message: "boom".into(),
             },
         )

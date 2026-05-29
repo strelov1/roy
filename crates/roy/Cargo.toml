@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+roy-protocol = { path = "../roy-protocol" }
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time", "fs"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["compat"] }
