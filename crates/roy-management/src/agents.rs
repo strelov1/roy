@@ -196,6 +196,23 @@ pub async fn list_all_agents(
     out
 }
 
+/// Resolve a single agent file `<dir>/<slug>.md` to its persona, returning
+/// `(harness, model, system_prompt_body)`. `None` if the slug is unsafe, the
+/// file is missing/unparseable, or it lacks the required `harness` field.
+pub async fn read_agent_persona(
+    dir: &Path,
+    slug: &str,
+) -> Option<(String, Option<String>, String)> {
+    if !is_safe_agent_name(slug) {
+        return None;
+    }
+    let path = dir.join(format!("{slug}.md"));
+    let contents = tokio::fs::read_to_string(&path).await.ok()?;
+    let parsed = parse_agent_md(&contents)?;
+    let harness = parsed.harness?;
+    Some((harness, parsed.model, parsed.body))
+}
+
 struct ParsedAgent {
     name: Option<String>,
     description: Option<String>,
@@ -420,5 +437,24 @@ mod tests {
         assert_eq!(p.body.trim(), "hello");
         assert!(p.description.is_none());
         assert!(p.model.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_persona_by_slug() {
+        let home = TempDir::new().unwrap();
+        let dir = home.path().join("agents");
+        write(
+            &dir,
+            "support-l1.md",
+            "---\nname: Support\ndescription: d\nharness: claude\nmodel: claude-opus-4-8\n---\n\nYou are support.\n",
+        );
+        let (harness, model, body) = read_agent_persona(&dir, "support-l1").await.unwrap();
+        assert_eq!(harness, "claude");
+        assert_eq!(model.as_deref(), Some("claude-opus-4-8"));
+        assert!(body.contains("You are support."));
+
+        // unsafe slug / missing file / no harness → None
+        assert!(read_agent_persona(&dir, "../escape").await.is_none());
+        assert!(read_agent_persona(&dir, "missing").await.is_none());
     }
 }
