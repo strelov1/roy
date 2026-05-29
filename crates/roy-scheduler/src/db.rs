@@ -47,6 +47,26 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
     Ok(pool)
 }
 
+/// Open an EXISTING scheduler DB for read access WITHOUT creating or migrating
+/// it. For external consumers (roy-management) that must not apply this crate's
+/// migrations to the shared file. Errors if the file is absent. Read-only access
+/// is enforced by the `read::SchedulerRead` facade (the only intended consumer),
+/// not by a SQLite read-only flag — so WAL reads keep working whether or not the
+/// scheduler daemon is currently running.
+pub async fn open_read_only(path: &Path) -> Result<SqlitePool> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await
+        .with_context(|| format!("opening (read) SQLite at {}", path.display()))?;
+    Ok(pool)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

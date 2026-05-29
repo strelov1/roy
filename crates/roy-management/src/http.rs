@@ -12,7 +12,7 @@ use axum::{
 };
 use roy_auth::types::Scope;
 use roy_scheduler::{
-    store as sched_store,
+    read::SchedulerRead,
     types::{Agent as SchedulerAgent, Fire, Trigger},
 };
 use serde::Deserialize;
@@ -181,8 +181,8 @@ async fn delete_command(
 async fn list_scheduler_agents(
     State(s): State<AppState>,
 ) -> Result<Json<Vec<SchedulerAgent>>, ApiError> {
-    let pool = sched_pool(&s)?;
-    sched_store::agents::list(pool)
+    SchedulerRead::new(sched_pool(&s)?.clone())
+        .list_agents()
         .await
         .map(Json)
         .map_err(db_to_api)
@@ -192,26 +192,24 @@ async fn list_scheduler_triggers(
     State(s): State<AppState>,
     Query(q): Query<SchedListQuery>,
 ) -> Result<Json<Vec<Trigger>>, ApiError> {
-    let pool = sched_pool(&s)?;
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
-    let v = match q.agent {
-        Some(id) => sched_store::triggers::list_for_agent(pool, &id).await,
-        None => sched_store::triggers::list_all(pool, limit).await,
-    };
-    v.map(Json).map_err(db_to_api)
+    SchedulerRead::new(sched_pool(&s)?.clone())
+        .list_triggers(q.agent.as_deref(), limit)
+        .await
+        .map(Json)
+        .map_err(db_to_api)
 }
 
 async fn list_scheduler_fires(
     State(s): State<AppState>,
     Query(q): Query<SchedListQuery>,
 ) -> Result<Json<Vec<Fire>>, ApiError> {
-    let pool = sched_pool(&s)?;
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
-    let v = match q.agent {
-        Some(id) => sched_store::fires::list_for_agent(pool, &id, limit).await,
-        None => sched_store::fires::list_recent(pool, limit).await,
-    };
-    v.map(Json).map_err(db_to_api)
+    SchedulerRead::new(sched_pool(&s)?.clone())
+        .list_fires(q.agent.as_deref(), limit)
+        .await
+        .map(Json)
+        .map_err(db_to_api)
 }
 
 #[derive(Deserialize, Default)]
