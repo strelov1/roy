@@ -84,7 +84,7 @@ pub async fn fire(
                     session_id: session,
                     seq_range,
                     cost_usd,
-                    stop_reason: format!("{stop_reason:?}"),
+                    stop_reason: stop_reason.as_wire().to_string(),
                     assistant_text,
                 }));
             }
@@ -172,6 +172,10 @@ mod tests {
                 assert_eq!(s.session_id, "sid");
                 assert_eq!(s.assistant_text, "hi");
                 assert_eq!(s.seq_range, (1, 5));
+                // Regression guard: stop_reason must use the snake_case wire
+                // vocabulary (`StopReason::as_wire`), not the Rust Debug form.
+                // This column lands in the `fires` DB and the webhook fire body.
+                assert_eq!(s.stop_reason, "end_turn");
             }
             other => panic!("expected Done, got {other:?}"),
         }

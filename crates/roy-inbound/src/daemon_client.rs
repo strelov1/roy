@@ -78,7 +78,7 @@ pub async fn fire_with_hook(
                     FireOutcome::Ok {
                         assistant_text,
                         cost_usd,
-                        stop_reason: format!("{stop_reason:?}"),
+                        stop_reason: stop_reason.as_wire().to_string(),
                     },
                     reply,
                 )
@@ -201,7 +201,16 @@ mod tests {
         assert_eq!(result.session_id.as_deref(), Some("sid"));
         let outcome = captured.lock().unwrap().clone().unwrap();
         match outcome {
-            FireOutcome::Ok { assistant_text, .. } => assert_eq!(assistant_text, "hi"),
+            FireOutcome::Ok {
+                assistant_text,
+                stop_reason,
+                ..
+            } => {
+                assert_eq!(assistant_text, "hi");
+                // Regression guard: stop_reason must use the snake_case wire
+                // vocabulary (`StopReason::as_wire`), not the Rust Debug form.
+                assert_eq!(stop_reason, "end_turn");
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }

@@ -411,7 +411,7 @@ async fn tool_wait_for_result(socket_path: &Path, args: Value) -> anyhow::Result
                 "type": "result_ready",
                 "session": session,
                 "seq": seq,
-                "stop_reason": format!("{stop_reason:?}"),
+                "stop_reason": stop_reason.as_wire().to_string(),
                 "cost_usd": cost_usd,
                 "assistant_text": assistant_text,
             }))?)
@@ -502,7 +502,7 @@ async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
                 "type": "fire_done",
                 "session": session,
                 "seq_range": seq_range,
-                "stop_reason": format!("{stop_reason:?}"),
+                "stop_reason": stop_reason.as_wire().to_string(),
                 "cost_usd": cost_usd,
                 "assistant_text": assistant_text,
             }))?)
