@@ -161,56 +161,11 @@ output.
 Exit codes: `0` on a clean terminal `Result`, `1` if the agent stopped with
 an error stop reason, `2` for CLI-level failures (no daemon, bad flag, etc.).
 
-## Quick start: library
+## Embedding roy as a library
 
-```rust
-use std::sync::Arc;
-use roy::{
-    daemon::DefaultTransportFactory,
-    SessionManager, SessionSpawnConfig,
-};
-use futures_util::StreamExt;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let manager = SessionManager::new(
-        "/tmp/roy-journals".into(),
-        Arc::new(DefaultTransportFactory),
-    );
-
-    let engine = manager
-        .spawn(
-            SessionSpawnConfig {
-                agent: "opencode".into(),
-                cwd: std::env::current_dir()?,
-                model: None,
-                permission: None,
-                resume_cursor: None,
-            },
-            /* broadcast_capacity */ 256,
-            /* mem_capacity      */ 1024,
-        )
-        .await?;
-
-    // N concurrent observers.
-    let mut attach = engine.attach(None).await?;
-
-    // Single writer.
-    let lease = engine.try_acquire_input().expect("free");
-    lease.send("what does this repo do?")?;
-
-    while let Some(entry) = attach.stream.next().await {
-        println!("[{}] {:?}", entry.seq, entry.event);
-        if matches!(entry.event, roy::TurnEvent::Result { .. }) {
-            break;
-        }
-    }
-    Ok(())
-}
-```
-
-See `crates/roy/examples/engine_two_attach.rs` for a slightly larger demo
-(two observers, two turns).
+`crates/roy` can be driven in-process instead of over the socket. See
+`crates/roy/examples/engine_two_attach.rs` for a runnable demo (spawn a
+session, attach two observers, stream `TurnEvent`s to a terminal `Result`).
 
 ## Quick start: MCP
 
