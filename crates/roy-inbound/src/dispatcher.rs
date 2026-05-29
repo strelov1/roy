@@ -65,6 +65,8 @@ impl InboundDispatcher {
                 &event.sender_id,
                 &spec.agent_id,
                 spec.session_strategy,
+                spec.harness.as_deref(),
+                spec.system_prompt.as_deref(),
             )
             .await?;
 
