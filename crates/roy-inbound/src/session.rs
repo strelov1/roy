@@ -113,10 +113,14 @@ impl SessionResolver {
         sender_id: &str,
         agent_id: &str,
         strategy: SessionStrategy,
+        harness: Option<&str>,
+        system_prompt: Option<&str>,
     ) -> Result<(FireTarget, Option<PendingBinding>)> {
         let spawn_target = || FireTarget::Spawn {
-            harness: self.harness.clone(),
-            system_prompt: None,
+            harness: harness
+                .map(str::to_string)
+                .unwrap_or_else(|| self.harness.clone()),
+            system_prompt: system_prompt.map(str::to_string),
         };
 
         let pending = |label: &'static str| PendingBinding {
@@ -184,7 +188,14 @@ mod resolver_tests {
     async fn ephemeral_always_spawn_no_binding() {
         let (_d, r) = resolver().await;
         let (t, pb) = r
-            .resolve("src", "alice", "agent-1", SessionStrategy::Ephemeral)
+            .resolve(
+                "src",
+                "alice",
+                "agent-1",
+                SessionStrategy::Ephemeral,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(t, FireTarget::Spawn { .. }));
@@ -197,7 +208,10 @@ mod resolver_tests {
         let strat = SessionStrategy::PerSenderSticky {
             idle_timeout: Duration::from_secs(3600),
         };
-        let (t, pb) = r.resolve("src", "alice", "agent-1", strat).await.unwrap();
+        let (t, pb) = r
+            .resolve("src", "alice", "agent-1", strat, None, None)
+            .await
+            .unwrap();
         assert!(matches!(t, FireTarget::Spawn { .. }));
         let pb = pb.unwrap();
         assert_eq!(pb.source_id, "src");
@@ -214,7 +228,10 @@ mod resolver_tests {
         let strat = SessionStrategy::PerSenderSticky {
             idle_timeout: Duration::from_secs(3600),
         };
-        let (t, pb) = r.resolve("src", "alice", "agent-1", strat).await.unwrap();
+        let (t, pb) = r
+            .resolve("src", "alice", "agent-1", strat, None, None)
+            .await
+            .unwrap();
         assert!(matches!(t, FireTarget::Resume { ref session_id } if session_id == "sid-old"));
         assert!(pb.is_none());
     }
@@ -236,7 +253,10 @@ mod resolver_tests {
         let strat = SessionStrategy::PerSenderSticky {
             idle_timeout: Duration::from_secs(3600),
         };
-        let (t, pb) = r.resolve("src", "alice", "agent-1", strat).await.unwrap();
+        let (t, pb) = r
+            .resolve("src", "alice", "agent-1", strat, None, None)
+            .await
+            .unwrap();
         assert!(matches!(t, FireTarget::Spawn { .. }));
         assert!(pb.is_some());
     }
@@ -249,10 +269,43 @@ mod resolver_tests {
             .await
             .unwrap();
         let (t, pb) = r
-            .resolve("src", "anything", "agent-1", SessionStrategy::PersistentOne)
+            .resolve(
+                "src",
+                "anything",
+                "agent-1",
+                SessionStrategy::PersistentOne,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(t, FireTarget::Resume { ref session_id } if session_id == "sid-pone"));
         assert!(pb.is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_uses_persona_override_when_present() {
+        let (_d, r) = resolver().await;
+        let (target, _pending) = r
+            .resolve(
+                "tg:c1",
+                "555",
+                "support-l1",
+                SessionStrategy::Ephemeral,
+                Some("gemini"),
+                Some("You are support."),
+            )
+            .await
+            .unwrap();
+        match target {
+            FireTarget::Spawn {
+                harness,
+                system_prompt,
+            } => {
+                assert_eq!(harness, "gemini");
+                assert_eq!(system_prompt.as_deref(), Some("You are support."));
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
     }
 }

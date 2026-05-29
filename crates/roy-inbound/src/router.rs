@@ -19,6 +19,10 @@ pub struct FireSpec {
     pub session_strategy: SessionStrategy,
     pub tags: BTreeMap<String, String>,
     pub fire_timeout_secs: u64,
+    /// Per-source harness override (Telegram channel). `None` → resolver default.
+    pub harness: Option<String>,
+    /// Per-source system/persona prompt (Telegram channel). `None` → no prompt.
+    pub system_prompt: Option<String>,
 }
 
 #[async_trait]
@@ -57,6 +61,8 @@ impl Router for ConfigRouter {
             session_strategy: SessionStrategy::from(&src.session),
             tags,
             fire_timeout_secs: src.fire_timeout_secs,
+            harness: None,
+            system_prompt: None,
         })
     }
 }
