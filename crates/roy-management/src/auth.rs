@@ -437,6 +437,8 @@ pub async fn require_internal_token(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
+    // Non-constant-time comparison is acceptable: token guards a loopback-only,
+    // operator-controlled endpoint — no practical timing side-channel exists.
     if provided == Some(expected) {
         next.run(req).await
     } else {
