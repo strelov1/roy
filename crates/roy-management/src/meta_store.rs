@@ -1,13 +1,7 @@
-//! Management-owned tables (projects, session_meta, session_tags) on top of
-//! the shared `agents.db` SqlitePool. Migrations live in
-//! `crates/roy-management/migrations/sqlite/` and share the database's
-//! `_sqlx_migrations` table with `roy-agents`. Versions are coordinated
-//! across crates: `roy-agents` currently owns v1-v3; `roy-management` starts
-//! at v4 (`migrations/sqlite/0004_*`). Each crate's `Migrator` runs with
-//! `set_ignore_missing(true)` so it tolerates rows owned by the other
-//! crate. Apply with
-//! `MetaStore::apply_migrations(pool)` after `crate::db::open` has applied
-//! its own migrations.
+//! Management-owned tables (`projects`, `session_meta`, `session_tags`) over
+//! the shared `agents.db` SQLite pool. Schema lives in
+//! `crates/roy-management/migrations/sqlite/`; the migrator runs from
+//! [`crate::db::open`].
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -94,12 +88,6 @@ impl MetaStore {
     #[cfg(test)]
     pub(crate) fn pool(&self) -> SqlitePool {
         self.pool.clone()
-    }
-
-    pub async fn apply_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-        let mut migrator = sqlx::migrate!("migrations/sqlite");
-        migrator.set_ignore_missing(true);
-        migrator.run(pool).await.map_err(sqlx::Error::from)
     }
 
     pub async fn create_project(
@@ -552,7 +540,6 @@ mod tests {
         let pool = crate::db::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
-        MetaStore::apply_migrations(&pool).await.unwrap();
         roy_auth::apply_migrations(&pool).await.unwrap();
         let user = roy_auth::test_support::make_user(&pool, "alice").await;
         let workspace = dir.path().join("workspace");
@@ -653,31 +640,6 @@ mod tests {
         let b = store.create_project("b", &uid, None).await.unwrap();
         let err = store.update_project(&b.id, "a").await.unwrap_err();
         assert!(matches!(err, MetaError::Conflict(_)));
-    }
-
-    /// `roy-agents` and `roy-management` share `_sqlx_migrations` and each
-    /// crate's migrator runs with `set_ignore_missing(true)`. This test
-    /// simulates a second process start (re-open agents after management
-    /// already wrote v2; re-apply management) and asserts neither side
-    /// errors with `VersionMissing` on the foreign-owned rows.
-    #[tokio::test]
-    async fn shared_migrations_table_idempotent_across_crates() {
-        let dir = tempdir().unwrap();
-        let db = dir.path().join("agents.db");
-        let pool = crate::db::open(&db).await.unwrap();
-        MetaStore::apply_migrations(&pool).await.unwrap();
-        pool.close().await;
-        let pool = crate::db::open(&db).await.unwrap();
-        MetaStore::apply_migrations(&pool).await.unwrap();
-        let versions: Vec<(i64,)> =
-            sqlx::query_as("SELECT version FROM _sqlx_migrations ORDER BY version")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            versions,
-            vec![(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
-        );
     }
 
     fn meta_with(session_id: &str, created_by: &str, tags: &[(&str, &str)]) -> SessionMeta {

@@ -1,14 +1,17 @@
--- spec §4. Created with mode 0600 in src/db.rs.
+-- roy-scheduler state: agents the user has registered (with optional cron/
+-- one-shot triggers), fire history, and per-fire subscriber dispatches.
+-- Created with mode 0600 in src/db.rs.
 
 CREATE TABLE agents (
   id                       TEXT PRIMARY KEY,
   name                     TEXT NOT NULL,
-  preset                   TEXT NOT NULL,
+  harness                  TEXT NOT NULL,
   project_id               TEXT,
   task                     TEXT NOT NULL,
   model                    TEXT,
   persistent               INTEGER NOT NULL DEFAULT 0,
   persistent_session_id    TEXT,
+  notify_session           TEXT,
   created_at               TEXT NOT NULL,
   updated_at               TEXT NOT NULL
 );

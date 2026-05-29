@@ -1,15 +1,16 @@
--- spec §4 in Postgres dialect. Mirrored from migrations/sqlite/0001_initial.sql;
--- maintained in lock-step per spec §6.1. Not run in v1.
+-- Postgres dialect of the roy-scheduler schema, maintained in lock-step with
+-- migrations/sqlite/0001_initial.sql.
 
 CREATE TABLE agents (
   id                       TEXT PRIMARY KEY,
   name                     TEXT NOT NULL,
-  preset                   TEXT NOT NULL,
+  harness                  TEXT NOT NULL,
   project_id               TEXT,
   task                     TEXT NOT NULL,
   model                    TEXT,
   persistent               BOOLEAN NOT NULL DEFAULT FALSE,
   persistent_session_id    TEXT,
+  notify_session           TEXT,
   created_at               TIMESTAMPTZ NOT NULL,
   updated_at               TIMESTAMPTZ NOT NULL
 );

@@ -49,8 +49,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     let db_path = args.db.unwrap_or_else(crate::db::default_db_path);
     let pool = crate::db::open(&db_path).await?;
-
-    meta_store::MetaStore::apply_migrations(&pool).await?;
     roy_auth::apply_migrations(&pool).await?;
     bootstrap::ensure_root(&pool).await?;
     let socket = args.socket.unwrap_or_else(default_socket);

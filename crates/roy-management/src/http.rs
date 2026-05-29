@@ -757,12 +757,10 @@ mod tests {
         let pool = crate::db::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
-        MetaStore::apply_migrations(&pool).await.unwrap();
         roy_auth::apply_migrations(&pool).await.unwrap();
         // Seed a user with id="root" so the `created_by = "root"` stub in
         // create_project / create_session handlers satisfies the FK to
-        // `users(id)`. B3's `ensure_root` bootstrap step will do the same in
-        // production. Plus a fixture user for tests that need a real id.
+        // `users(id)`. `ensure_root` does the same in production.
         seed_root_user(&pool).await;
         let alice = roy_auth::test_support::make_user(&pool, "alice").await;
         let workspace = dir.path().join("workspace");
@@ -1142,7 +1140,6 @@ mod tests {
         let agents_pool = crate::db::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
-        MetaStore::apply_migrations(&agents_pool).await.unwrap();
         roy_auth::apply_migrations(&agents_pool).await.unwrap();
         seed_root_user(&agents_pool).await;
         let workspace = dir.path().join("workspace");

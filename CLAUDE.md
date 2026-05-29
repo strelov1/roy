@@ -15,24 +15,23 @@ Non-negotiable for any change in this repo. Bias toward caution over speed; for 
 
 ## What this is
 
-A Cargo workspace with nine crates:
+A Cargo workspace with eight crates:
 
-- **`crates/roy`** — library. Owns sessions: spawning ACP agents over stdio, journaling each turn, broadcasting events to N subscribers, and persisting boot-kit metadata in SQLite (`~/.local/state/roy/sessions.db`) so sessions survive across daemon restarts.
-- **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket). The `roy mcp`, `roy gateway`, `roy scheduler`, and `roy management` subcommands delegate to the matching adapter crates, so a single binary covers every adapter.
-- **`crates/roy-mcp`** — library. MCP (Model Context Protocol) server. Hosts two subcommands:
+- **`crates/roy`** — core library. Owns sessions: spawns ACP harness binaries over stdio, journals each turn, broadcasts events to N subscribers, persists boot-kit metadata in SQLite (`~/.local/state/roy/sessions.db`) so sessions survive across daemon restarts.
+- **`crates/roy-cli`** — binary `roy`. Thin trigger over the daemon (Unix socket). The `roy mcp`, `roy gateway`, `roy scheduler`, `roy management`, and `roy inbound` subcommands delegate to the matching adapter crates, so a single binary covers every adapter.
+- **`crates/roy-mcp`** — MCP (Model Context Protocol) server library. Two subcommands:
   - `roy mcp serve` (also bare `roy mcp`) — daemon-control MCP server. JSON-RPC 2.0 over stdio; exposes session operations as MCP tools.
-  - `roy mcp serve-connections` — proxying MCP server. Reads a `Bundle` (`{session_id, connections: [ConnectionSpec...]}`) from `--specs <path>` or stdin, spawns each upstream stdio MCP as a child, aggregates `tools/list` with `<slug>__<tool>` namespacing, and proxies `tools/call`. Spawned by the daemon as a child of the ACP agent (claude preset only — others reject non-empty connections) via the project-level `.mcp.json` written into the session cwd at spawn time.
-  - **Connections MVP status (2026-05-29):** stdio upstream only; claude + opencode + gemini + codex presets; pi remains unsupported by design (per its README); plain-text secrets in DB; tools snapshot at spawn; resume does not re-attach connections; no `always_attach` flag yet.
-- **`crates/roy-scheduler`** — library + thin binary. Cron + one-shot fire dispatcher. Talks to the daemon over its Unix socket using `ClientCommand::Fire`; never reaches into `SessionManager`, `Engine`, or `Journal`. Owns its own SQLite state (`~/.local/state/roy-scheduler/state.db`) for triggers, fires, and subscribers. Exposes `pub async fn cli::run(cli)` so `roy-cli` can dispatch `roy scheduler` to the same code as the standalone `roy-scheduler` binary.
-- **`crates/roy-gateway`** — library. Chat-platform and WebSocket bridge to the daemon (Telegram adapter + WS relay). Exposes `pub async fn run(args)`; `roy-cli` dispatches `roy gateway` to it. Same boundary rule as `roy-scheduler`. Persists `chat_id → roy session_id` in a JSON file so chats survive restarts.
-- **`crates/roy-agents`** — library. Canonical agent store: `Agent` type (identity + persona `prompt` + optional scheduled `task`), SQLite CRUD with slug-collision suffixing. Used by `roy-management` today; `roy-scheduler` is planned to migrate onto it later. Shared DB file lives at `~/.local/state/roy/agents.db` (override with `ROY_AGENTS_DB`).
-- **`crates/roy-management`** — library. axum HTTP service for agent CRUD, session coordination, and project/tag management. Exposes `pub async fn run(args)`; `roy-cli` dispatches `roy management` to it. Owns `MetaStore` (SQLite at `~/.local/state/roy/agents.db`): `projects`, `session_meta`, `session_tags` tables co-located with `roy-agents`'s `agents` table. Talks to the daemon over Unix socket via `DaemonClient` trait (for session operations that need coordination); routes project/tag operations directly to the database. Transitional note: `roy-scheduler` still has its own `agents` table until a future Plan C unifies it onto `roy-agents`.
-- **`crates/roy-inbound`** — library + thin binary. Inbound event bus for external systems (HTTP webhook today, IMAP / WhatsApp / Telegram-customer-support later). Pure publishers normalize external events into `InboundEvent`s onto an in-process `tokio::mpsc` bus; a single dispatcher resolves a per-source session strategy (`ephemeral`/`persistent_one`/`per_sender_sticky`), fires the agent over the daemon Unix socket, and a per-channel `ReplyHook` delivers the result back. Same boundary rule as `roy-scheduler`/`roy-gateway`. Owns SQLite state at `~/.local/state/roy-inbound/state.db` (table `bindings`). Configured via TOML (`~/.config/roy/inbound.toml`).
-- **`crates/roy-auth`** — library. Users, teams, team invites, JWT cookie auth, ACL helpers. Tables live in the shared `~/.local/state/roy/agents.db` (migrations v10–v12). Consumers: `roy-management` (HTTP middleware, all handlers) and `roy-gateway` (WS subprotocol verification). Exposes `UserStore`, `TeamStore`, `InviteStore`, `sign_session`/`verify_session`, `verify_cookie`/`verify_ws_protocol`, `Acl`. Test helpers under `pub mod test_support` (feature `test-support`).
+  - `roy mcp serve-connections` — proxying MCP server. Reads a `Bundle` (`{session_id, connections: [ConnectionSpec...]}`) from `--specs <path>` or stdin, spawns each upstream stdio MCP as a child, aggregates `tools/list` with `<slug>__<tool>` namespacing, and proxies `tools/call`. Spawned by the daemon as a child of the ACP agent (claude harness only — others reject non-empty connections) via the project-level `.mcp.json` written into the session cwd at spawn time.
+  - **Connections scope:** stdio upstream only; claude + opencode + gemini + codex harnesses; pi is unsupported by design (per its README); secrets stored in plaintext JSON in the `0600` DB file; tools snapshot at spawn; resume gets a clean MCP slate.
+- **`crates/roy-management`** — axum HTTP service for projects, session metadata, agent personas, and connections. Exposes `pub async fn run(args)`; `roy-cli` dispatches `roy management` to it. Owns `MetaStore` (`projects`, `session_meta`, `session_tags`, `connections`) on top of the shared `agents.db` SQLite file (`~/.local/state/roy/agents.db`, override with `ROY_AGENTS_DB`). Talks to the daemon over Unix socket via `DaemonClient` for session-coordination operations; routes project/tag/agent/connection operations directly to the database. Agent personas live as files in `.roy/agents/<slug>.md` (YAML frontmatter: `name`, `description`, `harness`, optional `model`; body becomes the session's system prompt). `POST /agents/_builder` spawns a session backed by an agent-builder persona that edits target agents via `roy agents update` CLI calls.
+- **`crates/roy-auth`** — `users`, `teams`, `team_members`, `team_invites` tables in the same `agents.db` SQLite file, JWT cookie auth, ACL helpers. Consumers: `roy-management` (HTTP middleware + handlers) and `roy-gateway` (WS subprotocol verification). Exposes `UserStore`, `TeamStore`, `InviteStore`, `sign_session`/`verify_session`, `verify_cookie`/`verify_ws_protocol`, `Acl`. Test helpers under `pub mod test_support` (feature `test-support`).
+- **`crates/roy-scheduler`** — cron + one-shot fire dispatcher. Talks to the daemon over its Unix socket using `ClientCommand::Fire`; never reaches into `SessionManager`, `Engine`, or `Journal`. Owns its own SQLite state (`~/.local/state/roy-scheduler/state.db`): `agents`, `triggers`, `fires`, `fire_subscribers`, `fire_subscriber_runs`. Exposes `pub async fn cli::run(cli)` so `roy-cli` dispatches `roy scheduler` to the same code as the standalone binary. A Postgres dialect of the same schema is maintained in `migrations/postgres/` but not wired into the binary.
+- **`crates/roy-gateway`** — Telegram bots + WebSocket relay bridge to the daemon. Exposes `pub async fn run(args)`; `roy-cli` dispatches `roy gateway` to it. Same boundary rule as `roy-scheduler`. Telegram bots are sourced from the `connections` table at startup (N concurrent `teloxide` tasks); `SessionBinder` keys `(connection_id, external_id) → session_id`. WS relay is a transparent bridge: each WS connection opens a dedicated Unix-socket connection to the daemon and pumps `Message::Text` ↔ `\n`-delimited JSON verbatim.
+- **`crates/roy-inbound`** — inbound event bus for external systems (HTTP webhook today; IMAP / WhatsApp / Telegram-customer-support are roadmap). Pure publishers normalize external events into `InboundEvent`s onto an in-process `tokio::mpsc` bus; a single dispatcher resolves a per-source session strategy (`ephemeral`/`persistent_one`/`per_sender_sticky`), fires the agent over the daemon Unix socket, and a per-channel `ReplyHook` delivers the result back. Owns SQLite state at `~/.local/state/roy-inbound/state.db` (table `bindings`). Configured via TOML (`~/.config/roy/inbound.toml`).
 
 External crates (`roy-mcp`, `roy-scheduler`, `roy-gateway`, `roy-management`, `roy-inbound`) depend on `roy` only for the wire-protocol types (`ClientCommand`, `ServerEvent`, `FireTarget`, `TurnEvent`, `ErrorCode`, `StopReason`) and the `PidLock` utility. No direct calls into `SessionManager`, `SessionEngine`, `Journal`, or `Transport` are allowed — the Unix socket is the only API. `roy-auth` is a sibling library used by `roy-management` and `roy-gateway` for user/team storage and JWT verification; it does not depend on `roy`.
 
-Roy spawns agent CLIs; it does not install them. The agent's working directory comes from the client: `roy run --cwd …`, MCP `cwd` argument, or `ClientCommand::Spawn.cwd`. When no client supplies one, the daemon falls back to `ROY_CWD` (env), then its own `current_dir`. Set `ROY_CWD` on the systemd/launchd unit to pin a default project root for every default-cwd session.
+Roy spawns harness binaries; it does not install them. The agent's working directory comes from the client: `roy run --cwd …`, MCP `cwd` argument, or `ClientCommand::Spawn.cwd`. When no client supplies one, the daemon falls back to `ROY_CWD` (env), then its own `current_dir`. Set `ROY_CWD` on the systemd/launchd unit to pin a default project root for every default-cwd session.
 
 ### Per-scope cwd layout
 
@@ -48,7 +47,7 @@ $ROY_WORKSPACE_DIR/
 
 `roy-management` only `mkdir`s the cwd — no auto-generated `CLAUDE.md` or `.memory/`. If the user wants per-scope agent context, they place `CLAUDE.md` themselves in `users/<user_id>/` or `teams/<team_id>/`; the ACP agent walks up to find it.
 
-The daemon remains trusted: it accepts `ClientCommand::Spawn { cwd, ... }` from the Unix socket without knowing about users. The HTTP layer is the only auth boundary.
+The daemon stays trusted: it accepts `ClientCommand::Spawn { cwd, ... }` from the Unix socket without knowing about users. The HTTP layer is the only auth boundary.
 
 ### Session-to-session collaboration
 
@@ -57,7 +56,7 @@ Two patterns sit on top of existing primitives, no new wire variants:
 - **Agent asks human.** A background agent runs
   `roy inject <human_session> "<question>" --source $ROY_SESSION_ID`.
   The daemon sets `ROY_SESSION_ID` on every spawned ACP child
-  (`transport/acp/mod.rs` `AcpTransport::open`), so the agent can pass
+  (`transport/acp/mod.rs` `AcpTransport::open`), so the agent passes
   its own session id without the orchestrator templating it in. The
   human's roy-web renders the `Note` with a clickable link back to the
   asker's session (`MessageGroups.svelte`); the human navigates there
@@ -73,26 +72,26 @@ Two patterns sit on top of existing primitives, no new wire variants:
 Both flows are sync from the agent's perspective. Neither introduces a
 pending-question store, a new `TurnEvent`, or a new `ClientCommand`.
 
+### Harnesses
+
 Each harness maps to a specific binary that must be on `PATH` and pre-authenticated:
 
-| Harness | Binary | Notes |
-|---------|--------|-------|
-| `claude` | `claude-code-acp` | ACP adapter for Claude Code (not the plain `claude` CLI) |
-| `gemini` | `gemini` | Launched with `--acp --skip-trust`; uses `yolo` mode |
-| `opencode` | `opencode` | Launched with `acp`; no ACP modes |
-| `codex` | `codex-acp` | ACP adapter for Codex; uses `full-access` mode |
-| `pi` | `pi-acp` | ACP adapter for `pi` coding agent (spawns `pi --mode rpc` under the hood); install via `npm i -g pi-acp` |
+| Harness    | Binary             | Notes                                                                                       |
+|------------|--------------------|---------------------------------------------------------------------------------------------|
+| `claude`   | `claude-code-acp`  | ACP adapter for Claude Code (not the plain `claude` CLI)                                    |
+| `gemini`   | `gemini`           | Launched with `--acp --skip-trust`; uses `yolo` mode                                        |
+| `opencode` | `opencode`         | Launched with `acp`; no ACP modes                                                           |
+| `codex`    | `codex-acp`        | ACP adapter for Codex; uses `full-access` mode                                              |
+| `pi`       | `pi-acp`           | ACP adapter for `pi` coding agent (spawns `pi --mode rpc` under the hood); `npm i -g pi-acp` |
 
 Which harnesses and models are *surfaced* to clients is controlled by
 `~/.config/roy/harnesses.toml` (see `docs/harnesses-config.md`). The
 harness binaries above must still be installed and authenticated.
 
 > **Terminology:** *harness* = the ACP-adapter binary (one of the five
-> above). *Agent* = a persona, defined in `.roy/agents/<slug>.md` with
+> above). *Agent* = a persona defined in `.roy/agents/<slug>.md` with
 > YAML frontmatter (`name`, `description`, `harness`, optional `model`)
-> and a body that becomes the session's system prompt. The word
-> "preset" (in old wire/TOML/DB) and "engine" (in old YAML frontmatter)
-> was unified into "harness" — see `git log` for the rename commit.
+> and a body that becomes the session's system prompt.
 
 ## Commands
 
@@ -131,20 +130,20 @@ Process exit codes from `roy run` / `roy attach`:
 
 ### Real-CLI smoke tests (ignored by default)
 
-Four tests hit real agent binaries and are `#[ignore]`d. They self-skip if the dependency is absent, so running them without setup is a no-op pass:
+Four tests hit real harness binaries and are `#[ignore]`d. They self-skip if the dependency is absent, so running them without setup is a no-op pass:
 
 ```bash
-cargo test --test acp_transport -- --ignored real_claude   # needs `claude-code-acp` on PATH, logged in
-cargo test --test acp_transport -- --ignored real_gemini         # needs `gemini` on PATH, logged in
-cargo test --test acp_transport -- --ignored real_opencode       # needs `opencode` on PATH
-cargo test --test acp_transport -- --ignored real_codex          # needs `codex-acp` on PATH
+cargo test --test acp_transport -- --ignored real_claude     # needs `claude-code-acp` on PATH, logged in
+cargo test --test acp_transport -- --ignored real_gemini     # needs `gemini` on PATH, logged in
+cargo test --test acp_transport -- --ignored real_opencode   # needs `opencode` on PATH
+cargo test --test acp_transport -- --ignored real_codex      # needs `codex-acp` on PATH
 ```
 
 ### Auth (multi-user)
 
 `roy-management` requires `ROY_JWT_SECRET` (≥32 ASCII bytes) at startup; without it, the service fails fast. On first startup with an empty `users` table, a bootstrap user is created with username from `ROY_BOOTSTRAP_USERNAME` (default `root`) and password from `ROY_BOOTSTRAP_PASSWORD` (or a generated 32-char hex value printed to stderr exactly once).
 
-`roy-cli` exposes auth helpers (HTTP-backed, except `reset` which talks to the DB):
+`roy-cli` exposes auth helpers (HTTP-backed, except `auth reset` which talks to the DB):
 
 ```bash
 roy auth login              # interactive prompt → ~/.config/roy/cookie (mode 0600)
@@ -152,35 +151,27 @@ roy auth whoami             # GET /auth/me (reads cookie)
 roy auth reset <username>   # direct DB password override (recovery)
 ```
 
-`roy-gateway`'s WebSocket handshake authenticates via `Sec-WebSocket-Protocol: roy-jwt,<JWT>` — same JWT cookie issued by `/auth/login`. The old shared-token file is gone; `[websocket].token_path` is no longer read (silently ignored on parse) and existing token files have no effect.
+`roy-gateway`'s WebSocket handshake authenticates via `Sec-WebSocket-Protocol: roy-jwt,<JWT>` — the same JWT cookie issued by `/auth/login`.
 
 ## Architecture
 
-A short pipeline. Triggers (CLI, MCP) talk to a single `Daemon`; `Daemon` owns a `SessionManager`; `SessionManager` owns `SessionEngine` actors; each engine drives one ACP `Transport`. Bytes only cross trait boundaries at `Transport`, so adding a new harness is a new `AcpConfig` variant + a new `Harness` enum variant, not new session/journal/protocol code.
+A short pipeline. Triggers (CLI, MCP, HTTP, WS, Telegram, scheduler, webhook) talk to a single `Daemon`; `Daemon` owns a `SessionManager`; `SessionManager` owns `SessionEngine` actors; each engine drives one ACP `Transport`. Bytes only cross trait boundaries at `Transport`, so adding a new harness is a new `AcpConfig` constructor + a new `Harness` enum variant, not new session/journal/protocol code.
 
-1. **`Daemon`** (`src/daemon.rs`) — accepts Unix-socket connections only, parses `ClientCommand`s, dispatches to per-command `handle_*` methods, and pumps `ServerEvent`s back. Single-instance guard via `PidLock` (`src/pid_lock.rs`): the lock at `<socket>.pid` is the source of truth; a second `roy serve` on the same socket bails with `daemon already running (pid N)`, but a dead PID is detected and taken over (handles `kill -9`). Optional idle-GC + resume-all on startup via `ServeOpts`. WebSocket clients are served by `roy-gateway`'s WS relay (token-authenticated via `Sec-WebSocket-Protocol`, loopback by default at `127.0.0.1:8787`), which bridges each connection to a dedicated Unix-socket connection to this daemon.
+1. **`Daemon`** (`src/daemon.rs`) — accepts Unix-socket connections only, parses `ClientCommand`s, dispatches to per-command `handle_*` methods, and pumps `ServerEvent`s back. Single-instance guard via `PidLock` (`src/pid_lock.rs`): the lock at `<socket>.pid` is the source of truth; a second `roy serve` on the same socket bails with `daemon already running (pid N)`, but a dead PID is detected and taken over (handles `kill -9`). Optional idle-GC + resume-all on startup via `ServeOpts`. For every `Spawn` and `Resume` the daemon emits an early ack (`Spawning` / `Resuming`) before the slow agent-process startup phase. WebSocket clients are served by `roy-gateway`'s WS relay (JWT-authenticated via `Sec-WebSocket-Protocol`, loopback by default at `127.0.0.1:8787`), which bridges each connection to a dedicated Unix-socket connection to this daemon.
 
 2. **`SessionManager`** (`src/manager.rs`) — in-process registry of live `SessionEngine`s keyed by session id, plus on-disk archive operations: `list_archived`, `open_archive`, `read_journal` (unified live-or-archive read), `resume_all`, `sweep_idle`.
 
-3. **`SessionEngine`** (`src/engine.rs`) — long-lived per-session actor. Pipes the agent's events into a `Journal` (persistent JSONL + in-memory ring) and a `broadcast` channel; gates writes via a single `InputLease`; persists boot-kit metadata to `SessionStore` (SQLite) so a fresh daemon process can resurrect the session via `ACP session/load`.
+3. **`SessionEngine`** (`src/engine.rs`) — long-lived per-session actor. Pipes the agent's events into a `Journal` (persistent JSONL + in-memory ring) and a `broadcast` channel; gates writes via a single `InputLease`; persists boot-kit metadata to `SessionStore` (SQLite) so a fresh daemon process can resurrect the session via ACP `session/load`. `Cmd::Inject` appends a `TurnEvent::Note` to the journal/broadcast without taking the input lease.
 
-4. **`Transport`** (`src/transport/mod.rs`) — single trait, single impl `AcpTransport` (`src/transport/acp/mod.rs`). Spawns the agent as a child, sets up the official `agent-client-protocol` SDK, handles `session/new` / `session/load`, optional `set_mode`, and auto-answers `session/request_permission` per `PermissionPolicy`.
+4. **`Transport`** (`src/transport/mod.rs`) — single trait, single impl `AcpTransport` (`src/transport/acp/mod.rs`). Spawns the harness binary as a child, drives the official `agent-client-protocol` SDK, handles `session/new` / `session/load`, optional `set_mode`, and auto-answers `session/request_permission` per `PermissionPolicy`.
 
 5. **Control protocol** (`src/control.rs`) — wire-level enums (`ClientCommand`, `ServerEvent`, typed `ErrorCode`) shared by every trigger. The JSON payload is identical regardless of transport; the daemon itself uses only `\n`-delimited Unix framing. The `Message::Text` framing for WebSocket clients is provided by `roy-gateway`'s WS relay.
 
-6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `status`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `set-tags`, `wait`, `fire`, `mcp`, `projects`, `engines`, `agents`, `gateway`, `scheduler`, `management`. `status` is a non-side-effecting health probe (exit 0 if the daemon socket accepts a connection, 2 otherwise) — prefer it over `pgrep`-ing the binary in scripts and skills. The `mcp` subcommand delegates to `roy-mcp` (`crates/roy-mcp/src/lib.rs`), an MCP server (JSON-RPC 2.0 over stdio) that exposes daemon control operations as MCP tools.
-
-   - `roy harnesses` — lists the daemon's harness+model catalog from `harnesses.toml` (the harness binaries like `claude-code-acp`, `gemini`, etc.).
-   - `roy agents` — file-based persona discovery via `roy-management`; each agent `.md` file binds a persona prompt + body to a harness+model pair.
-   - `roy gateway` — Telegram chat-platform and WebSocket relay bridge to the daemon (dispatches to `roy-gateway` crate).
-   - `roy scheduler` — cron + one-shot fire dispatcher (dispatches to `roy-scheduler` crate).
-   - `roy management` — axum HTTP service for agent CRUD and session launch (dispatches to `roy-management` crate).
-
-   The `POST /agents/_builder` endpoint (proxied from roy-web) spawns a builder session backed by a seeded system agent that gathers requirements via conversation and edits the target via `roy agents update`.
+6. **`roy-cli`** (`crates/roy-cli/src/main.rs`) — clap subcommands: `serve`, `status`, `run`, `attach`, `resume`, `list`, `list-archived`, `close`, `wait`, `fire`, `inject`, `ask`, `mcp`, `gateway`, `scheduler`, `management`, `inbound`, `harnesses`, `projects`, `set-tags`, `auth`. `status` is a non-side-effecting health probe (exit 0 if the daemon socket accepts a connection, 2 otherwise) — prefer it over `pgrep`-ing the binary in scripts and skills. The adapter subcommands (`mcp`, `gateway`, `scheduler`, `management`, `inbound`) dispatch into the matching crate's `cli::run` / `run` entry point.
 
 ### TurnEvent normalization
 
-`TurnEvent` (`src/event.rs`) is the common vocabulary across all agents: `System`, `UserPrompt`, `AssistantText`, `AssistantThought`, `ToolUse`, `Usage`, `Result { cost_usd, stop_reason }`, and `Raw(Value)`. **Unknown/unmodeled messages become `Raw` rather than being dropped** — so a new event type from an upgraded SDK surfaces instead of vanishing silently. `UserPrompt` is journaled by the engine before each prompt is sent to the transport — ACP agents don't echo user input, so this is how the user side of the conversation survives across refreshes / late attaches. A turn's stream always terminates with `Result`. Wire format is a single JSON shape (`event_to_json` / `event_from_json`) used by stdout, the JSONL journal, and the control protocol.
+`TurnEvent` (`src/event.rs`) is the common vocabulary across all harnesses: `System`, `UserPrompt`, `AssistantText`, `AssistantThought`, `ToolUse`, `Usage`, `Result { cost_usd, stop_reason }`, `Note { text, source_session }`, and `Raw(Value)`. **Unknown/unmodeled messages become `Raw` rather than being dropped** — so a new event type from an upgraded SDK surfaces instead of vanishing silently. `UserPrompt` is journaled by the engine before each prompt is sent to the transport — ACP agents don't echo user input, so this is how the user side of the conversation survives across refreshes / late attaches. A turn's stream always terminates with `Result`. Wire format is a single JSON shape (`event_to_json` / `event_from_json`) used by stdout, the JSONL journal, and the control protocol.
 
 ### Journal
 
@@ -193,11 +184,11 @@ A short pipeline. Triggers (CLI, MCP) talk to a single `Daemon`; `Daemon` owns a
 
 ### resume_cursor
 
-The opaque token to resume an agent-side session on the next `Transport::open`. Distinct from the roy host session id, which is a UUID kept stable across restarts. For ACP, the cursor is the agent-issued `sessionId` from `session/new`. After a turn that produces a fresh cursor, the engine persists it into `SessionMetadata` so `SessionManager::resume` can hand it back to `Transport::open` and route through ACP `session/load`.
+The opaque token to resume an agent-side session on the next `Transport::open`. Distinct from the roy host session id, which is a UUID kept stable across restarts. For ACP, the cursor is the agent-issued `sessionId` from `session/new`. After a turn that produces a fresh cursor, the engine persists it into `SessionStore` so `SessionManager::resume` can hand it back to `Transport::open` and route through ACP `session/load`.
 
 ### ACP details (`acp/mod.rs`)
 
-We own the child process directly (not `AcpAgent::from_args`) so we can detect mid-turn process exit and emit a terminal `Result { stop_reason: Error }`. A `watch` channel propagates "child died" into `run_session` / `run_turn`, which would otherwise hang on a never-resolved `send_request`. `update_to_event` maps `session/update` variants to `TurnEvent`; everything we don't model goes through `Raw(Value)`. Per-harness setup is centralized in `AcpConfig::{gemini, opencode, codex, claude, pi}`.
+We own the child process directly (not `AcpAgent::from_args`) so we can detect mid-turn process exit and emit a terminal `Result { stop_reason: Error }`. A `watch` channel propagates "child died" into `run_session` / `run_turn`, which would otherwise hang on a never-resolved `send_request`. `update_to_event` maps `session/update` variants to `TurnEvent`; everything we don't model goes through `Raw(Value)`. Per-harness setup is centralised in `AcpConfig::{claude, gemini, opencode, codex, pi}`.
 
 ### Testing approach
 
@@ -207,8 +198,9 @@ Integration tests avoid real CLIs by faking the agent: `tests/scripts/fake-acp-a
 
 Deep-dive design notes (read these before reshaping the wire format, persistence layer, or component layering):
 
-- `docs/architecture.md` — full layering and component responsibilities.
+- `docs/architecture.md` — full layering and component responsibilities across all eight crates.
 - `docs/wire-protocol.md` — the single JSON shape used on stdout, in the JSONL journal, and on every trigger.
-- `docs/persistence.md` — journal + metadata files, the two ids (roy host id vs agent `resume_cursor`), resume flow, idle GC.
+- `docs/persistence.md` — every SQLite file roy writes, every table, the two ids (roy host id vs agent `resume_cursor`), resume flow, idle GC.
+- `docs/harnesses-config.md` — `~/.config/roy/harnesses.toml` user-facing reference.
 
 Historical iteration notes are deliberately not preserved — `git log` is the authoritative record of how the code got to its current shape.

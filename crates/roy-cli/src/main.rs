@@ -946,12 +946,10 @@ async fn cmd_ask(args: AskArgs) -> anyhow::Result<ExitCode> {
 /// Resolve `<target>`: try as a live roy session id. `Ok(None)` signals
 /// "unknown target" — the caller renders the stderr message and exits 2.
 ///
-/// Note: agent-slug resolution was previously supported via the
-/// DB-backed `/agents` endpoint. After the agents-as-files migration
-/// those slugs live in `~/.roy/agents/*.md` (and per-user/team paths)
-/// inside the daemon container — not directly reachable from the CLI
-/// host. Restore via the new `/management/agents` HTTP endpoint when
-/// `roy ask` needs file-based agent targets again.
+/// File-based agent slugs (`~/.roy/agents/*.md`) live inside the daemon
+/// container and aren't reachable from the CLI host. Spawn-by-slug for
+/// `roy ask` will route through `/management/agents` once that endpoint
+/// exposes the file-backed catalog.
 async fn resolve_ask_target(
     target: &str,
     _mgmt_url: &str,

@@ -161,26 +161,3 @@ That doesn't happen — it's a hard validation error (`config invalid`
 status). If you see the picker working with two defaults, you're
 looking at stale data. Refresh.
 
-## Migration from `agents.toml`
-
-The pre-rename file was `~/.config/roy/agents.toml` with `[[agent]]
-preset = "..."` blocks. To migrate:
-
-```bash
-mv ~/.config/roy/agents.toml ~/.config/roy/harnesses.toml
-```
-
-Then inside the file, rewrite each block:
-
-```toml
-# Before:
-[[agent]]
-preset = "claude"
-
-# After:
-[[harness]]
-name = "claude"
-```
-
-The `[[agent.models]]` sub-tables become `[[harness.models]]` — same
-fields, same semantics.
