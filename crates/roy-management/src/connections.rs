@@ -670,18 +670,11 @@ mod tests {
 
     // ----- store fixture -----
 
-    /// Returns a pool with all migrations applied (roy-agents + roy-management
-    /// + roy-auth), the canonical pattern used by `tests/common/mod.rs`.
-    /// `roy_auth::test_support::temp_pool` alone only applies roy-auth
-    /// migrations and skips the `agents` table that
-    /// `MetaStore::apply_migrations` references via FK / migration shape, so
-    /// we open via `crate::db::open` first.
+    /// Returns a pool with management + auth migrations applied, the canonical
+    /// pattern used by `tests/common/mod.rs`.
     async fn setup_pool() -> SqlitePool {
         let dir = tempfile::tempdir().expect("tempdir");
         let pool = crate::db::open(&dir.path().join("agents.db"))
-            .await
-            .unwrap();
-        crate::meta_store::MetaStore::apply_migrations(&pool)
             .await
             .unwrap();
         roy_auth::apply_migrations(&pool).await.unwrap();

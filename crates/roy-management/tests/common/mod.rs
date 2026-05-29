@@ -27,9 +27,6 @@ pub async fn test_app() -> (axum::Router, SqlitePool, PathBuf) {
     let pool = roy_management::db::open(&dir.path().join("agents.db"))
         .await
         .unwrap();
-    roy_management::meta_store::MetaStore::apply_migrations(&pool)
-        .await
-        .unwrap();
     roy_auth::apply_migrations(&pool).await.unwrap();
     // Keep the tempdir alive for the test's lifetime — dropping it would
     // invalidate the SQLite file referenced by the pool.
@@ -69,9 +66,6 @@ pub async fn test_app_with_mock_daemon() -> (
     std::env::set_var("ROY_JWT_SECRET", TEST_JWT_SECRET);
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = roy_management::db::open(&dir.path().join("agents.db"))
-        .await
-        .unwrap();
-    roy_management::meta_store::MetaStore::apply_migrations(&pool)
         .await
         .unwrap();
     roy_auth::apply_migrations(&pool).await.unwrap();
@@ -125,9 +119,6 @@ pub async fn test_app_with_catalog() -> (axum::Router, sqlx::SqlitePool, std::pa
     std::env::set_var("ROY_JWT_SECRET", TEST_JWT_SECRET);
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = roy_management::db::open(&dir.path().join("agents.db"))
-        .await
-        .unwrap();
-    roy_management::meta_store::MetaStore::apply_migrations(&pool)
         .await
         .unwrap();
     roy_auth::apply_migrations(&pool).await.unwrap();

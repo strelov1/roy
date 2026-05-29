@@ -135,9 +135,8 @@ on `resume`.
 
 `spawn.cwd` is an optional working directory for the session. When omitted,
 the daemon uses the current working directory or the value of `ROY_CWD` env.
-This field replaces the previous `project_id` + implicit workspace routing.
 
-Project and tag operations now route through `roy-management` HTTP API
+Project and tag operations route through the `roy-management` HTTP API
 (default `127.0.0.1:8079`), not the Unix socket. See `roy projects --help`
 and `roy set-tags --help` for CLI usage.
 
@@ -215,7 +214,7 @@ marked.
 | `created` | —               | File was missing; sample was just written                 |
 | `invalid` | `reason: string`| Parse or validation failure; `agents` is `[]`          |
 
-See [agents-config.md](./agents-config.md) for the user-facing reference.
+See [harnesses-config.md](./harnesses-config.md) for the user-facing reference.
 
 ### ErrorCode
 

@@ -1,8 +1,6 @@
-// crates/roy-management/src/db.rs
-//
-// Shared SQLite helpers for roy-management. The `default_db_path` and `open`
-// functions were previously in the roy-agents crate; that crate is being
-// deleted now that agents live in `~/.roy/agents/*.md` files.
+//! Shared SQLite pool helpers for the `agents.db` file. Used by every
+//! roy-management consumer (HTTP service, tests) and shared with `roy-auth`,
+//! which adds its own tables via its own migrator.
 
 use std::path::{Path, PathBuf};
 
@@ -19,10 +17,9 @@ pub fn default_db_path() -> PathBuf {
     PathBuf::from(home).join(".local/state/roy/agents.db")
 }
 
-/// Open (or create) the roy SQLite DB at `path`. WAL mode, 5s busy timeout,
-/// mode 0600 on Unix. Runs roy-management's own migrator with
-/// `set_ignore_missing(true)` so existing deployments with older rows aren't
-/// broken.
+/// Open (or create) the SQLite pool at `path`, apply roy-management's
+/// migrations, and chmod the file to `0600` on Unix. `roy-auth` shares this
+/// pool and adds its own tables on top via [`roy_auth::apply_migrations`].
 pub async fn open(path: &Path) -> Result<SqlitePool> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -39,8 +36,8 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .connect_with(options)
         .await
         .with_context(|| format!("opening SQLite at {}", path.display()))?;
-    // `set_ignore_missing(true)` so we don't error on migration rows owned by
-    // other crates that may have been applied before this binary ran.
+    // `set_ignore_missing(true)` so we tolerate migration rows owned by
+    // roy-auth that may have been applied earlier into the same database.
     let mut migrator = sqlx::migrate!("migrations/sqlite");
     migrator.set_ignore_missing(true);
     migrator.run(&pool).await.context("running migrations")?;

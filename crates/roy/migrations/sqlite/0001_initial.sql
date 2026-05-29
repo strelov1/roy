@@ -1,6 +1,6 @@
 CREATE TABLE sessions (
   session_id     TEXT PRIMARY KEY,
-  agent          TEXT NOT NULL,
+  harness        TEXT NOT NULL,
   cwd            TEXT NOT NULL,
   model          TEXT,
   permission     TEXT,

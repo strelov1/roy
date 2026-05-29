@@ -56,7 +56,6 @@ mod tests {
         let pool = crate::db::open(&dir.path().join("agents.db"))
             .await
             .unwrap();
-        MetaStore::apply_migrations(&pool).await.unwrap();
         roy_auth::apply_migrations(&pool).await.unwrap();
         let user = roy_auth::test_support::make_user(&pool, "alice").await;
         let workspace = dir.path().join("workspace");

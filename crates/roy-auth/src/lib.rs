@@ -1,7 +1,8 @@
-//! User/team/invite store + JWT helpers shared by roy-management and roy-gateway.
-//! Tables live in the shared `agents.db` next to roy-agents and roy-management
-//! (migration versions 10+). The crate exposes a small surface: stores, JWT
-//! sign/verify, cookie parsing, and an `Acl` helper.
+//! User/team/invite store + JWT helpers shared by roy-management and
+//! roy-gateway. The four tables (`users`, `teams`, `team_members`,
+//! `team_invites`) live in the same `agents.db` SQLite file as roy-management.
+//! The crate exposes a small surface: stores, JWT sign/verify, cookie
+//! parsing, and an `Acl` helper.
 
 pub mod acl;
 pub mod cookie;

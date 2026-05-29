@@ -236,13 +236,10 @@ pub mod mock {
     }
 }
 
-// Preserve previous free-function for run_agent / start_builder until the HTTP
-// migration in later tasks; will be removed when POST /agents/{id}/run and
-// POST /agents/_builder go through /sessions. `tags` is persisted to
-// `meta_store` after the daemon spawn so the UI can mark these sessions
-// (e.g. builder sessions get a wrench icon in the sidebar). The daemon's
-// wire protocol does not currently carry tags on `Spawn`; tags live entirely
-// in management-side meta.
+// Spawn a session over the daemon Unix socket and persist its tags into the
+// management-side meta. The wire protocol does not carry tags on `Spawn`; the
+// daemon is trusted, so ownership and tags live in `meta_store` only and the
+// UI uses them to badge sessions (e.g. builder sessions get a wrench icon).
 pub async fn spawn(
     socket: &Path,
     meta: &MetaStore,

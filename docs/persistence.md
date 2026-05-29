@@ -1,42 +1,30 @@
 # Persistence and resume
 
-## Database layout
+`roy` keeps state in three SQLite files plus a per-session JSONL journal
+on disk. The journal is the public on-disk wire format (same JSON shape as
+CLI stdout and WS frames); the SQLite files are private to their owner
+crates.
 
-Session boot-kit and project metadata are now split across two SQLite databases.
+## Files
 
-**Core sessions** (`~/.local/state/roy/sessions.db`):
-- `sessions` table: `session_id` (PK), `agent`, `cwd`, `model`, `permission`,
-  `resume_cursor`, `system_prompt`, `created_at`, `closed_at`.
-- Owned by `roy::SessionStore`. Written during spawn and cursor updates.
-- Each row is resurrectable: the daemon can rebuild a live `SessionEngine`
-  from the boot-kit columns without losing journal continuity.
+| Path                                            | Owner                                  | Tables                                                              |
+|-------------------------------------------------|----------------------------------------|---------------------------------------------------------------------|
+| `~/.local/state/roy/sessions.db`                | `roy::SessionStore`                    | `sessions`                                                          |
+| `~/.local/state/roy/agents.db`                  | `roy-management` + `roy-auth`          | `projects`, `session_meta`, `session_tags`, `connections`, `users`, `teams`, `team_members`, `team_invites` |
+| `~/.local/state/roy-scheduler/state.db`         | `roy-scheduler`                        | `agents`, `triggers`, `fires`, `fire_subscribers`, `fire_subscriber_runs` |
+| `~/.local/state/roy-inbound/state.db`           | `roy-inbound`                          | `bindings`                                                          |
+| `<journal_dir>/<session_id>.jsonl`              | `roy::Journal`                         | append-only JSONL event log (defaults to `~/.roy/journals/`)        |
 
-**Management metadata** (`~/.local/state/roy/agents.db`):
-- `projects` table: `id` (PK), `name` (unique), `path`, `created_at`.
-- `session_meta` table: `session_id` (PK, FK to sessions), `project_id`,
-  `agent_id`, `agent_name`, `display_label`.
-- `session_tags` table: `session_id`, `key`, `value` (composite PK).
-- Owned by `roy-management::MetaStore`, co-located with `roy-agents`'s
-  `agents` table.
-- Written by HTTP API (`POST /sessions`, `PUT /sessions/{id}/tags`, etc.).
-- Migrations: both databases use SQLite `_sqlx_migrations` with
-  `set_ignore_missing(true)` so partial updates don't fail. `roy-agents`
-  owns v1 of agents.db migrations; `roy-management` adds v2 for the three
-  new tables. `sessions.db` has its own migration track.
+All SQLite files are opened with WAL mode, foreign keys on, busy timeout
+5 s, and chmod 0600 on Unix.
 
----
-
-Each session writes one file under `journal_dir` (defaults to
-`~/.roy/journals/`):
-
-```
-<session_id>.jsonl       — append-only event log
-```
-
-This survives daemon restarts. Together with the boot-kit row in
-`sessions.db`, it makes a session **resurrectable**: a fresh `roy serve`
-process can rebuild a live `SessionEngine` from disk without losing journal
-continuity.
+`agents.db` is shared by `roy-management` and `roy-auth`. The two crates'
+migrations live side-by-side in the shared `_sqlx_migrations` table;
+each migrator runs with `set_ignore_missing(true)` so it tolerates rows
+owned by the other. SQLite allows DDL forward references, so the
+roy-management table that declares `created_by REFERENCES users(id)` can
+be created before `users` exists — the FK is enforced only at DML time,
+by which point `bootstrap::ensure_root` has already populated `users`.
 
 ## Journal file
 
@@ -44,9 +32,10 @@ One `JournalEntry` per line, JSONL:
 
 ```jsonl
 {"seq":0,"event":{"type":"system","subtype":"init"}}
-{"seq":1,"event":{"type":"assistant_text","text":"…"}}
-{"seq":2,"event":{"type":"tool_use","name":"Bash","input":{"command":"ls"}}}
-{"seq":3,"event":{"type":"result","cost_usd":null,"stop_reason":"end_turn","is_error":false}}
+{"seq":1,"event":{"type":"user_prompt","text":"…"}}
+{"seq":2,"event":{"type":"assistant_text","text":"…"}}
+{"seq":3,"event":{"type":"tool_use","name":"Bash","input":{"command":"ls"}}}
+{"seq":4,"event":{"type":"result","cost_usd":null,"stop_reason":"end_turn","is_error":false}}
 ```
 
 - `seq` is monotonic across all turns of a session.
@@ -67,40 +56,78 @@ truth.
 on-disk format is exactly the same JSON shape that goes onto CLI stdout
 and into trigger frames.
 
-## Boot-kit row (sessions.db)
+## `sessions` boot-kit (`sessions.db`)
 
-SQLite row in the `sessions` table, updated atomically each time the
-session's `resume_cursor` changes:
+| column          | type        | source                                                                       |
+|-----------------|-------------|-------------------------------------------------------------------------------|
+| `session_id`    | text PK     | roy-side UUID minted at first spawn; stable across restarts                   |
+| `harness`       | text        | the harness name (`claude`, `gemini`, `opencode`, `codex`, `pi`)              |
+| `cwd`           | text        | the working directory for this session                                        |
+| `model`         | text        | the `--model` flag, if applicable; null if unset                              |
+| `permission`    | text        | the requested `PermissionPolicy` (`allow` / `deny`)                            |
+| `resume_cursor` | text        | the agent-issued session id (e.g. ACP `sessionId`) most recently observed     |
+| `system_prompt` | text        | snapshot of the inline persona prompt; re-applied on `resume`. null when none |
+| `created_at`    | integer     | unix timestamp of spawn time                                                  |
+| `closed_at`     | integer     | unix timestamp of close time; null while live                                 |
 
-| column          | type        | source                                                         |
-|-----------------|-------------|------------------------------------------------------------------------|
-| `session_id`    | text PK     | roy-side UUID minted at first spawn; stable across restarts     |
-| `harness`       | text        | the harness name (`claude`, `gemini`, `opencode`, `codex`, `pi`) |
-| `cwd`           | text        | the working directory for this session                          |
-| `model`         | text        | the `--model` flag, if applicable (claude only); null if unset  |
-| `permission`    | text        | the requested `PermissionPolicy` (`allow` / `deny`)             |
-| `resume_cursor` | text        | the agent-issued session id (e.g. ACP `sessionId`) most recently observed |
-| `system_prompt` | text        | snapshot of the inline persona prompt; re-applied on `resume`. null when none was set |
-| `created_at`    | integer     | unix timestamp of spawn time                                    |
-| `closed_at`     | integer     | unix timestamp of close time; null while live                   |
+Updated atomically each time `resume_cursor` changes.
 
-The SQLite transaction is atomic — partial writes never leave the database
-in an inconsistent state.
+## Management metadata (`agents.db`)
 
-## Enriched metadata (agents.db)
+Project- and session-level enrichment, joined with `sessions.db` on
+`session_id` at query time via HTTP APIs in `roy-management`.
 
-Project and session-level rich metadata live in separate tables, joined at
-query time via HTTP APIs in `roy-management`:
+- **projects**: `id`, `name` (unique), `path`, `created_by` (FK
+  `users(id)`), optional `team_id` (FK `teams(id)`), `created_at`.
+- **session_meta**: `session_id` (PK, soft FK to `sessions.db`),
+  optional `project_id`, `agent_id`, `agent_name`, `display_label`,
+  `created_by`, optional `team_id`, `connection_ids` (JSON array, audit
+  only — resume gets a clean MCP slate), `created_at`.
+- **session_tags**: `session_id` (FK `session_meta` ON DELETE CASCADE),
+  `key`, `value` (composite PK).
+- **connections**: per-user MCP-server bindings.
+  Composite uniqueness `(owner_id, slug)`; partial unique
+  `(owner_id, provider_id, name)` when `provider_id IS NOT NULL`,
+  so each user can have one labelled instance per catalog provider.
+  Secrets live inline in `secrets_json` (`agents.db` is `0600`).
 
-**projects**: `id`, `name` (unique), `path`, `created_at`.
+## Auth tables (`agents.db`)
 
-**session_meta**: per-session enrichment — `session_id` (FK to sessions.db),
-`project_id` (FK to projects), `agent_id`, `agent_name`, `display_label`.
-Allows sessions to be tagged with a project and display label without
-mutating the immutable boot-kit.
+- **users**: `id`, `username` (UNIQUE COLLATE NOCASE), `display_name`,
+  `password_hash`, optional `timezone`, `created_at`.
+- **teams**: `id`, `name`, `description`, optional `created_by` (FK
+  `users`), `created_at`.
+- **team_members**: `(user_id, team_id)` PK, `role` (default `'member'`),
+  `joined_at`.
+- **team_invites**: `token` (PK), `team_id` (FK), `created_by` (FK),
+  `created_at`, optional `expires_at`, optional `accepted_by`, optional
+  `accepted_at`.
 
-**session_tags**: key-value tags — `session_id`, `key`, `value` (composite
-PK). Queryable and editable via HTTP APIs for organizing sessions.
+## Scheduler state (`roy-scheduler/state.db`)
+
+- **agents**: registered agents (`id`, `name`, `harness`, optional
+  `project_id`, `task`, optional `model`, `persistent` flag, optional
+  `persistent_session_id`, optional `notify_session`).
+- **triggers**: cron or one-shot fires (`kind IN ('cron','oneshot')`,
+  `cron_expr`/`fire_at`, `next_fire_at`, `paused`).
+- **fires**: per-fire audit row (`status IN ('running','ok','error',
+  'timeout')`, `transcript_seq_range_*`, `assistant_text`, `cost_usd`,
+  `stop_reason`).
+- **fire_subscribers**: registered post-fire effects (`kind IN
+  ('inject_parent','webhook','notify_native','chain_agent')`, JSON
+  `config`, `enabled`, `order_index`). Either `agent_id` or
+  `trigger_id` is required.
+- **fire_subscriber_runs**: per-subscriber audit row.
+
+The Postgres dialect of the same schema lives in
+`crates/roy-scheduler/migrations/postgres/`.
+
+## Inbound bindings (`roy-inbound/state.db`)
+
+- **bindings**: `(source_id, sender_id)` UNIQUE → `session_id`,
+  `agent_id`, `strategy`, `created_at`, `last_active_at`. Sticky
+  per-sender mappings for `per_sender_sticky` strategy survive process
+  restarts.
 
 ## Two ids: roy-side vs agent-side
 
@@ -122,7 +149,7 @@ agent-side cursor is replayed into `Transport::open`.
 ┌─ on disk ──────────────────┐         ┌─ live ─────────────────────┐
 │  sessions.db (boot-kit)    │         │  SessionEngine             │
 │   ├ session_id (PK)        │         │   reads boot-kit row       │
-│   ├ agent, cwd, model      │ ─────► │   → passes to              │
+│   ├ harness, cwd, model    │ ─────► │   → passes to              │
 │   ├ resume_cursor          │ resume  │   Transport::open ──► ACP  │
 │   └ ...                    │         │     session/load           │
 │  <id>.jsonl (history)      │         │                            │
@@ -139,17 +166,18 @@ What survives:
 
 | thing                    | survives restart? | how                                        |
 |--------------------------|--------------------|--------------------------------------------|
-| roy session id           | yes                | persisted in `sessions.session_id` (PK)   |
+| roy session id           | yes                | persisted in `sessions.session_id` (PK)    |
 | journal contents         | yes                | append-only JSONL file on disk             |
-| boot-kit (agent, cwd)    | yes                | persisted in `sessions` row                |
+| boot-kit (harness, cwd)  | yes                | persisted in `sessions` row                |
 | `resume_cursor`          | yes                | persisted in `sessions.resume_cursor`      |
 | agent process            | **no**             | killed with the previous daemon            |
 | in-memory broadcast      | no                 | bounded ring, rebuilt empty on resume      |
 | input lease state        | no                 | resets to "no holder" on resume            |
+| attached MCP connections | no                 | snapshot only, not re-attached on resume   |
 
-What the agent itself remembers depends on the agent. Gemini and
+What the agent itself remembers depends on the harness. Gemini and
 OpenCode persist their session and continue exactly where they left
-off after `session/load`. Other agents may treat `session/load` as
+off after `session/load`. Other harnesses may treat `session/load` as
 "please start fresh" — in that case the roy-side journal still
 continues monotonically, but the agent has no memory of the prior
 conversation.
