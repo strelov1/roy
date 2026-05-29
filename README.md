@@ -23,37 +23,8 @@ This is a monorepo. Three formerly-separate trees now live here:
 - `crates/` + `Cargo.toml` — the Rust workspace (the daemon and every adapter).
 - `workspace/` — the Svelte SPA front-end (formerly the `roy-web` repo).
 - `docker/` — the container bundle: Dockerfiles, `docker-compose*.yml`,
-  nginx config, deploy script (formerly the `roy-docker` repo). The docker
+  nginx config (formerly the `roy-docker` repo). The docker
   build context is this repo root; see `docker/README.md`.
-
-## Breaking changes (terminology rename + split-store refactor)
-
-The rename unified the vocabulary: every place that called the ACP
-binary a "preset" (core wire/TOML/DB) or "engine" (file-based agent
-frontmatter) now uses **harness**. Upgrading from a pre-rename install:
-
-```bash
-# Rename the harness catalog file.
-mv ~/.config/roy/agents.toml ~/.config/roy/harnesses.toml
-# …and inside it, `[[agent]] preset = "..."` becomes
-# `[[harness]] name = "..."`.
-
-# In any .roy/agents/*.md you authored, rename the YAML key:
-#   `engine: claude` → `harness: claude`
-
-# sessions.db and the scheduler agents.db migrate themselves
-# (ALTER COLUMN runs automatically on first start).
-# The scheduler binary owns its state.db (creation + migrations);
-# roy-management only READS it, via roy-scheduler's read facade
-# (roy_scheduler::read::SchedulerRead / db::open_read_only), and never
-# migrates it.
-
-# After the earlier split-store refactor, clear obsolete files once:
-rm -rf ~/.roy/journals/*.meta.json
-rm -f  ~/.roy/projects.json
-```
-
-Wire-protocol break: `SetTags`/`ListProjects`/`CreateProject`/`DeleteProject` commands removed from the Unix-socket protocol. `roy projects`, `roy set-tags`, `roy run --project|--tag|--agent-name` now route through the management HTTP API (`roy management` subcommand; default `127.0.0.1:8079`). Bare `roy run --cwd` keeps the Unix-socket path.
 
 ## What this is
 
