@@ -1,0 +1,131 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ChatGPT-aligned palette.
+   Both modes collapse sidebar and main canvas onto a single background:
+   sidebar ≡ background. Visual separation comes from spacing/density,
+   not from a different fill — same flat look as ChatGPT's current UI.
+   User bubble lives on `--secondary` (light grey on light, mid-grey on
+   dark); assistant messages render directly on the canvas with no card. */
+:root {
+  --background: oklch(1 0 0);              /* #ffffff */
+  --foreground: oklch(0.13 0 0);           /* #0d0d0d */
+  --card: oklch(1 0 0);                    /* same as bg — flat */
+  --card-foreground: oklch(0.13 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.13 0 0);
+  --primary: oklch(0.13 0 0);              /* near-black send btn */
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.955 0 0);           /* #f4f4f4 — user bubble */
+  --secondary-foreground: oklch(0.13 0 0);
+  --muted: oklch(0.955 0 0);               /* #f4f4f4 */
+  --muted-foreground: oklch(0.43 0 0);     /* #5d5d5d */
+  --accent: oklch(0.93 0 0);               /* #ececec — hover */
+  --accent-foreground: oklch(0.13 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.92 0 0);               /* very subtle */
+  --input: oklch(0.93 0 0);
+  --ring: oklch(0.7 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(1 0 0);                 /* matches bg — single flat canvas */
+  --sidebar-foreground: oklch(0.13 0 0);
+  --sidebar-primary: oklch(0.13 0 0);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.93 0 0);       /* #ececec — selected row */
+  --sidebar-accent-foreground: oklch(0.13 0 0);
+  --sidebar-border: oklch(0.93 0 0);
+  --sidebar-ring: oklch(0.7 0 0);
+  /* AppMark wave colors. Darker, more saturated in light theme so the
+     pastel strokes don't disappear against #fff. */
+  --appmark-warm: #c08a2e;
+  --appmark-cool: #2f78b8;
+}
+
+.dark {
+  --background: oklch(0.155 0 0);          /* #0f0f0f — single flat canvas */
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.155 0 0);                /* same as bg */
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.21 0 0);              /* slightly raised — popovers/menus */
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.985 0 0);             /* white send btn on dark */
+  --primary-foreground: oklch(0.155 0 0);
+  --secondary: oklch(0.31 0 0);            /* #303030 — user bubble */
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.24 0 0);                /* subtle hover/bg for chips */
+  --muted-foreground: oklch(0.72 0 0);
+  --accent: oklch(0.27 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.6 0 0);
+  --sidebar: oklch(0.155 0 0);             /* matches bg */
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.985 0 0);
+  --sidebar-primary-foreground: oklch(0.155 0 0);
+  --sidebar-accent: oklch(0.27 0 0);       /* selected row tint */
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.6 0 0);
+  /* Pastel cream + sky-blue read fine on the dark canvas. */
+  --appmark-warm: #f2d9a8;
+  --appmark-cool: #a8cde8;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+}
+
+/* Hide native scrollbars site-wide. */
+* {
+  scrollbar-width: none;
+}
+*::-webkit-scrollbar {
+  display: none;
+}

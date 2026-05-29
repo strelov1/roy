@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.env.local
+.svelte-kit
+*.log
+.DS_Store
+
+.worktrees
+.claude/worktrees

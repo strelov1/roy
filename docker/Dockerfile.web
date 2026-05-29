@@ -1,0 +1,28 @@
+# Multi-stage build for roy-web (Svelte + Vite static SPA).
+# Final image is nginx serving /dist with a /management proxy to the
+# roy-management service.
+
+# ---------- Stage 1: build the SPA ----------
+FROM node:24-bookworm-slim AS builder
+
+WORKDIR /build
+COPY workspace/package.json workspace/package-lock.json ./
+RUN npm ci
+
+COPY workspace/ ./
+
+# Default points the WS client at the local gateway exposed on the host.
+# Override at build time via:
+#   docker compose build --build-arg VITE_ROY_WS_URL=ws://host:8788 roy-web
+ARG VITE_ROY_WS_URL=ws://localhost:8788
+ENV VITE_ROY_WS_URL=$VITE_ROY_WS_URL
+
+RUN npm run build
+
+# ---------- Stage 2: nginx ----------
+FROM nginx:1.27-alpine
+
+COPY --from=builder /build/dist /usr/share/nginx/html
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80

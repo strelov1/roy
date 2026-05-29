@@ -16,6 +16,16 @@ daemon, one journal, one control protocol.
 - **session** — one live conversation between roy and a harness,
   optionally backed by an agent persona.
 
+## Repository layout
+
+This is a monorepo. Three formerly-separate trees now live here:
+
+- `crates/` + `Cargo.toml` — the Rust workspace (the daemon and every adapter).
+- `workspace/` — the Svelte SPA front-end (formerly the `roy-web` repo).
+- `docker/` — the container bundle: Dockerfiles, `docker-compose*.yml`,
+  nginx config, deploy script (formerly the `roy-docker` repo). The docker
+  build context is this repo root; see `docker/README.md`.
+
 ## Breaking changes (terminology rename + split-store refactor)
 
 The rename unified the vocabulary: every place that called the ACP
