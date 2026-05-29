@@ -41,4 +41,9 @@ pub struct AppState {
     /// boot. Cloneable because `Arc<Catalog>` is. Empty for users without
     /// a yaml file.
     pub catalog: std::sync::Arc<crate::provider_catalog::Catalog>,
+    /// Channel→agent binding store. Wraps an `Arc`'d pool so cloning
+    /// `AppState` is cheap.
+    pub channel_bindings: crate::channel_bindings::Store,
+    /// Bearer token gating `GET /internal/telegram-sources`. `None` disables it.
+    pub internal_token: Option<String>,
 }
