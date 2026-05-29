@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
-use roy::{ClientCommand, Harness, ServerEvent, TurnEvent};
+use roy_protocol::{ClientCommand, Harness, ServerEvent, TurnEvent};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -428,7 +428,7 @@ async fn tool_wait_for_result(socket_path: &Path, args: Value) -> anyhow::Result
 }
 
 async fn tool_fire(socket_path: &Path, args: Value) -> anyhow::Result<String> {
-    use roy::FireTarget;
+    use roy_protocol::FireTarget;
 
     let prompt = args
         .get("prompt")
