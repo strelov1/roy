@@ -406,11 +406,22 @@ async fn create_handler(
         }
     }
     // Validate the connection: owned, telegram_bot, has a non-empty bot_token.
-    let conn = s
-        .connections
-        .get(&uid, &new.connection_id)
-        .await
-        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "unknown connection".into()))?;
+    let conn = match s.connections.get(&uid, &new.connection_id).await {
+        Ok(c) => c,
+        Err(crate::connections::StoreError::Db(e)) => {
+            tracing::error!(error = %e, "channel binding create: connection lookup db error");
+            return Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".into(),
+            ));
+        }
+        Err(_) => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "unknown connection".into(),
+            ))
+        }
+    };
     if conn.kind != crate::connections::KIND_TELEGRAM_BOT {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
