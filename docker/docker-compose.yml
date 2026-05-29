@@ -1,5 +1,5 @@
 # Docker bundle for `roy` (Rust daemon + management API + WS gateway) and
-# `roy-web` (Svelte SPA served by nginx).
+# `roy-workspace` (Svelte SPA served by nginx).
 #
 # Three `roy:local` containers share state through named volumes:
 #   roy-home   → /home/roy/.roy/               (Unix socket + workspace)
@@ -7,6 +7,11 @@
 #   roy-config → /home/roy/.config/roy/        (harnesses.toml, optional gateway.toml override, …)
 #
 # Before first start: cp .env.example .env, set ROY_JWT_SECRET.
+#
+# `name:` pins the Compose project regardless of the directory this file
+# lives in, so `docker compose up -d` always targets the same `roy_*`
+# volumes (no `-p` flag, no volume detachment after a directory move).
+name: roy
 
 services:
   roy-daemon:
@@ -114,14 +119,14 @@ services:
       - ${HOME}/.config/roy/harnesses.toml:/home/roy/.config/roy/harnesses.toml:ro
     restart: unless-stopped
 
-  roy-web:
+  roy-workspace:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.web
+      dockerfile: docker/Dockerfile.workspace
       args:
         VITE_ROY_WS_URL: ${VITE_ROY_WS_URL:-ws://localhost:8788}
-    image: roy-web:local
-    container_name: roy-web
+    image: roy-workspace:local
+    container_name: roy-workspace
     depends_on:
       - roy-management
       - roy-gateway

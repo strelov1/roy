@@ -77,7 +77,7 @@ the harness catalog file in [harnesses-config.md](./harnesses-config.md).
  roy mcp ──── stdio JSON-RPC ────► Claude Desktop / IDE
  roy gateway WS relay  ◄── WS ──── browser / IDE
  roy gateway Telegram  ◄── HTTPS ─ Telegram bots
- roy-management HTTP   ◄── HTTP ── roy-web (SPA) / curl
+ roy-management HTTP   ◄── HTTP ── roy-workspace (SPA) / curl
  roy-scheduler         ── cron ──► roy-scheduler tick
  roy-inbound webhook   ◄── HTTP ── external systems
                   └──────────┬────────────┘
@@ -462,7 +462,7 @@ Two patterns sit on top of existing primitives, no new wire variants:
   `roy inject <human_session> "<question>" --source $ROY_SESSION_ID`.
   The daemon sets `ROY_SESSION_ID` on every spawned ACP child, so the
   agent passes its own session id without the orchestrator templating
-  it in. The human's roy-web renders the `Note` with a clickable link
+  it in. The human's roy-workspace renders the `Note` with a clickable link
   back to the asker's session.
 - **Agent asks agent.** A background agent runs
   `roy ask <target> "<prompt>" [--context "..."] [--timeout 10m]`.

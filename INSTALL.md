@@ -18,7 +18,7 @@ hacking on the code).
 | Management API   | `roy management`                           | `127.0.0.1:8079` (HTTP)          |
 | WS gateway       | `roy gateway --config <file>`              | `:8788` (WebSocket relay)        |
 | Web SPA (dev)    | `npm run dev` in `workspace/`              | `127.0.0.1:5173` (Vite)          |
-| Web SPA (Docker) | nginx in the `roy-web` container           | `:8080`                          |
+| Web SPA (Docker) | nginx in the `roy-workspace` container      | `:8080`                          |
 
 The daemon is the only thing that talks to harnesses; management, gateway,
 and the SPA are clients. The gateway is what the browser connects to — it
@@ -80,9 +80,6 @@ docker compose exec roy-daemon roy status   # health probe
 docker compose down                    # stop
 docker compose down -v                 # stop + wipe all state (DBs, sessions)
 ```
-
-`docker-compose.prod.yml` is for deployments off pre-built `ghcr.io` images;
-the `docker/scripts/deploy.sh` script builds and rolls them out.
 
 ---
 

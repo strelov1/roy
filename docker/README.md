@@ -1,7 +1,7 @@
 # docker
 
 Docker bundle that boots `roy` (Rust daemon + management API + WS gateway)
-and `roy-web` (Svelte SPA on nginx) with a single `docker compose up`.
+and `roy-workspace` (Svelte SPA on nginx) with a single `docker compose up`.
 
 Lives in-tree under `docker/`; the build context is the monorepo root
 (`roy/`), with the Rust workspace at the root and the SPA under `workspace/`.
@@ -13,7 +13,7 @@ Lives in-tree under `docker/`; the build context is the monorepo root
 | `roy-daemon`     | `roy:local`     | `roy serve`                                   | —         |
 | `roy-management` | `roy:local`     | `roy management --addr 0.0.0.0:8079`          | `8079`    |
 | `roy-gateway`    | `roy:local`     | `roy gateway --config /etc/roy/gateway.toml`  | `8788`    |
-| `roy-web`        | `roy-web:local` | `nginx`                                       | `8080`    |
+| `roy-workspace`  | `roy-workspace:local` | `nginx`                                 | `8080`    |
 
 The three `roy:local` containers share state through three named volumes:
 
@@ -45,7 +45,7 @@ you set in `ROY_BOOTSTRAP_PASSWORD`).
 
 ## Traffic flow
 
-- Browser → `http://localhost:8080` → nginx (the `roy-web` container)
+- Browser → `http://localhost:8080` → nginx (the `roy-workspace` container)
 - nginx forwards `/management/*` → `roy-management:8079` (over the docker network)
 - Browser opens a WS to `ws://localhost:8788` → `roy-gateway` → daemon Unix socket
 - `roy-management` and `roy-gateway` reach `roy-daemon` over the shared
@@ -151,7 +151,7 @@ docker compose down -v
   `./harnesses.toml:/home/roy/.config/roy/harnesses.toml:ro`.
 - **Want a different WS URL for the frontend?** Change `VITE_ROY_WS_URL`
   in `.env` and rebuild the web image only:
-  `docker compose build roy-web && docker compose up -d roy-web`.
+  `docker compose build roy-workspace && docker compose up -d roy-workspace`.
 
 ## Limitations
 

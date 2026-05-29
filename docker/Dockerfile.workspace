@@ -1,4 +1,4 @@
-# Multi-stage build for roy-web (Svelte + Vite static SPA).
+# Multi-stage build for roy-workspace (Svelte + Vite static SPA).
 # Final image is nginx serving /dist with a /management proxy to the
 # roy-management service.
 
@@ -13,7 +13,7 @@ COPY workspace/ ./
 
 # Default points the WS client at the local gateway exposed on the host.
 # Override at build time via:
-#   docker compose build --build-arg VITE_ROY_WS_URL=ws://host:8788 roy-web
+#   docker compose build --build-arg VITE_ROY_WS_URL=ws://host:8788 roy-workspace
 ARG VITE_ROY_WS_URL=ws://localhost:8788
 ENV VITE_ROY_WS_URL=$VITE_ROY_WS_URL
 

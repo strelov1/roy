@@ -1,2 +1,7 @@
 .env
 .env.tmp
+
+# Production deployment is an ops concern, kept out of version control:
+# host, domain, and rollout script live only on disk, never committed.
+scripts/deploy.sh
+docker-compose.prod.yml

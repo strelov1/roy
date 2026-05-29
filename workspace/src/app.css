@@ -117,8 +117,20 @@
   * {
     @apply border-border outline-ring/50;
   }
+  html,
+  body {
+    height: 100%;
+  }
   body {
     @apply bg-background text-foreground font-sans antialiased;
+    /* Lock the document so the app behaves like a native shell on mobile:
+       the body is pinned to the viewport (no iOS rubber-band overscroll,
+       no whole-page scroll). Only inner overflow-auto regions — the message
+       list, the sidebar — scroll; the shell itself never moves. */
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
   }
 }
 
