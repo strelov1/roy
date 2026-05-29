@@ -384,7 +384,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
                     Some(McpCmd::Serve { socket }) => socket,
                     _ => args.socket,
                 }
-                .unwrap_or_else(default_socket);
+                .unwrap_or_else(roy::wire::default_socket_path);
                 roy_mcp::run(socket).await.map(|()| ExitCode::SUCCESS)
             }
             Some(McpCmd::ServeConnections(sc_args)) => roy_mcp::serve_connections::run(sc_args)
@@ -467,14 +467,6 @@ fn init_tracing() {
         .try_init();
 }
 
-fn default_socket() -> PathBuf {
-    if let Ok(s) = std::env::var("ROY_SOCKET") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".roy/daemon.sock")
-}
-
 fn default_journal_dir() -> PathBuf {
     if let Ok(s) = std::env::var("ROY_JOURNAL_DIR") {
         return PathBuf::from(s);
@@ -492,7 +484,7 @@ fn default_workspace_dir() -> PathBuf {
 }
 
 async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
-    let socket = args.socket.unwrap_or_else(default_socket);
+    let socket = args.socket.unwrap_or_else(roy::wire::default_socket_path);
     let journal_dir = args.journal_dir.unwrap_or_else(default_journal_dir);
     let workspace_dir = args.workspace_dir.unwrap_or_else(default_workspace_dir);
     let daemon = Arc::new(
@@ -523,7 +515,7 @@ async fn cmd_serve(args: ServeArgs) -> anyhow::Result<()> {
 /// daemon is running. The default socket path is `~/.roy/daemon.sock` and
 /// `ROY_SOCKET` overrides it.
 async fn connect() -> anyhow::Result<UnixStream> {
-    let path = default_socket();
+    let path = roy::wire::default_socket_path();
     UnixStream::connect(&path).await.map_err(|e| {
         anyhow!(
             "no daemon at {} ({e}) — start it with `roy serve`",
@@ -549,7 +541,7 @@ async fn open_daemon() -> anyhow::Result<(
 /// `pid` is the value in `<socket>.pid` if present — useful for diagnostics
 /// when `status="down"` (a stale pid file means a crashed daemon).
 async fn cmd_status() -> ExitCode {
-    let socket = default_socket();
+    let socket = roy::wire::default_socket_path();
     let pid_path = roy::pid_lock::pid_path_for_socket(&socket);
     let pid = roy::pid_lock::peek_pid(&pid_path);
     let (status, exit, error) = match UnixStream::connect(&socket).await {
@@ -568,9 +560,7 @@ async fn cmd_status() -> ExitCode {
 }
 
 async fn send_cmd<W: AsyncWriteExt + Unpin>(w: &mut W, cmd: &ClientCommand) -> anyhow::Result<()> {
-    let line = serde_json::to_string(cmd)?;
-    w.write_all(line.as_bytes()).await?;
-    w.write_all(b"\n").await?;
+    w.write_all(&roy::wire::encode_line(cmd)?).await?;
     w.flush().await?;
     Ok(())
 }
@@ -1230,7 +1220,7 @@ async fn read_event<R: AsyncBufReadExt + Unpin>(
         .next_line()
         .await?
         .ok_or_else(|| anyhow!("daemon hung up"))?;
-    Ok(serde_json::from_str(line.trim())?)
+    Ok(roy::wire::decode_line(&line)?)
 }
 
 async fn drain_until_terminal_result<R: AsyncBufReadExt + Unpin>(

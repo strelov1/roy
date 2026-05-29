@@ -55,9 +55,9 @@ pub async fn fire(
         .with_context(|| format!("connecting to roy daemon at {}", socket_path.display()))?;
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
-    let line = serde_json::to_string(&cmd)?;
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
+    writer
+        .write_all(&roy_protocol::wire::encode_line(&cmd)?)
+        .await?;
     writer.flush().await?;
 
     loop {
@@ -65,7 +65,7 @@ pub async fn fire(
             .next_line()
             .await?
             .ok_or_else(|| anyhow!("daemon hung up before terminal Fire event"))?;
-        let evt: ServerEvent = serde_json::from_str(raw.trim())?;
+        let evt: ServerEvent = roy_protocol::wire::decode_line(&raw)?;
         match evt {
             ServerEvent::FireDone {
                 session,

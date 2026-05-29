@@ -69,7 +69,7 @@ impl DaemonClient for UnixSocketDaemonClient {
                 .next_line()
                 .await?
                 .ok_or_else(|| anyhow!("daemon hung up before Spawned"))?;
-            match serde_json::from_str::<ServerEvent>(raw.trim())? {
+            match roy_protocol::wire::decode_line::<ServerEvent>(&raw)? {
                 ServerEvent::Spawning { .. } => continue,
                 ServerEvent::Spawned { session, .. } => return Ok(session),
                 ServerEvent::Error { code, message, .. } => {
@@ -91,7 +91,7 @@ impl DaemonClient for UnixSocketDaemonClient {
                 .next_line()
                 .await?
                 .ok_or_else(|| anyhow!("daemon hung up before Closed"))?;
-            match serde_json::from_str::<ServerEvent>(raw.trim())? {
+            match roy_protocol::wire::decode_line::<ServerEvent>(&raw)? {
                 ServerEvent::Closed { .. } => return Ok(()),
                 ServerEvent::Error { code, message, .. } => {
                     return Err(anyhow!("daemon error [{code}]: {message}"))
@@ -117,7 +117,7 @@ impl DaemonClient for UnixSocketDaemonClient {
                 .await?
                 .ok_or_else(|| anyhow!("daemon hung up before HarnessesList"))?;
             let trimmed = raw.trim();
-            match serde_json::from_str::<ServerEvent>(trimmed)? {
+            match roy_protocol::wire::decode_line::<ServerEvent>(&raw)? {
                 ServerEvent::HarnessesList { .. } => return Ok(serde_json::from_str(trimmed)?),
                 ServerEvent::Error { code, message, .. } => {
                     return Err(anyhow!("daemon error [{code}]: {message}"))
@@ -135,7 +135,7 @@ async fn list_inner(socket: &Path, cmd: ClientCommand) -> Result<Vec<String>> {
             .next_line()
             .await?
             .ok_or_else(|| anyhow!("daemon hung up"))?;
-        match serde_json::from_str::<ServerEvent>(raw.trim())? {
+        match roy_protocol::wire::decode_line::<ServerEvent>(&raw)? {
             ServerEvent::Listed { sessions } | ServerEvent::ListedArchived { sessions } => {
                 return Ok(sessions.into_iter().map(|s| s.session).collect());
             }
@@ -155,9 +155,9 @@ async fn connect_and_send(
         .await
         .with_context(|| format!("connecting to roy daemon at {}", socket.display()))?;
     let (reader, mut writer) = stream.into_split();
-    let line = serde_json::to_string(cmd)?;
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
+    writer
+        .write_all(&roy_protocol::wire::encode_line(cmd)?)
+        .await?;
     writer.flush().await?;
     Ok(BufReader::new(reader).lines())
 }

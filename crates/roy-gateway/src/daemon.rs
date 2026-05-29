@@ -87,9 +87,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TurnConn<S> {
     }
 
     async fn send_cmd(&mut self, cmd: &ClientCommand) -> Result<()> {
-        let line = serde_json::to_string(cmd).context("serializing ClientCommand")?;
-        self.write_half.write_all(line.as_bytes()).await?;
-        self.write_half.write_all(b"\n").await?;
+        self.write_half
+            .write_all(&roy_protocol::wire::encode_line(cmd)?)
+            .await?;
         self.write_half.flush().await?;
         Ok(())
     }
@@ -98,7 +98,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TurnConn<S> {
         let Some(raw) = self.lines.next_line().await? else {
             return Err(anyhow!("daemon closed connection"));
         };
-        serde_json::from_str(&raw).with_context(|| format!("parsing daemon line: {raw}"))
+        roy_protocol::wire::decode_line(&raw).with_context(|| format!("parsing daemon line: {raw}"))
     }
 }
 
