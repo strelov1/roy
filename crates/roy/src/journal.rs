@@ -9,53 +9,20 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use crate::error::{Result, RoyError};
-use crate::event::{event_from_json, TurnEvent};
+use crate::event::TurnEvent;
 
-pub type Seq = u64;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct JournalEntry {
-    pub seq: Seq,
-    /// Wall-clock millis since epoch. `seq` is still the ordering key — many
-    /// events share a millisecond during a streamed turn.
-    pub ts_ms: u64,
-    pub event: TurnEvent,
-}
+pub use roy_protocol::journal::{parse_entry_line, JournalEntry, Seq};
 
 fn unix_now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-/// Parse one JSONL line into a `JournalEntry`. Single source of truth for the
-/// on-disk format — used by both `Journal::resume`, the disk-fallback inside
-/// `Journal::replay_from`, and `ArchivedJournal::replay_from`. Returns
-/// `Protocol` errors with the offending line so a corrupt journal surfaces
-/// clearly instead of silently dropping entries.
-fn parse_entry_line(line: &str) -> Result<JournalEntry> {
-    let v: Value = serde_json::from_str(line).map_err(|e| RoyError::Protocol(e.to_string()))?;
-    let seq = v
-        .get("seq")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| RoyError::Protocol(format!("journal entry missing seq: {line}")))?;
-    let ts_ms = v
-        .get("ts_ms")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| RoyError::Protocol(format!("journal entry missing ts_ms: {line}")))?;
-    let event = event_from_json(
-        v.get("event")
-            .ok_or_else(|| RoyError::Protocol(format!("journal entry missing event: {line}")))?,
-    )?;
-    Ok(JournalEntry { seq, ts_ms, event })
 }
 
 pub struct Journal {
