@@ -53,14 +53,21 @@ class ChannelsState extends LoadableStore<ChannelBinding> {
       this.list = [binding, ...this.list];
       return binding;
     } catch (e) {
-      // Best-effort rollback. Swallow its error so the user sees the real
-      // bind failure, not a secondary cleanup error.
-      try {
-        await connApi.remove(conn.id);
-      } catch {
-        /* leave the orphan; surface the original error below */
-      }
+      // Roll back the just-created connection so a failed bind leaves no
+      // orphan credential, then surface the original bind error.
+      await this.tryRemoveConnection(conn.id);
       throw e;
+    }
+  }
+
+  /// Best-effort connection delete. Swallows errors: a leftover connection is
+  /// harmless and re-deletable, and we never want cleanup failure to mask the
+  /// real error (rollback) or block the list update (delete).
+  private async tryRemoveConnection(id: string): Promise<void> {
+    try {
+      await connApi.remove(id);
+    } catch {
+      /* leave the orphan */
     }
   }
 
@@ -88,11 +95,7 @@ class ChannelsState extends LoadableStore<ChannelBinding> {
   /// Delete the binding, then its connection (so the credential is gone too).
   async removeChannel(binding: ChannelBinding): Promise<void> {
     await api.remove(binding.id);
-    try {
-      await connApi.remove(binding.connection_id);
-    } catch {
-      /* binding already gone; an orphan connection is harmless and re-deletable */
-    }
+    await this.tryRemoveConnection(binding.connection_id);
     this.list = this.list.filter((b) => b.id !== binding.id);
   }
 }

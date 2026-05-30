@@ -5,7 +5,8 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import * as Select from '$lib/components/ui/select';
   import { channelsStore, type ChannelType } from './channels.svelte';
-  import { agents as agentsApi, type WireAgent, type SessionStrategy } from './management-client';
+  import { agentsStore, type Agent } from './agents.svelte';
+  import { type SessionStrategy } from './management-client';
   import { errMsg } from './utils';
 
   let {
@@ -31,14 +32,13 @@
   let strategy = $state<SessionStrategy>('per_sender_sticky');
   let idleMinutes = $state(60);
   let allowlistRaw = $state('');
-  let agentList = $state<WireAgent[]>([]);
   let submitting = $state(false);
   let error = $state<string | null>(null);
 
-  function scopeString(a: WireAgent): string {
-    return a.scope.kind === 'team' && a.scope.team_id ? `team:${a.scope.team_id}` : 'user';
+  function scopeString(a: Agent): string {
+    return a.scope.kind === 'team' ? `team:${a.scope.team_id}` : 'user';
   }
-  function encode(a: WireAgent): string {
+  function encode(a: Agent): string {
     return `${scopeString(a)}::${a.slug}`;
   }
 
@@ -51,8 +51,11 @@
   const channelTypeLabel = $derived(
     CHANNEL_TYPES.find((c) => c.value === channelType)?.label ?? '',
   );
+  // Builtin agents can't be bound (no builtin scope dir on the backend), so
+  // they never appear in the picker.
+  const agentChoices = $derived(agentsStore.list.filter((a) => a.scope.kind !== 'builtin'));
   const selectedAgentLabel = $derived(
-    agentList.find((a) => encode(a) === agentValue)?.name ?? 'Select an agent',
+    agentChoices.find((a) => encode(a) === agentValue)?.name ?? 'Select an agent',
   );
   const strategyLabel = $derived(
     STRATEGIES.find((s) => s.value === strategy)?.label ?? '',
@@ -69,13 +72,9 @@
       idleMinutes = 60;
       allowlistRaw = '';
       error = null;
-      // Builtin agents can't be bound — channel bindings resolve agents under
-      // the user's / team's scope dir, and there is no builtin scope there.
-      // Offering them would guarantee a 400, so drop them from the picker.
-      void agentsApi
-        .list()
-        .then((a) => (agentList = a.filter((x) => x.scope.kind !== 'builtin')))
-        .catch((e) => (error = errMsg(e)));
+      // Reuse the shared agents store — cached across opens, with the same
+      // harness/scope filtering AgentsView uses.
+      void agentsStore.load();
     }
   });
 
@@ -176,7 +175,7 @@
         <Select.Root type="single" bind:value={agentValue}>
           <Select.Trigger class="w-full">{selectedAgentLabel}</Select.Trigger>
           <Select.Content>
-            {#each agentList as a (encode(a))}
+            {#each agentChoices as a (encode(a))}
               <Select.Item value={encode(a)}>{a.name} ({a.harness})</Select.Item>
             {/each}
           </Select.Content>

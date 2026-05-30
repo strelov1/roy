@@ -24,6 +24,8 @@ const KNOWN_SCOPES: ReadonlySet<string> = new Set<AgentScope['kind']>([
 ]);
 
 export type Agent = {
+  /** File stem (`<slug>.md`) — stable id used by channel bindings. */
+  slug: string;
   name: string;
   description: string;
   harness: Harness;
@@ -51,6 +53,7 @@ class AgentsState extends LoadableStore<Agent> {
           return true;
         })
         .map((a) => ({
+          slug: a.slug,
           name: a.name,
           description: a.description,
           harness: a.harness as Harness,

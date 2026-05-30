@@ -14,8 +14,8 @@
   let dialogOpen = $state(false);
 
   onMount(() => {
-    void channelsStore.load();
-    void connectionsStore.load();
+    // Independent fetches — load concurrently.
+    void Promise.all([channelsStore.load(), connectionsStore.load()]);
   });
 
   // connection_id → channel name, for display.
